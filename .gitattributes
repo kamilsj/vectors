@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.vdb binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.svg text eol=lf

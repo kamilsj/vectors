@@ -1,0 +1,7 @@
+/target/
+*.vdb
+*.tmp
+*.bak
+.DS_Store
+.idea/
+.git.dropbox-backup/

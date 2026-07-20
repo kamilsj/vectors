@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="vectors — a SQL-first vector database written in Rust">
+  <title>vectors console</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <div>
+          <strong>vectors</strong>
+          <small>SQL-first vector database</small>
+        </div>
+      </div>
+
+      <nav class="primary-nav" aria-label="Workspace">
+        <button class="nav-item active" data-view="console" type="button">
+          <span class="nav-icon">⌘</span><span>SQL console</span>
+        </button>
+        <button class="nav-item" data-view="search" type="button">
+          <span class="nav-icon">◎</span><span>Vector search</span>
+        </button>
+        <button class="nav-item" data-view="guide" type="button">
+          <span class="nav-icon">?</span><span>Start here</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section">
+        <div class="section-heading">
+          <span>Tables</span>
+          <button id="refresh-tables" class="icon-button" type="button" title="Refresh tables">↻</button>
+        </div>
+        <div id="table-list" class="table-list" aria-live="polite">
+          <div class="sidebar-empty">Connect to browse tables</div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="connection-button" class="connection" type="button">
+          <span id="status-dot" class="status-dot"></span>
+          <span><strong id="status-label">Connecting</strong><small>localhost</small></span>
+          <span class="connection-arrow">›</span>
+        </button>
+        <div class="version">vectors <span id="app-version">0.1.0</span></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <button id="mobile-menu" class="mobile-menu" type="button" aria-label="Toggle navigation">☰</button>
+        <div>
+          <span class="eyebrow">LOCAL WORKSPACE</span>
+          <h1 id="view-title">SQL console</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="shortcut-hint"><kbd>Ctrl</kbd><kbd>Enter</kbd> to run</span>
+          <button id="open-token" class="button ghost" type="button">API token</button>
+          <button id="top-guide" class="button ghost" type="button">Docs</button>
+        </div>
+      </header>
+
+      <section id="view-console" class="view active">
+        <div class="stats-grid" aria-label="Database overview">
+          <article class="stat-card accent-a">
+            <span class="stat-label">Tables</span>
+            <strong id="stat-tables">—</strong>
+            <small>in memory</small>
+          </article>
+          <article class="stat-card accent-b">
+            <span class="stat-label">Rows</span>
+            <strong id="stat-rows">—</strong>
+            <small>across all tables</small>
+          </article>
+          <article class="stat-card accent-c">
+            <span class="stat-label">Indexes</span>
+            <strong id="stat-indexes">—</strong>
+            <small>scalar hash indexes</small>
+          </article>
+          <article class="stat-card accent-d">
+            <span class="stat-label">Revision</span>
+            <strong id="stat-revision">—</strong>
+            <small>committed catalog</small>
+          </article>
+        </div>
+
+        <div class="console-grid">
+          <section class="panel editor-panel">
+            <div class="panel-header">
+              <div>
+                <span class="panel-kicker">QUERY</span>
+                <h2>Write SQL. Search vectors.</h2>
+              </div>
+              <div class="editor-actions">
+                <label class="select-label">
+                  <span class="sr-only">Load example</span>
+                  <select id="example-select">
+                    <option value="quickstart">Quickstart dataset</option>
+                    <option value="hybrid">Hybrid similarity search</option>
+                    <option value="upsert">Atomic vector upsert</option>
+                    <option value="aggregate">Aggregate by category</option>
+                  </select>
+                </label>
+                <button id="format-sql" class="button ghost compact" type="button">Clean up</button>
+                <button id="run-sql" class="button primary compact" type="button">
+                  <span>Run query</span><span aria-hidden="true">▶</span>
+                </button>
+              </div>
+            </div>
+            <div class="editor-wrap">
+              <div class="line-numbers" id="line-numbers" aria-hidden="true">1</div>
+              <textarea id="sql-editor" spellcheck="false" aria-label="SQL editor"></textarea>
+            </div>
+            <div class="editor-footer">
+              <span>SQL</span>
+              <span id="editor-status">Ready</span>
+            </div>
+          </section>
+
+          <aside id="table-inspector" class="panel inspector-panel">
+            <div class="empty-inspector">
+              <div class="empty-icon">⌗</div>
+              <h3>Select a table</h3>
+              <p>Inspect columns and indexes, then generate a query with one click.</p>
+            </div>
+          </aside>
+        </div>
+
+        <section class="panel results-panel">
+          <div class="panel-header results-header">
+            <div>
+              <span class="panel-kicker">RESULTS</span>
+              <h2 id="results-title">No query run yet</h2>
+            </div>
+            <div id="query-metrics" class="query-metrics"></div>
+          </div>
+          <div id="sql-results" class="results-empty">
+            <div class="result-placeholder">
+              <span>→</span>
+              <p>Run the quickstart to create a sample dataset and see relational + vector search in one statement.</p>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-search" class="view">
+        <div class="page-intro">
+          <span class="eyebrow">STRUCTURED API</span>
+          <h2>Vector search without building SQL</h2>
+          <p>Choose a vector column, add an optional relational filter, and inspect the exact nearest-neighbor results.</p>
+        </div>
+        <div class="search-layout">
+          <form id="search-form" class="panel search-form">
+            <div class="form-section">
+              <span class="step-number">01</span>
+              <div class="form-section-body">
+                <h3>Search space</h3>
+                <div class="form-row two">
+                  <label>Table<select id="search-table" required><option value="">Choose a table</option></select></label>
+                  <label>Vector column<select id="search-vector-column" required><option value="">Choose a vector</option></select></label>
+                </div>
+              </div>
+            </div>
+            <div class="form-section">
+              <span class="step-number">02</span>
+              <div class="form-section-body">
+                <h3>Query vector</h3>
+                <label>Comma-separated values
+                  <textarea id="search-vector" rows="4" placeholder="1.0, 0.0, 0.0" required></textarea>
+                </label>
+                <div id="dimension-hint" class="field-hint">Select a vector column to see its dimensions.</div>
+                <div class="form-row two">
+                  <label>Metric
+                    <select id="search-metric">
+                      <option value="cosine">Cosine distance</option>
+                      <option value="l2">Euclidean distance</option>
+                      <option value="squared_l2">Squared L2</option>
+                      <option value="dot_product">Dot product</option>
+                    </select>
+                  </label>
+                  <label>Limit<input id="search-limit" type="number" min="1" max="1000" value="10"></label>
+                </div>
+              </div>
+            </div>
+            <div class="form-section">
+              <span class="step-number">03</span>
+              <div class="form-section-body">
+                <h3>Relational filter <small>optional</small></h3>
+                <div class="form-row filter-row">
+                  <label>Column<select id="filter-column"><option value="">No filter</option></select></label>
+                  <label>Operator
+                    <select id="filter-operator">
+                      <option value="eq">=</option><option value="ne">≠</option>
+                      <option value="gt">&gt;</option><option value="gte">≥</option>
+                      <option value="lt">&lt;</option><option value="lte">≤</option>
+                    </select>
+                  </label>
+                  <label>Value<input id="filter-value" placeholder="tech"></label>
+                </div>
+                <label>Return columns <small>comma-separated, blank for all scalar columns</small>
+                  <input id="search-select" placeholder="id, title, category">
+                </label>
+              </div>
+            </div>
+            <button class="button primary search-submit" type="submit">Run vector search <span>→</span></button>
+          </form>
+
+          <section class="panel search-results-panel">
+            <div class="panel-header">
+              <div><span class="panel-kicker">NEAREST NEIGHBORS</span><h2 id="search-results-title">Waiting for a query</h2></div>
+            </div>
+            <div id="search-results" class="results-empty">
+              <div class="search-orbit" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
+              <p>Results are ranked by distance and returned with the number of rows examined.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="view-guide" class="view">
+        <div class="guide-hero">
+          <div>
+            <span class="eyebrow">START IN FIVE MINUTES</span>
+            <h2>Relational filters meet vector similarity.</h2>
+            <p>vectors keeps the workflow deliberately familiar: define a schema, insert embeddings, and query everything with SQL.</p>
+            <button class="button primary" data-load-example="quickstart" type="button">Load the quickstart <span>→</span></button>
+          </div>
+          <div class="hero-query" aria-label="Example SQL query">
+            <div class="code-dots"><i></i><i></i><i></i></div>
+            <pre><code><span>SELECT</span> id, title,
+  cosine_distance(
+    embedding,
+    ARRAY[1, 0, 0]
+  ) <em>AS</em> distance
+<span>FROM</span> documents
+<span>WHERE</span> category = 'tech'
+<span>ORDER BY</span> distance
+<span>LIMIT</span> 5;</code></pre>
+          </div>
+        </div>
+
+        <div class="concept-grid">
+          <article><span class="concept-number">01</span><h3>Use real SQL</h3><p>Keep identifiers, metadata, filters, aggregates, and embeddings in one query language.</p></article>
+          <article><span class="concept-number">02</span><h3>Store typed vectors</h3><p><code>VECTOR(n)</code> columns enforce dimensions while cached norms accelerate repeated distance calculations.</p></article>
+          <article><span class="concept-number">03</span><h3>Search hybrid</h3><p>Hash-indexed scalar predicates prune candidates before exact vector distance evaluation.</p></article>
+        </div>
+
+        <section class="workflow panel">
+          <div class="workflow-copy">
+            <span class="panel-kicker">CORE WORKFLOW</span>
+            <h2>One engine, three ways in</h2>
+            <p>Embed the Rust library, use the interactive shell, or run the Actix HTTP server and this console.</p>
+          </div>
+          <div class="workflow-list">
+            <div><strong>01</strong><span><b>Model</b><small>CREATE TABLE with VECTOR dimensions</small></span></div>
+            <div><strong>02</strong><span><b>Ingest</b><small>SQL inserts or typed bulk JSON</small></span></div>
+            <div><strong>03</strong><span><b>Query</b><small>Exact hybrid search with standard SQL</small></span></div>
+            <div><strong>04</strong><span><b>Persist</b><small>Checksummed, atomic snapshots</small></span></div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="token-dialog">
+    <form method="dialog" class="token-card">
+      <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+      <span class="panel-kicker">AUTHENTICATION</span>
+      <h2>Connect to vectors</h2>
+      <p>If the server uses <code>VECTORS_API_TOKEN</code>, enter it here. It stays in this browser tab.</p>
+      <label>Bearer token<input id="token-input" type="password" autocomplete="off" placeholder="Paste API token"></label>
+      <div class="dialog-actions">
+        <button id="clear-token" class="button ghost" value="cancel" type="button">Clear token</button>
+        <button id="save-token" class="button primary" value="default" type="button">Save and connect</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

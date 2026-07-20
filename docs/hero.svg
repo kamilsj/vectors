@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">vectors — SQL-first vector database</title>
+  <desc id="desc">A dark product banner showing a hybrid SQL similarity query and ranked results.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#090d0f"/>
+      <stop offset="1" stop-color="#12191c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="72%" cy="30%" r="65%">
+      <stop offset="0" stop-color="#65d9e8" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#65d9e8" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="420" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="420" rx="24" fill="url(#glow)"/>
+  <g opacity=".11" stroke="#8f9ba0">
+    <path d="M0 70h1200M0 140h1200M0 210h1200M0 280h1200M0 350h1200"/>
+    <path d="M100 0v420M200 0v420M300 0v420M400 0v420M500 0v420M600 0v420M700 0v420M800 0v420M900 0v420M1000 0v420M1100 0v420"/>
+  </g>
+
+  <g transform="translate(62 63)">
+    <g transform="rotate(45 23 23)" fill="none" stroke-width="3">
+      <rect x="3" y="3" width="15" height="15" stroke="#c8f560"/>
+      <rect x="28" y="3" width="15" height="15" stroke="#65d9e8"/>
+      <rect x="3" y="28" width="15" height="15" stroke="#ff9e64"/>
+      <rect x="28" y="28" width="15" height="15" stroke="#b8a5ff"/>
+    </g>
+    <text x="72" y="29" fill="#f4f1e8" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="29" font-weight="700">vectors</text>
+    <text x="72" y="49" fill="#8f9ba0" font-family="Inter, Segoe UI, sans-serif" font-size="12" letter-spacing="1.3">SQL-FIRST VECTOR DATABASE</text>
+
+    <text x="0" y="115" fill="#f4f1e8" font-family="Inter, Segoe UI, sans-serif" font-size="39" font-weight="680" letter-spacing="-1.3">Keep your vectors in SQL.</text>
+    <text x="0" y="153" fill="#f4f1e8" font-family="Inter, Segoe UI, sans-serif" font-size="39" font-weight="680" letter-spacing="-1.3">Search without leaving it.</text>
+    <text x="0" y="190" fill="#8f9ba0" font-family="Inter, Segoe UI, sans-serif" font-size="15">Relational filters + exact vector similarity · Rust · Actix Web</text>
+
+    <g transform="translate(0 228)">
+      <rect width="118" height="36" rx="6" fill="#c8f560"/>
+      <text x="59" y="23" text-anchor="middle" fill="#11180a" font-family="Inter, Segoe UI, sans-serif" font-size="12" font-weight="700">cargo run</text>
+      <rect x="129" width="142" height="36" rx="6" fill="#151b1f" stroke="#39464c"/>
+      <text x="200" y="23" text-anchor="middle" fill="#d7dddd" font-family="Inter, Segoe UI, sans-serif" font-size="12">open the console</text>
+    </g>
+  </g>
+
+  <g transform="translate(625 47)" filter="url(#shadow)">
+    <rect width="514" height="326" rx="14" fill="#0b1012" stroke="#39464c"/>
+    <path d="M0 44h514" stroke="#273136"/>
+    <circle cx="21" cy="22" r="4" fill="#ff716d"/>
+    <circle cx="35" cy="22" r="4" fill="#ff9e64"/>
+    <circle cx="49" cy="22" r="4" fill="#c8f560"/>
+    <text x="73" y="26" fill="#667278" font-family="ui-monospace, monospace" font-size="10">hybrid-search.sql</text>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5">
+      <text x="24" y="75" fill="#65d9e8">SELECT</text>
+      <text x="78" y="75" fill="#dfe5de">id, title,</text>
+      <text x="42" y="98" fill="#dfe5de">cosine_distance(embedding, ARRAY[1, 0, 0])</text>
+      <text x="385" y="98" fill="#b8a5ff">AS</text>
+      <text x="405" y="98" fill="#dfe5de">distance</text>
+      <text x="24" y="121" fill="#65d9e8">FROM</text>
+      <text x="67" y="121" fill="#dfe5de">documents</text>
+      <text x="24" y="144" fill="#65d9e8">WHERE</text>
+      <text x="75" y="144" fill="#dfe5de">category =</text>
+      <text x="166" y="144" fill="#ff9e64">'tech'</text>
+      <text x="24" y="167" fill="#65d9e8">ORDER BY</text>
+      <text x="94" y="167" fill="#dfe5de">distance</text>
+      <text x="24" y="190" fill="#65d9e8">LIMIT</text>
+      <text x="75" y="190" fill="#dfe5de">5;</text>
+    </g>
+
+    <g transform="translate(22 216)" font-family="ui-monospace, monospace">
+      <rect width="470" height="84" rx="7" fill="#12191c" stroke="#273136"/>
+      <text x="14" y="22" fill="#667278" font-size="9">ID</text>
+      <text x="55" y="22" fill="#667278" font-size="9">TITLE</text>
+      <text x="384" y="22" fill="#667278" font-size="9">DISTANCE</text>
+      <path d="M0 31h470M0 57h470" stroke="#273136"/>
+      <text x="14" y="49" fill="#dfe5de" font-size="10">1</text>
+      <text x="55" y="49" fill="#dfe5de" font-size="10">Rust for data systems</text>
+      <text x="384" y="49" fill="#c8f560" font-size="10">0.0000</text>
+      <text x="14" y="75" fill="#dfe5de" font-size="10">3</text>
+      <text x="55" y="75" fill="#dfe5de" font-size="10">Inside database engines</text>
+      <text x="384" y="75" fill="#c8f560" font-size="10">0.0233</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,3240 @@
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::fmt;
+use std::path::Path;
+use std::sync::{Arc, Mutex, RwLock};
+
+use sqlparser::ast::{
+    Assignment, BinaryOperator, ColumnDef, ColumnOption, ConflictTarget, DoUpdate, Expr, Function,
+    FunctionArg, FunctionArgExpr, Ident, ObjectName, ObjectType, OnConflictAction, OnInsert,
+    OrderByExpr, Query, Select, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
+    TableWithJoins, UnaryOperator, Value as SqlValue,
+};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
+
+use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
+
+/// Logical types supported by the in-memory storage engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DataType {
+    Integer,
+    Float,
+    Text,
+    Boolean,
+    Vector(usize),
+}
+
+impl fmt::Display for DataType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer => formatter.write_str("INTEGER"),
+            Self::Float => formatter.write_str("DOUBLE"),
+            Self::Text => formatter.write_str("TEXT"),
+            Self::Boolean => formatter.write_str("BOOLEAN"),
+            Self::Vector(dimensions) => write!(formatter, "VECTOR({dimensions})"),
+        }
+    }
+}
+
+/// A stored SQL value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Null,
+    Integer(i64),
+    Float(f64),
+    Text(String),
+    Boolean(bool),
+    Vector(Vector),
+}
+
+impl Value {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Null => "NULL",
+            Self::Integer(_) => "INTEGER",
+            Self::Float(_) => "FLOAT",
+            Self::Text(_) => "TEXT",
+            Self::Boolean(_) => "BOOLEAN",
+            Self::Vector(_) => "VECTOR",
+        }
+    }
+
+    fn as_bool(&self) -> Result<Option<bool>> {
+        match self {
+            Self::Boolean(value) => Ok(Some(*value)),
+            Self::Null => Ok(None),
+            value => Err(type_mismatch("BOOLEAN", value)),
+        }
+    }
+
+    fn as_f64(&self) -> Result<Option<f64>> {
+        match self {
+            Self::Integer(value) => Ok(Some(*value as f64)),
+            Self::Float(value) => Ok(Some(*value)),
+            Self::Null => Ok(None),
+            value => Err(type_mismatch("numeric value", value)),
+        }
+    }
+
+    fn as_vector(&self) -> Result<Option<&Vector>> {
+        match self {
+            Self::Vector(value) => Ok(Some(value)),
+            Self::Null => Ok(None),
+            value => Err(type_mismatch("VECTOR", value)),
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("NULL"),
+            Self::Integer(value) => write!(formatter, "{value}"),
+            Self::Float(value) => write!(formatter, "{value}"),
+            Self::Text(value) => formatter.write_str(value),
+            Self::Boolean(value) => write!(formatter, "{value}"),
+            Self::Vector(value) => write!(formatter, "{value}"),
+        }
+    }
+}
+
+/// A column in a table schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Column {
+    pub name: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+    pub unique: bool,
+}
+
+/// Rows and column labels produced by `SELECT`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+    /// Number of source rows evaluated after index pruning.
+    pub rows_examined: usize,
+}
+
+impl QueryResult {
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// Read-only metadata for a scalar hash index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexInfo {
+    pub name: String,
+    pub column: String,
+}
+
+/// Read-only summary of a table and its in-memory footprint shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableInfo {
+    pub name: String,
+    pub row_count: usize,
+    pub column_count: usize,
+    pub index_count: usize,
+}
+
+/// Result of one SQL statement.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExecutionResult {
+    Query(QueryResult),
+    Command {
+        tag: &'static str,
+        rows_affected: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Table {
+    pub(crate) columns: Vec<Column>,
+    pub(crate) rows: Vec<Vec<Value>>,
+    pub(crate) indexes: HashMap<String, HashIndex>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HashIndex {
+    pub(crate) column: usize,
+    buckets: HashMap<UniqueKey, Vec<usize>>,
+}
+
+#[derive(Clone, Default, Debug)]
+pub(crate) struct Catalog {
+    pub(crate) tables: HashMap<String, Table>,
+    pub(crate) revision: u64,
+}
+
+impl Catalog {
+    fn mark_changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+/// A cloneable database handle. Clones share one thread-safe catalog.
+#[derive(Clone, Default, Debug)]
+pub struct Database {
+    catalog: Arc<RwLock<Catalog>>,
+    snapshot_lock: Arc<Mutex<()>>,
+}
+
+impl Database {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Open a database from a versioned binary snapshot.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            catalog: Arc::new(RwLock::new(storage::load(path.as_ref())?)),
+            snapshot_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    /// Save a coherent database snapshot using temporary-file replacement.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.save_snapshot(path.as_ref(), None).map(|_| ())
+    }
+
+    /// Save a snapshot only when the catalog changed after `last_revision`.
+    ///
+    /// The returned revision identifies the catalog copy written to disk. A
+    /// `None` result means no disk I/O was needed.
+    pub fn save_if_changed(
+        &self,
+        path: impl AsRef<Path>,
+        last_revision: u64,
+    ) -> Result<Option<u64>> {
+        self.save_snapshot(path.as_ref(), Some(last_revision))
+    }
+
+    /// Return the current in-process catalog revision.
+    pub fn revision(&self) -> Result<u64> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        Ok(catalog.revision)
+    }
+
+    fn save_snapshot(&self, path: &Path, last_revision: Option<u64>) -> Result<Option<u64>> {
+        // Serialize checkpoints from cloned handles, then release the catalog
+        // lock as soon as a coherent copy has been captured. Disk I/O must not
+        // stall writers.
+        let _snapshot_guard = self.snapshot_lock.lock().map_err(|_| Error::LockPoisoned)?;
+        let (catalog, revision) = {
+            let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+            if last_revision == Some(catalog.revision) {
+                return Ok(None);
+            }
+            (catalog.clone(), catalog.revision)
+        };
+        storage::save(&catalog, path)?;
+        Ok(Some(revision))
+    }
+
+    /// Parse and execute one or more semicolon-separated SQL statements.
+    ///
+    /// A multi-statement request containing a write is applied to a private
+    /// catalog snapshot first and committed under one write lock. If any
+    /// statement fails, none of the writes in that request become visible.
+    pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
+        let statements = Parser::parse_sql(&GenericDialect {}, sql)
+            .map_err(|error| Error::Parse(error.to_string()))?;
+        if statements.len() <= 1
+            || statements
+                .iter()
+                .all(|statement| matches!(statement, Statement::Query(_)))
+        {
+            return statements
+                .into_iter()
+                .map(|statement| self.execute_statement(statement))
+                .collect();
+        }
+
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let staging = Self {
+            catalog: Arc::new(RwLock::new(catalog.clone())),
+            snapshot_lock: self.snapshot_lock.clone(),
+        };
+        let results = statements
+            .into_iter()
+            .map(|statement| staging.execute_statement(statement))
+            .collect::<Result<Vec<_>>>()?;
+        let committed = staging
+            .catalog
+            .read()
+            .map_err(|_| Error::LockPoisoned)?
+            .clone();
+        *catalog = committed;
+        Ok(results)
+    }
+
+    /// Return a copy of a table schema for inspection by an embedding application.
+    pub fn schema(&self, table_name: &str) -> Result<Vec<Column>> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let table_name = normalize_name(table_name);
+        catalog
+            .tables
+            .get(&table_name)
+            .map(|table| table.columns.clone())
+            .ok_or(Error::TableNotFound(table_name))
+    }
+
+    /// Return table names in deterministic order.
+    pub fn tables(&self) -> Result<Vec<String>> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let mut tables = catalog.tables.keys().cloned().collect::<Vec<_>>();
+        tables.sort_unstable();
+        Ok(tables)
+    }
+
+    /// Return table summaries in deterministic order.
+    pub fn table_info(&self) -> Result<Vec<TableInfo>> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let mut tables = catalog
+            .tables
+            .iter()
+            .map(|(name, table)| TableInfo {
+                name: name.clone(),
+                row_count: table.rows.len(),
+                column_count: table.columns.len(),
+                index_count: table.indexes.len(),
+            })
+            .collect::<Vec<_>>();
+        tables.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Ok(tables)
+    }
+
+    /// Return scalar index metadata for a table.
+    pub fn indexes(&self, table_name: &str) -> Result<Vec<IndexInfo>> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let table_name = normalize_name(table_name);
+        let table = catalog
+            .tables
+            .get(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        let mut indexes = table
+            .indexes
+            .iter()
+            .map(|(name, index)| IndexInfo {
+                name: name.clone(),
+                column: table.columns[index.column].name.clone(),
+            })
+            .collect::<Vec<_>>();
+        indexes.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+        Ok(indexes)
+    }
+
+    fn execute_statement(&self, statement: Statement) -> Result<ExecutionResult> {
+        match statement {
+            Statement::CreateTable {
+                name,
+                columns,
+                constraints,
+                if_not_exists,
+                query,
+                ..
+            } => {
+                if query.is_some() {
+                    return Err(Error::Unsupported(
+                        "CREATE TABLE AS is not supported".into(),
+                    ));
+                }
+                self.create_table(name, columns, constraints, if_not_exists)
+            }
+            Statement::Insert {
+                table_name,
+                columns,
+                source,
+                on,
+                returning,
+                ..
+            } => {
+                if returning.is_some() {
+                    return Err(Error::Unsupported("INSERT ... RETURNING".into()));
+                }
+                self.insert(table_name, columns, source, on)
+            }
+            Statement::Query(query) => {
+                let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+                Ok(ExecutionResult::Query(run_query(&catalog, &query)?))
+            }
+            Statement::Explain {
+                analyze,
+                verbose,
+                statement,
+                format,
+                ..
+            } => {
+                if analyze || format.is_some() {
+                    return Err(Error::Unsupported(
+                        "EXPLAIN ANALYZE and formatted EXPLAIN output".into(),
+                    ));
+                }
+                let Statement::Query(query) = statement.as_ref() else {
+                    return Err(Error::Unsupported(
+                        "EXPLAIN for statements other than SELECT".into(),
+                    ));
+                };
+                let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+                Ok(ExecutionResult::Query(explain_query(
+                    &catalog, query, verbose,
+                )?))
+            }
+            Statement::CreateIndex {
+                name,
+                table_name,
+                using,
+                columns,
+                unique,
+                concurrently,
+                if_not_exists,
+                include,
+                nulls_distinct,
+                predicate,
+            } => {
+                if unique
+                    || concurrently
+                    || !include.is_empty()
+                    || nulls_distinct.is_some()
+                    || predicate.is_some()
+                {
+                    return Err(Error::Unsupported(
+                        "unique, concurrent, covering, partial, or NULL-configured indexes".into(),
+                    ));
+                }
+                if let Some(method) = &using {
+                    if ident_name(method) != "hash" {
+                        return Err(Error::Unsupported(format!("index method {}", method.value)));
+                    }
+                }
+                self.create_index(name, table_name, columns, if_not_exists)
+            }
+            Statement::Update {
+                table,
+                assignments,
+                from,
+                selection,
+                returning,
+            } => {
+                if from.is_some() || returning.is_some() {
+                    return Err(Error::Unsupported("UPDATE ... FROM or RETURNING".into()));
+                }
+                self.update(table, assignments, selection)
+            }
+            Statement::Delete {
+                tables,
+                from,
+                using,
+                selection,
+                returning,
+                order_by,
+                limit,
+            } => {
+                if !tables.is_empty()
+                    || using.is_some()
+                    || returning.is_some()
+                    || !order_by.is_empty()
+                    || limit.is_some()
+                {
+                    return Err(Error::Unsupported(
+                        "multi-table DELETE, USING, RETURNING, ORDER BY, and LIMIT".into(),
+                    ));
+                }
+                self.delete(from, selection)
+            }
+            Statement::Drop {
+                object_type,
+                if_exists,
+                names,
+                cascade,
+                restrict,
+                purge,
+                temporary,
+            } => {
+                if cascade || restrict || purge || temporary {
+                    return Err(Error::Unsupported(
+                        "DROP CASCADE, RESTRICT, PURGE, or TEMPORARY".into(),
+                    ));
+                }
+                match object_type {
+                    ObjectType::Table => self.drop_tables(names, if_exists),
+                    ObjectType::Index => self.drop_indexes(names, if_exists),
+                    _ => Err(Error::Unsupported(format!("DROP {object_type}"))),
+                }
+            }
+            other => Err(Error::Unsupported(other.to_string())),
+        }
+    }
+
+    fn create_table(
+        &self,
+        name: ObjectName,
+        definitions: Vec<ColumnDef>,
+        constraints: Vec<TableConstraint>,
+        if_not_exists: bool,
+    ) -> Result<ExecutionResult> {
+        let name = object_name(&name);
+        if definitions.is_empty() {
+            return Err(Error::InvalidQuery(
+                "a table must contain at least one column".into(),
+            ));
+        }
+
+        let mut seen = HashSet::new();
+        let mut columns = Vec::with_capacity(definitions.len());
+        for definition in definitions {
+            let column_name = ident_name(&definition.name);
+            if !seen.insert(column_name.clone()) {
+                return Err(Error::DuplicateColumn(column_name));
+            }
+            let data_type = parse_data_type(&definition.data_type)?;
+            let mut nullable = true;
+            let mut unique = false;
+            for option in definition.options {
+                match option.option {
+                    ColumnOption::Null => nullable = true,
+                    ColumnOption::NotNull => nullable = false,
+                    ColumnOption::Unique { is_primary, .. } => {
+                        unique = true;
+                        if is_primary {
+                            nullable = false;
+                        }
+                    }
+                    ColumnOption::Comment(_) => {}
+                    unsupported => {
+                        return Err(Error::Unsupported(format!("column option {unsupported}")))
+                    }
+                }
+            }
+            columns.push(Column {
+                name: column_name,
+                data_type,
+                nullable,
+                unique,
+            });
+        }
+
+        for constraint in constraints {
+            match constraint {
+                TableConstraint::Unique {
+                    columns: constrained,
+                    is_primary,
+                    ..
+                } if constrained.len() == 1 => {
+                    let index = find_column(&columns, &ident_name(&constrained[0]))?;
+                    columns[index].unique = true;
+                    if is_primary {
+                        columns[index].nullable = false;
+                    }
+                }
+                TableConstraint::Unique { .. } => {
+                    return Err(Error::Unsupported(
+                        "composite UNIQUE and PRIMARY KEY constraints".into(),
+                    ))
+                }
+                other => return Err(Error::Unsupported(format!("table constraint {other}"))),
+            }
+        }
+
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        if catalog.tables.contains_key(&name) {
+            if if_not_exists {
+                return Ok(ExecutionResult::Command {
+                    tag: "CREATE TABLE",
+                    rows_affected: 0,
+                });
+            }
+            return Err(Error::TableAlreadyExists(name));
+        }
+        catalog.tables.insert(
+            name,
+            Table {
+                columns,
+                rows: Vec::new(),
+                indexes: HashMap::new(),
+            },
+        );
+        catalog.mark_changed();
+        Ok(ExecutionResult::Command {
+            tag: "CREATE TABLE",
+            rows_affected: 0,
+        })
+    }
+
+    fn insert(
+        &self,
+        table_name: ObjectName,
+        insert_columns: Vec<Ident>,
+        source: Option<Box<Query>>,
+        on_insert: Option<OnInsert>,
+    ) -> Result<ExecutionResult> {
+        let table_name = object_name(&table_name);
+        let source = source.ok_or_else(|| Error::InvalidQuery("INSERT has no source".into()))?;
+        let rows = match source.body.as_ref() {
+            SetExpr::Values(values) => &values.rows,
+            _ => return Err(Error::Unsupported("INSERT ... SELECT".into())),
+        };
+
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let table = catalog
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        let conflict_plan = resolve_conflict_plan(table, on_insert)?;
+
+        let target_indexes = if insert_columns.is_empty() {
+            (0..table.columns.len()).collect::<Vec<_>>()
+        } else {
+            let mut seen = HashSet::new();
+            insert_columns
+                .iter()
+                .map(|name| {
+                    let name = ident_name(name);
+                    if !seen.insert(name.clone()) {
+                        return Err(Error::DuplicateColumn(name));
+                    }
+                    find_column(&table.columns, &name)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        let empty = EvalContext::empty();
+        let mut pending = Vec::with_capacity(rows.len());
+        for expressions in rows {
+            if expressions.len() != target_indexes.len() {
+                return Err(Error::InvalidQuery(format!(
+                    "INSERT row has {} value(s), expected {}",
+                    expressions.len(),
+                    target_indexes.len()
+                )));
+            }
+            let mut row = vec![Value::Null; table.columns.len()];
+            for (expression, column_index) in expressions.iter().zip(&target_indexes) {
+                let value = evaluate(expression, &empty)?;
+                row[*column_index] = coerce(value, &table.columns[*column_index].data_type)?;
+            }
+            validate_row(&table.columns, &row)?;
+            pending.push(row);
+        }
+        let rows_affected = match conflict_plan {
+            InsertConflictPlan::Fail => {
+                validate_unique(table, &pending)?;
+                let rows_affected = pending.len();
+                table.rows.extend(pending);
+                rows_affected
+            }
+            InsertConflictPlan::DoNothing(conflict_columns) => {
+                let mut accepted = Vec::with_capacity(pending.len());
+                for row in pending {
+                    if !row_conflicts(table, &accepted, &row, &conflict_columns) {
+                        accepted.push(row);
+                    }
+                }
+                validate_unique(table, &accepted)?;
+                let rows_affected = accepted.len();
+                table.rows.extend(accepted);
+                rows_affected
+            }
+            InsertConflictPlan::DoUpdate {
+                conflict_column,
+                update,
+            } => apply_conflict_updates(table, pending, conflict_column, &update)?,
+        };
+        rebuild_indexes(table);
+        if rows_affected > 0 {
+            catalog.mark_changed();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "INSERT",
+            rows_affected,
+        })
+    }
+
+    fn delete(
+        &self,
+        from: Vec<TableWithJoins>,
+        selection: Option<Expr>,
+    ) -> Result<ExecutionResult> {
+        if from.len() != 1 || !from[0].joins.is_empty() {
+            return Err(Error::Unsupported(
+                "DELETE with joins or multiple tables".into(),
+            ));
+        }
+        let table_name = table_factor_name(&from[0].relation)?;
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let table = catalog
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+
+        // Evaluate the entire predicate before mutating storage so a row-level
+        // error cannot leave a partially applied DELETE.
+        let mut should_delete = Vec::with_capacity(table.rows.len());
+        for row in &table.rows {
+            let context = EvalContext::new(&table.columns, row);
+            let delete = match &selection {
+                Some(expression) => evaluate(expression, &context)?.as_bool()?.unwrap_or(false),
+                None => true,
+            };
+            should_delete.push(delete);
+        }
+        let rows_affected = should_delete.iter().filter(|delete| **delete).count();
+        let mut index = 0;
+        table.rows.retain(|_| {
+            let retain = !should_delete[index];
+            index += 1;
+            retain
+        });
+        rebuild_indexes(table);
+        if rows_affected > 0 {
+            catalog.mark_changed();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "DELETE",
+            rows_affected,
+        })
+    }
+
+    fn update(
+        &self,
+        source: TableWithJoins,
+        assignments: Vec<Assignment>,
+        selection: Option<Expr>,
+    ) -> Result<ExecutionResult> {
+        if !source.joins.is_empty() {
+            return Err(Error::Unsupported("UPDATE with joins".into()));
+        }
+        if assignments.is_empty() {
+            return Err(Error::InvalidQuery(
+                "UPDATE requires at least one assignment".into(),
+            ));
+        }
+        let table_name = table_factor_name(&source.relation)?;
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let table = catalog
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+
+        let mut seen = HashSet::new();
+        let assignment_indexes = assignments
+            .iter()
+            .map(|assignment| {
+                let identifier = assignment
+                    .id
+                    .last()
+                    .ok_or_else(|| Error::InvalidQuery("empty UPDATE assignment".into()))?;
+                let name = ident_name(identifier);
+                if !seen.insert(name.clone()) {
+                    return Err(Error::DuplicateColumn(name));
+                }
+                find_column(&table.columns, &name)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // SQL assignments are simultaneous: every right-hand expression sees
+        // the original row. Build and validate all replacement rows first.
+        let mut replacement_rows = Vec::with_capacity(table.rows.len());
+        let mut rows_affected = 0;
+        for row in &table.rows {
+            let context = EvalContext::new(&table.columns, row);
+            let matches = match &selection {
+                Some(expression) => evaluate(expression, &context)?.as_bool()?.unwrap_or(false),
+                None => true,
+            };
+            let mut replacement = row.clone();
+            if matches {
+                for (assignment, index) in assignments.iter().zip(&assignment_indexes) {
+                    let value = evaluate(&assignment.value, &context)?;
+                    replacement[*index] = coerce(value, &table.columns[*index].data_type)?;
+                }
+                validate_row(&table.columns, &replacement)?;
+                rows_affected += 1;
+            }
+            replacement_rows.push(replacement);
+        }
+
+        let empty_table = Table {
+            columns: table.columns.clone(),
+            rows: Vec::new(),
+            indexes: HashMap::new(),
+        };
+        validate_unique(&empty_table, &replacement_rows)?;
+        table.rows = replacement_rows;
+        rebuild_indexes(table);
+        if rows_affected > 0 {
+            catalog.mark_changed();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "UPDATE",
+            rows_affected,
+        })
+    }
+
+    fn drop_tables(&self, names: Vec<ObjectName>, if_exists: bool) -> Result<ExecutionResult> {
+        let names = names.iter().map(object_name).collect::<Vec<_>>();
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        if !if_exists {
+            if let Some(missing) = names
+                .iter()
+                .find(|name| !catalog.tables.contains_key(*name))
+            {
+                return Err(Error::TableNotFound(missing.clone()));
+            }
+        }
+        let mut rows_affected = 0;
+        for name in names {
+            if catalog.tables.remove(&name).is_some() {
+                rows_affected += 1;
+            }
+        }
+        if rows_affected > 0 {
+            catalog.mark_changed();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "DROP TABLE",
+            rows_affected,
+        })
+    }
+
+    fn create_index(
+        &self,
+        name: Option<ObjectName>,
+        table_name: ObjectName,
+        columns: Vec<OrderByExpr>,
+        if_not_exists: bool,
+    ) -> Result<ExecutionResult> {
+        let name = name
+            .as_ref()
+            .map(object_name)
+            .ok_or_else(|| Error::InvalidQuery("CREATE INDEX requires a name".into()))?;
+        if columns.len() != 1 {
+            return Err(Error::Unsupported(
+                "multi-column and expression indexes".into(),
+            ));
+        }
+        let column_name = match &columns[0].expr {
+            Expr::Identifier(identifier) => ident_name(identifier),
+            _ => return Err(Error::Unsupported("expression indexes".into())),
+        };
+        let table_name = object_name(&table_name);
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let exists = catalog
+            .tables
+            .values()
+            .any(|table| table.indexes.contains_key(&name));
+        if exists {
+            if if_not_exists {
+                return Ok(ExecutionResult::Command {
+                    tag: "CREATE INDEX",
+                    rows_affected: 0,
+                });
+            }
+            return Err(Error::IndexAlreadyExists(name));
+        }
+
+        let table = catalog
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        let column = find_column(&table.columns, &column_name)?;
+        if matches!(table.columns[column].data_type, DataType::Vector(_)) {
+            return Err(Error::Unsupported(
+                "hash indexes on VECTOR columns; index a scalar filter column".into(),
+            ));
+        }
+        let mut index = HashIndex::new(column);
+        index.rebuild(&table.rows);
+        table.indexes.insert(name, index);
+        catalog.mark_changed();
+        Ok(ExecutionResult::Command {
+            tag: "CREATE INDEX",
+            rows_affected: 0,
+        })
+    }
+
+    fn drop_indexes(&self, names: Vec<ObjectName>, if_exists: bool) -> Result<ExecutionResult> {
+        let names = names.iter().map(object_name).collect::<Vec<_>>();
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        if !if_exists {
+            for name in &names {
+                let exists = catalog
+                    .tables
+                    .values()
+                    .any(|table| table.indexes.contains_key(name));
+                if !exists {
+                    return Err(Error::IndexNotFound(name.clone()));
+                }
+            }
+        }
+        let mut rows_affected = 0;
+        for name in names {
+            for table in catalog.tables.values_mut() {
+                if table.indexes.remove(&name).is_some() {
+                    rows_affected += 1;
+                    break;
+                }
+            }
+        }
+        if rows_affected > 0 {
+            catalog.mark_changed();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "DROP INDEX",
+            rows_affected,
+        })
+    }
+}
+
+fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<QueryResult> {
+    let select = match query.body.as_ref() {
+        SetExpr::Select(select) => select,
+        _ => return Err(Error::Unsupported("EXPLAIN for set operations".into())),
+    };
+    validate_select(select)?;
+    let mut plan = Vec::new();
+    let (table, columns) = match select.from.as_slice() {
+        [] => {
+            plan.push("Source: single row".to_string());
+            (None, &[][..])
+        }
+        [from] if from.joins.is_empty() => {
+            let name = table_factor_name(&from.relation)?;
+            let table = catalog
+                .tables
+                .get(&name)
+                .ok_or_else(|| Error::TableNotFound(name.clone()))?;
+            let indexed = select
+                .selection
+                .as_ref()
+                .and_then(|selection| indexed_candidate_rows(table, selection));
+            if let Some(indexes) = indexed {
+                plan.push(format!(
+                    "Scan: scalar hash index on {name} ({} of {} row(s))",
+                    indexes.len(),
+                    table.rows.len()
+                ));
+            } else {
+                plan.push(format!(
+                    "Scan: sequential on {name} ({} row(s))",
+                    table.rows.len()
+                ));
+            }
+            (Some(table), table.columns.as_slice())
+        }
+        _ => return Err(Error::Unsupported("EXPLAIN for joins".into())),
+    };
+    if let Some(selection) = &select.selection {
+        validate_expression_columns(selection, columns)?;
+        plan.push(format!("Filter: {selection}"));
+    }
+
+    let projection = build_projection(&select.projection, columns)?;
+    let group_by = match &select.group_by {
+        sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
+        sqlparser::ast::GroupByExpr::Expressions(expressions) => expressions.as_slice(),
+    };
+    let aggregate = !group_by.is_empty()
+        || projection
+            .iter()
+            .any(|item| expression_contains_aggregate(&item.expression))
+        || select
+            .having
+            .as_ref()
+            .is_some_and(expression_contains_aggregate);
+    if aggregate {
+        if group_by.is_empty() {
+            plan.push("Aggregate: global".into());
+        } else {
+            plan.push(format!(
+                "Aggregate: group by {}",
+                group_by
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(having) = &select.having {
+            plan.push(format!("Having: {having}"));
+        }
+    }
+    plan.push(format!(
+        "Projection: {}",
+        projection
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+
+    let empty = EvalContext::empty();
+    let offset = query
+        .offset
+        .as_ref()
+        .map(|offset| usize_expression(&offset.value, &empty, "OFFSET"))
+        .transpose()?
+        .unwrap_or(0);
+    let limit = query
+        .limit
+        .as_ref()
+        .map(|limit| usize_expression(limit, &empty, "LIMIT"))
+        .transpose()?;
+    if !query.order_by.is_empty() {
+        let order = query
+            .order_by
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Some(limit) = limit {
+            let retained = offset
+                .checked_add(limit)
+                .ok_or_else(|| Error::InvalidQuery("OFFSET plus LIMIT is too large".into()))?;
+            plan.push(format!("TopK: {order} (retain {retained} row(s))"));
+        } else {
+            plan.push(format!("Sort: {order}"));
+        }
+    }
+    if offset != 0 {
+        plan.push(format!("Offset: {offset}"));
+    }
+    if let Some(limit) = limit {
+        plan.push(format!("Limit: {limit}"));
+    }
+    if verbose {
+        plan.push(format!(
+            "Catalog: {} table(s), source present: {}",
+            catalog.tables.len(),
+            table.is_some()
+        ));
+    }
+
+    Ok(QueryResult {
+        columns: vec!["plan".into()],
+        rows: plan
+            .into_iter()
+            .map(|step| vec![Value::Text(step)])
+            .collect(),
+        rows_examined: 0,
+    })
+}
+
+fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
+    if query.with.is_some()
+        || !query.limit_by.is_empty()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+    {
+        return Err(Error::Unsupported(
+            "CTEs, LIMIT BY, FETCH, row locks, and FOR clauses".into(),
+        ));
+    }
+    let select = match query.body.as_ref() {
+        SetExpr::Select(select) => select,
+        _ => {
+            return Err(Error::Unsupported(
+                "set operations and nested queries".into(),
+            ))
+        }
+    };
+    validate_select(select)?;
+
+    let table = match select.from.as_slice() {
+        [] => None,
+        [from] if from.joins.is_empty() => {
+            let name = table_factor_name(&from.relation)?;
+            Some(
+                catalog
+                    .tables
+                    .get(&name)
+                    .ok_or_else(|| Error::TableNotFound(name.clone()))?,
+            )
+        }
+        _ => return Err(Error::Unsupported("joins and multiple FROM items".into())),
+    };
+    let columns = table.map_or(&[][..], |table| table.columns.as_slice());
+    let indexed_rows = table.and_then(|table| {
+        select
+            .selection
+            .as_ref()
+            .and_then(|selection| indexed_candidate_rows(table, selection))
+    });
+    let rows_examined = table.map_or(1, |table| {
+        indexed_rows.as_ref().map_or(table.rows.len(), Vec::len)
+    });
+    let singleton = Vec::new();
+    let source_rows: Box<dyn Iterator<Item = &[Value]> + '_> = match (table, &indexed_rows) {
+        (None, _) => Box::new(std::iter::once(singleton.as_slice())),
+        (Some(table), Some(indexes)) => {
+            Box::new(indexes.iter().map(|index| table.rows[*index].as_slice()))
+        }
+        (Some(table), None) => Box::new(table.rows.iter().map(Vec::as_slice)),
+    };
+
+    let projection = build_projection(&select.projection, columns)?;
+    let result_columns = projection
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
+    for item in &projection {
+        validate_expression_columns(&item.expression, columns)?;
+    }
+    if let Some(selection) = &select.selection {
+        validate_expression_columns(selection, columns)?;
+    }
+    for order in &query.order_by {
+        let is_alias = match &order.expr {
+            Expr::Identifier(identifier) => {
+                let name = ident_name(identifier);
+                result_columns
+                    .iter()
+                    .any(|label| normalize_name(label) == name)
+            }
+            _ => false,
+        };
+        if !is_alias {
+            validate_expression_columns(&order.expr, columns)?;
+        }
+    }
+    let empty = EvalContext::empty();
+    let offset = match &query.offset {
+        Some(offset) => usize_expression(&offset.value, &empty, "OFFSET")?,
+        None => 0,
+    };
+    let limit = match &query.limit {
+        Some(expression) => Some(usize_expression(expression, &empty, "LIMIT")?),
+        None => None,
+    };
+    let group_by = match &select.group_by {
+        sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
+        sqlparser::ast::GroupByExpr::Expressions(expressions) => expressions.as_slice(),
+    };
+    let aggregate_mode = !group_by.is_empty()
+        || projection
+            .iter()
+            .any(|item| expression_contains_aggregate(&item.expression))
+        || select
+            .having
+            .as_ref()
+            .is_some_and(expression_contains_aggregate);
+    if aggregate_mode {
+        return run_aggregate_query(
+            select,
+            query,
+            columns,
+            source_rows,
+            &projection,
+            result_columns,
+            group_by,
+            offset,
+            limit,
+            rows_examined,
+        );
+    }
+    if select.having.is_some() {
+        return Err(Error::InvalidQuery(
+            "HAVING requires GROUP BY or an aggregate expression".into(),
+        ));
+    }
+    let mut candidates =
+        CandidateSink::new(&query.order_by, offset, limit, select.distinct.is_some())?;
+    for row in source_rows {
+        let context = EvalContext::new(columns, row);
+        if let Some(selection) = &select.selection {
+            if !evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
+                continue;
+            }
+        }
+        let values = projection
+            .iter()
+            .map(|item| evaluate(&item.expression, &context))
+            .collect::<Result<Vec<_>>>()?;
+        let order = query
+            .order_by
+            .iter()
+            .map(|item| evaluate_order(item, &context, &result_columns, &values))
+            .collect::<Result<Vec<_>>>()?;
+        candidates.push(Candidate { values, order });
+    }
+
+    finish_candidates(
+        candidates.into_candidates(),
+        result_columns,
+        false,
+        &query.order_by,
+        offset,
+        limit,
+        rows_examined,
+    )
+}
+
+fn finish_candidates(
+    mut candidates: Vec<Candidate>,
+    result_columns: Vec<String>,
+    distinct_results: bool,
+    order_by: &[OrderByExpr],
+    offset: usize,
+    limit: Option<usize>,
+    rows_examined: usize,
+) -> Result<QueryResult> {
+    if distinct_results {
+        let mut distinct = Vec::with_capacity(candidates.len());
+        let mut seen = HashSet::with_capacity(candidates.len());
+        for candidate in candidates {
+            let key = candidate
+                .values
+                .iter()
+                .map(UniqueKey::from)
+                .collect::<Vec<_>>();
+            if seen.insert(key) {
+                distinct.push(candidate);
+            }
+        }
+        candidates = distinct;
+    }
+
+    if !order_by.is_empty() {
+        validate_order_values(&candidates, order_by.len())?;
+        if let Some(limit) = limit {
+            let keep = offset
+                .checked_add(limit)
+                .ok_or_else(|| Error::InvalidQuery("OFFSET plus LIMIT is too large".into()))?;
+            if keep == 0 {
+                candidates.clear();
+            } else if keep < candidates.len() {
+                candidates.select_nth_unstable_by(keep, |left, right| {
+                    compare_order(left, right, order_by)
+                });
+                candidates.truncate(keep);
+            }
+        }
+        candidates.sort_by(|left, right| compare_order(left, right, order_by));
+    }
+    let rows = candidates
+        .into_iter()
+        .skip(offset)
+        .take(limit.unwrap_or(usize::MAX))
+        .map(|candidate| candidate.values)
+        .collect();
+
+    Ok(QueryResult {
+        columns: result_columns,
+        rows,
+        rows_examined,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AggregateKind {
+    Count,
+    Sum,
+    Average,
+    Minimum,
+    Maximum,
+}
+
+#[derive(Clone, Copy)]
+struct AggregateSpec<'a> {
+    kind: AggregateKind,
+    argument: Option<&'a Expr>,
+    distinct: bool,
+}
+
+struct AggregateGroup<'a> {
+    values: Vec<Value>,
+    rows: Vec<&'a [Value]>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_aggregate_query<'a>(
+    select: &Select,
+    query: &Query,
+    columns: &[Column],
+    source_rows: Box<dyn Iterator<Item = &'a [Value]> + 'a>,
+    projection: &[Projection],
+    result_columns: Vec<String>,
+    group_by: &[Expr],
+    offset: usize,
+    limit: Option<usize>,
+    rows_examined: usize,
+) -> Result<QueryResult> {
+    for expression in group_by {
+        validate_expression_columns(expression, columns)?;
+    }
+    for item in projection {
+        validate_group_expression(&item.expression, group_by, columns)?;
+    }
+    if let Some(having) = &select.having {
+        validate_group_expression(having, group_by, columns)?;
+    }
+    for order in &query.order_by {
+        let is_alias = match &order.expr {
+            Expr::Identifier(identifier) => {
+                let name = ident_name(identifier);
+                result_columns
+                    .iter()
+                    .any(|label| normalize_name(label) == name)
+            }
+            _ => false,
+        };
+        if !is_alias {
+            validate_group_expression(&order.expr, group_by, columns)?;
+        }
+    }
+
+    let mut groups = if group_by.is_empty() {
+        vec![AggregateGroup {
+            values: Vec::new(),
+            rows: Vec::new(),
+        }]
+    } else {
+        Vec::new()
+    };
+    let mut group_positions = HashMap::<Vec<UniqueKey>, usize>::new();
+    for row in source_rows {
+        let context = EvalContext::new(columns, row);
+        if let Some(selection) = &select.selection {
+            if !evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
+                continue;
+            }
+        }
+        if group_by.is_empty() {
+            groups[0].rows.push(row);
+            continue;
+        }
+        let values = group_by
+            .iter()
+            .map(|expression| evaluate(expression, &context))
+            .collect::<Result<Vec<_>>>()?;
+        let key = values.iter().map(UniqueKey::from).collect::<Vec<_>>();
+        let position = match group_positions.get(&key) {
+            Some(position) => *position,
+            None => {
+                let position = groups.len();
+                groups.push(AggregateGroup {
+                    values,
+                    rows: Vec::new(),
+                });
+                group_positions.insert(key, position);
+                position
+            }
+        };
+        groups[position].rows.push(row);
+    }
+
+    let mut candidates = Vec::with_capacity(groups.len());
+    for group in &groups {
+        if let Some(having) = &select.having {
+            let matches = evaluate_group_expression(having, group_by, group, columns)?
+                .as_bool()?
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+        }
+        let values = projection
+            .iter()
+            .map(|item| evaluate_group_expression(&item.expression, group_by, group, columns))
+            .collect::<Result<Vec<_>>>()?;
+        let order = query
+            .order_by
+            .iter()
+            .map(|order| {
+                aggregate_order_value(
+                    &order.expr,
+                    projection,
+                    &result_columns,
+                    &values,
+                    group_by,
+                    group,
+                    columns,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        candidates.push(Candidate { values, order });
+    }
+
+    finish_candidates(
+        candidates,
+        result_columns,
+        select.distinct.is_some(),
+        &query.order_by,
+        offset,
+        limit,
+        rows_examined,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn aggregate_order_value(
+    expression: &Expr,
+    projection: &[Projection],
+    labels: &[String],
+    values: &[Value],
+    group_by: &[Expr],
+    group: &AggregateGroup<'_>,
+    columns: &[Column],
+) -> Result<Value> {
+    if let Expr::Identifier(identifier) = expression {
+        let name = ident_name(identifier);
+        if let Some(index) = labels
+            .iter()
+            .position(|label| normalize_name(label) == name)
+        {
+            return Ok(values[index].clone());
+        }
+    }
+    if let Some(index) = projection
+        .iter()
+        .position(|item| item.expression == *expression)
+    {
+        return Ok(values[index].clone());
+    }
+    evaluate_group_expression(expression, group_by, group, columns)
+}
+
+fn aggregate_function(expression: &Expr) -> Option<&Function> {
+    let Expr::Function(function) = expression else {
+        return None;
+    };
+    matches!(
+        object_name(&function.name).as_str(),
+        "count" | "sum" | "avg" | "min" | "max"
+    )
+    .then_some(function)
+}
+
+fn expression_contains_aggregate(expression: &Expr) -> bool {
+    if aggregate_function(expression).is_some() {
+        return true;
+    }
+    match expression {
+        Expr::Array(array) => array.elem.iter().any(expression_contains_aggregate),
+        Expr::Function(function) => function.args.iter().any(|argument| {
+            matches!(
+                argument,
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expression))
+                    if expression_contains_aggregate(expression)
+            )
+        }),
+        Expr::BinaryOp { left, right, .. } => {
+            expression_contains_aggregate(left) || expression_contains_aggregate(right)
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::Nested(expr)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsNotFalse(expr)
+        | Expr::Cast { expr, .. } => expression_contains_aggregate(expr),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expression_contains_aggregate(expr)
+                || expression_contains_aggregate(low)
+                || expression_contains_aggregate(high)
+        }
+        Expr::InList { expr, list, .. } => {
+            expression_contains_aggregate(expr) || list.iter().any(expression_contains_aggregate)
+        }
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            expression_contains_aggregate(expr) || expression_contains_aggregate(pattern)
+        }
+        _ => false,
+    }
+}
+
+fn parse_aggregate(function: &Function) -> Result<AggregateSpec<'_>> {
+    if function.filter.is_some()
+        || function.over.is_some()
+        || !function.order_by.is_empty()
+        || function.special
+    {
+        return Err(Error::Unsupported(format!(
+            "aggregate modifiers on {}",
+            function.name
+        )));
+    }
+    let name = object_name(&function.name);
+    let kind = match name.as_str() {
+        "count" => AggregateKind::Count,
+        "sum" => AggregateKind::Sum,
+        "avg" => AggregateKind::Average,
+        "min" => AggregateKind::Minimum,
+        "max" => AggregateKind::Maximum,
+        _ => return Err(Error::Unsupported(format!("aggregate {name}"))),
+    };
+    if function.args.len() != 1 {
+        return Err(Error::InvalidQuery(format!(
+            "{name} expects one argument, received {}",
+            function.args.len()
+        )));
+    }
+    let argument = match &function.args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Some(expression),
+        FunctionArg::Unnamed(FunctionArgExpr::Wildcard)
+        | FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_))
+            if matches!(kind, AggregateKind::Count) && !function.distinct =>
+        {
+            None
+        }
+        FunctionArg::Unnamed(FunctionArgExpr::Wildcard)
+        | FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_)) => {
+            return Err(Error::InvalidQuery(format!(
+                "{name}(DISTINCT *) is not supported"
+            )))
+        }
+        FunctionArg::Named { .. } => {
+            return Err(Error::Unsupported("named aggregate arguments".into()))
+        }
+    };
+    if argument.is_some_and(expression_contains_aggregate) {
+        return Err(Error::InvalidQuery(
+            "nested aggregate functions are not supported".into(),
+        ));
+    }
+    Ok(AggregateSpec {
+        kind,
+        argument,
+        distinct: function.distinct,
+    })
+}
+
+fn evaluate_aggregate(
+    spec: AggregateSpec<'_>,
+    rows: &[&[Value]],
+    columns: &[Column],
+) -> Result<Value> {
+    if spec.argument.is_none() {
+        let count = i64::try_from(rows.len())
+            .map_err(|_| Error::InvalidQuery("COUNT result is too large".into()))?;
+        return Ok(Value::Integer(count));
+    }
+    let argument = spec
+        .argument
+        .ok_or_else(|| Error::InvalidQuery("aggregate argument is missing".into()))?;
+    validate_expression_columns(argument, columns)?;
+    let mut values = Vec::with_capacity(rows.len());
+    let mut seen = HashSet::new();
+    for row in rows {
+        let value = evaluate(argument, &EvalContext::new(columns, row))?;
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        if spec.distinct && !seen.insert(UniqueKey::from(&value)) {
+            continue;
+        }
+        values.push(value);
+    }
+
+    match spec.kind {
+        AggregateKind::Count => i64::try_from(values.len())
+            .map(Value::Integer)
+            .map_err(|_| Error::InvalidQuery("COUNT result is too large".into())),
+        AggregateKind::Sum => aggregate_sum(&values),
+        AggregateKind::Average => aggregate_average(&values),
+        AggregateKind::Minimum => aggregate_extreme(values, BinaryOperator::Lt),
+        AggregateKind::Maximum => aggregate_extreme(values, BinaryOperator::Gt),
+    }
+}
+
+fn aggregate_sum(values: &[Value]) -> Result<Value> {
+    if values.is_empty() {
+        return Ok(Value::Null);
+    }
+    let mut integer_sum = 0_i64;
+    let mut float_sum = 0.0_f64;
+    let mut saw_float = false;
+    for value in values {
+        match value {
+            Value::Integer(value) if saw_float => float_sum += *value as f64,
+            Value::Integer(value) => {
+                integer_sum = integer_sum
+                    .checked_add(*value)
+                    .ok_or_else(|| Error::InvalidQuery("SUM integer overflow".into()))?;
+            }
+            Value::Float(value) => {
+                if !saw_float {
+                    float_sum = integer_sum as f64;
+                    saw_float = true;
+                }
+                float_sum += value;
+            }
+            value => return Err(type_mismatch("numeric aggregate argument", value)),
+        }
+    }
+    if saw_float {
+        if !float_sum.is_finite() {
+            return Err(Error::InvalidQuery("non-finite SUM result".into()));
+        }
+        Ok(Value::Float(float_sum))
+    } else {
+        Ok(Value::Integer(integer_sum))
+    }
+}
+
+fn aggregate_average(values: &[Value]) -> Result<Value> {
+    if values.is_empty() {
+        return Ok(Value::Null);
+    }
+    let mut sum = 0.0_f64;
+    for value in values {
+        sum += value
+            .as_f64()?
+            .ok_or_else(|| Error::InvalidQuery("AVG argument cannot be NULL".into()))?;
+    }
+    let result = sum / values.len() as f64;
+    if !result.is_finite() {
+        return Err(Error::InvalidQuery("non-finite AVG result".into()));
+    }
+    Ok(Value::Float(result))
+}
+
+fn aggregate_extreme(mut values: Vec<Value>, operator: BinaryOperator) -> Result<Value> {
+    let Some(mut extreme) = values.pop() else {
+        return Ok(Value::Null);
+    };
+    for value in values {
+        if compare_values(&value, &extreme, operator.clone())? == Value::Boolean(true) {
+            extreme = value;
+        }
+    }
+    if matches!(extreme, Value::Vector(_)) {
+        return Err(type_mismatch(
+            "sortable scalar aggregate argument",
+            &extreme,
+        ));
+    }
+    Ok(extreme)
+}
+
+fn validate_group_expression(
+    expression: &Expr,
+    group_by: &[Expr],
+    columns: &[Column],
+) -> Result<()> {
+    if group_by.contains(expression) {
+        return validate_expression_columns(expression, columns);
+    }
+    if let Some(function) = aggregate_function(expression) {
+        let spec = parse_aggregate(function)?;
+        if let Some(argument) = spec.argument {
+            validate_expression_columns(argument, columns)?;
+        }
+        return Ok(());
+    }
+    match expression {
+        Expr::Value(_) => Ok(()),
+        Expr::Array(array) => {
+            for element in &array.elem {
+                validate_group_expression(element, group_by, columns)?;
+            }
+            Ok(())
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            validate_group_expression(left, group_by, columns)?;
+            validate_group_expression(right, group_by, columns)
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::Nested(expr)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsNotFalse(expr)
+        | Expr::Cast { expr, .. } => validate_group_expression(expr, group_by, columns),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            validate_group_expression(expr, group_by, columns)?;
+            validate_group_expression(low, group_by, columns)?;
+            validate_group_expression(high, group_by, columns)
+        }
+        Expr::InList { expr, list, .. } => {
+            validate_group_expression(expr, group_by, columns)?;
+            for item in list {
+                validate_group_expression(item, group_by, columns)?;
+            }
+            Ok(())
+        }
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            validate_group_expression(expr, group_by, columns)?;
+            validate_group_expression(pattern, group_by, columns)
+        }
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => Err(Error::InvalidQuery(format!(
+            "expression '{expression}' must appear in GROUP BY or be aggregated"
+        ))),
+        Expr::Function(_) => Err(Error::Unsupported(format!(
+            "scalar function '{expression}' in aggregate expression"
+        ))),
+        other => Err(Error::Unsupported(format!(
+            "expression '{other}' in aggregate query"
+        ))),
+    }
+}
+
+fn evaluate_group_expression(
+    expression: &Expr,
+    group_by: &[Expr],
+    group: &AggregateGroup<'_>,
+    columns: &[Column],
+) -> Result<Value> {
+    if let Some(index) = group_by
+        .iter()
+        .position(|group_expression| group_expression == expression)
+    {
+        return Ok(group.values[index].clone());
+    }
+    if let Some(function) = aggregate_function(expression) {
+        return evaluate_aggregate(parse_aggregate(function)?, &group.rows, columns);
+    }
+    match expression {
+        Expr::Value(value) => sql_literal(value),
+        Expr::Nested(expression) => evaluate_group_expression(expression, group_by, group, columns),
+        Expr::BinaryOp { left, op, right } => {
+            let left = evaluate_group_expression(left, group_by, group, columns)?;
+            if matches!((op, left.as_bool()), (BinaryOperator::And, Ok(Some(false)))) {
+                return Ok(Value::Boolean(false));
+            }
+            if matches!((op, left.as_bool()), (BinaryOperator::Or, Ok(Some(true)))) {
+                return Ok(Value::Boolean(true));
+            }
+            let right = evaluate_group_expression(right, group_by, group, columns)?;
+            match op {
+                BinaryOperator::And => sql_and(left, right),
+                BinaryOperator::Or => sql_or(left, right),
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq => compare_values(&left, &right, op.clone()),
+                BinaryOperator::Plus
+                | BinaryOperator::Minus
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide
+                | BinaryOperator::Modulo => numeric_binary(&left, &right, op),
+                BinaryOperator::Custom(operator) => vector_operator(&left, &right, operator),
+                _ => Err(Error::Unsupported(format!(
+                    "operator {op} in HAVING expression"
+                ))),
+            }
+        }
+        Expr::UnaryOp { op, expr } => {
+            let value = evaluate_group_expression(expr, group_by, group, columns)?;
+            match op {
+                UnaryOperator::Not => match value.as_bool()? {
+                    Some(value) => Ok(Value::Boolean(!value)),
+                    None => Ok(Value::Null),
+                },
+                UnaryOperator::Plus => match value {
+                    Value::Integer(_) | Value::Float(_) | Value::Null => Ok(value),
+                    value => Err(type_mismatch("numeric value", &value)),
+                },
+                UnaryOperator::Minus => match value {
+                    Value::Integer(value) => value
+                        .checked_neg()
+                        .map(Value::Integer)
+                        .ok_or_else(|| Error::InvalidQuery("integer overflow".into())),
+                    Value::Float(value) => Ok(Value::Float(-value)),
+                    Value::Null => Ok(Value::Null),
+                    value => Err(type_mismatch("numeric value", &value)),
+                },
+                _ => Err(Error::Unsupported(format!(
+                    "operator {op} in HAVING expression"
+                ))),
+            }
+        }
+        Expr::IsNull(expression) => Ok(Value::Boolean(matches!(
+            evaluate_group_expression(expression, group_by, group, columns)?,
+            Value::Null
+        ))),
+        Expr::IsNotNull(expression) => Ok(Value::Boolean(!matches!(
+            evaluate_group_expression(expression, group_by, group, columns)?,
+            Value::Null
+        ))),
+        Expr::IsTrue(expression) => Ok(Value::Boolean(
+            evaluate_group_expression(expression, group_by, group, columns)?.as_bool()?
+                == Some(true),
+        )),
+        Expr::IsFalse(expression) => Ok(Value::Boolean(
+            evaluate_group_expression(expression, group_by, group, columns)?.as_bool()?
+                == Some(false),
+        )),
+        Expr::IsNotTrue(expression) => Ok(Value::Boolean(
+            evaluate_group_expression(expression, group_by, group, columns)?.as_bool()?
+                != Some(true),
+        )),
+        Expr::IsNotFalse(expression) => Ok(Value::Boolean(
+            evaluate_group_expression(expression, group_by, group, columns)?.as_bool()?
+                != Some(false),
+        )),
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            let value = evaluate_group_expression(expr, group_by, group, columns)?;
+            let low = evaluate_group_expression(low, group_by, group, columns)?;
+            let high = evaluate_group_expression(high, group_by, group, columns)?;
+            let lower = compare_values(&value, &low, BinaryOperator::GtEq)?;
+            let upper = compare_values(&value, &high, BinaryOperator::LtEq)?;
+            boolean_not_if(sql_and(lower, upper)?, *negated)
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let value = evaluate_group_expression(expr, group_by, group, columns)?;
+            let mut found = false;
+            let mut saw_null = matches!(value, Value::Null);
+            for item in list {
+                let item = evaluate_group_expression(item, group_by, group, columns)?;
+                match compare_values(&value, &item, BinaryOperator::Eq)? {
+                    Value::Boolean(true) => found = true,
+                    Value::Null => saw_null = true,
+                    _ => {}
+                }
+            }
+            let result = if found {
+                Value::Boolean(true)
+            } else if saw_null {
+                Value::Null
+            } else {
+                Value::Boolean(false)
+            };
+            boolean_not_if(result, *negated)
+        }
+        Expr::Like {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        }
+        | Expr::ILike {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        } => {
+            if escape_char.is_some() {
+                return Err(Error::Unsupported("LIKE ... ESCAPE in HAVING".into()));
+            }
+            let case_insensitive = matches!(expression, Expr::ILike { .. });
+            let value = evaluate_group_expression(expr, group_by, group, columns)?;
+            let pattern = evaluate_group_expression(pattern, group_by, group, columns)?;
+            match (value, pattern) {
+                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                (Value::Text(mut value), Value::Text(mut pattern)) => {
+                    if case_insensitive {
+                        value = value.to_lowercase();
+                        pattern = pattern.to_lowercase();
+                    }
+                    boolean_not_if(Value::Boolean(like_matches(&value, &pattern)), *negated)
+                }
+                (left, right) => Err(Error::TypeMismatch {
+                    expected: "TEXT LIKE TEXT".into(),
+                    found: format!("{} LIKE {}", left.type_name(), right.type_name()),
+                }),
+            }
+        }
+        Expr::Cast {
+            expr, data_type, ..
+        } => coerce(
+            evaluate_group_expression(expr, group_by, group, columns)?,
+            &parse_data_type(data_type)?,
+        ),
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => Err(Error::InvalidQuery(format!(
+            "expression '{expression}' must appear in GROUP BY or be aggregated"
+        ))),
+        other => Err(Error::Unsupported(format!(
+            "expression '{other}' in HAVING"
+        ))),
+    }
+}
+
+fn validate_expression_columns(expression: &Expr, columns: &[Column]) -> Result<()> {
+    match expression {
+        Expr::Identifier(identifier) => {
+            find_column(columns, &ident_name(identifier))?;
+        }
+        Expr::CompoundIdentifier(identifiers) => {
+            let identifier = identifiers
+                .last()
+                .ok_or_else(|| Error::InvalidQuery("empty identifier".into()))?;
+            find_column(columns, &ident_name(identifier))?;
+        }
+        Expr::Array(array) => {
+            for element in &array.elem {
+                validate_expression_columns(element, columns)?;
+            }
+        }
+        Expr::Function(function) => {
+            for argument in &function.args {
+                if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) = argument {
+                    validate_expression_columns(expression, columns)?;
+                }
+            }
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            validate_expression_columns(left, columns)?;
+            validate_expression_columns(right, columns)?;
+        }
+        Expr::UnaryOp { expr, .. }
+        | Expr::Nested(expr)
+        | Expr::IsNull(expr)
+        | Expr::IsNotNull(expr)
+        | Expr::IsTrue(expr)
+        | Expr::IsFalse(expr)
+        | Expr::IsNotTrue(expr)
+        | Expr::IsNotFalse(expr) => validate_expression_columns(expr, columns)?,
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            validate_expression_columns(expr, columns)?;
+            validate_expression_columns(low, columns)?;
+            validate_expression_columns(high, columns)?;
+        }
+        Expr::InList { expr, list, .. } => {
+            validate_expression_columns(expr, columns)?;
+            for item in list {
+                validate_expression_columns(item, columns)?;
+            }
+        }
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            validate_expression_columns(expr, columns)?;
+            validate_expression_columns(pattern, columns)?;
+        }
+        Expr::Cast { expr, .. } => validate_expression_columns(expr, columns)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<Vec<usize>> {
+    match expression {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => match (
+            indexed_candidate_rows(table, left),
+            indexed_candidate_rows(table, right),
+        ) {
+            (Some(left), Some(right)) => Some(intersect_sorted(&left, &right)),
+            (Some(indexes), None) | (None, Some(indexes)) => Some(indexes),
+            (None, None) => None,
+        },
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => match (
+            indexed_candidate_rows(table, left),
+            indexed_candidate_rows(table, right),
+        ) {
+            (Some(left), Some(right)) => Some(union_sorted(&left, &right)),
+            _ => None,
+        },
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } => equality_index_lookup(table, left, right)
+            .or_else(|| equality_index_lookup(table, right, left)),
+        Expr::Nested(expression) => indexed_candidate_rows(table, expression),
+        _ => None,
+    }
+}
+
+fn equality_index_lookup(table: &Table, column: &Expr, value: &Expr) -> Option<Vec<usize>> {
+    let column_name = match column {
+        Expr::Identifier(identifier) => ident_name(identifier),
+        Expr::CompoundIdentifier(identifiers) => ident_name(identifiers.last()?),
+        _ => return None,
+    };
+    let column = find_column(&table.columns, &column_name).ok()?;
+    let index = table
+        .indexes
+        .values()
+        .find(|index| index.column == column)?;
+    let value = evaluate(value, &EvalContext::empty()).ok()?;
+    let value = coerce(value, &table.columns[column].data_type).ok()?;
+    if matches!(value, Value::Null) {
+        return Some(Vec::new());
+    }
+    if matches!(value, Value::Vector(_)) {
+        return None;
+    }
+    Some(
+        index
+            .buckets
+            .get(&UniqueKey::from(&value))
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+fn intersect_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut output = Vec::with_capacity(left.len().min(right.len()));
+    let (mut left_index, mut right_index) = (0, 0);
+    while left_index < left.len() && right_index < right.len() {
+        match left[left_index].cmp(&right[right_index]) {
+            Ordering::Less => left_index += 1,
+            Ordering::Greater => right_index += 1,
+            Ordering::Equal => {
+                output.push(left[left_index]);
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+    output
+}
+
+fn union_sorted(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut output = Vec::with_capacity(left.len() + right.len());
+    let (mut left_index, mut right_index) = (0, 0);
+    while left_index < left.len() || right_index < right.len() {
+        let value = match (left.get(left_index), right.get(right_index)) {
+            (Some(left), Some(right)) => match left.cmp(right) {
+                Ordering::Less => {
+                    left_index += 1;
+                    *left
+                }
+                Ordering::Greater => {
+                    right_index += 1;
+                    *right
+                }
+                Ordering::Equal => {
+                    left_index += 1;
+                    right_index += 1;
+                    *left
+                }
+            },
+            (Some(left), None) => {
+                left_index += 1;
+                *left
+            }
+            (None, Some(right)) => {
+                right_index += 1;
+                *right
+            }
+            (None, None) => break,
+        };
+        output.push(value);
+    }
+    output
+}
+
+fn validate_order_values(candidates: &[Candidate], order_count: usize) -> Result<()> {
+    for index in 0..order_count {
+        let mut expected = None;
+        for candidate in candidates {
+            let category = match &candidate.order[index] {
+                Value::Null => continue,
+                Value::Integer(_) | Value::Float(_) => "numeric",
+                Value::Text(_) => "text",
+                Value::Boolean(_) => "boolean",
+                Value::Vector(_) => {
+                    return Err(Error::TypeMismatch {
+                        expected: "sortable scalar value".into(),
+                        found: "VECTOR".into(),
+                    })
+                }
+            };
+            if let Some(expected) = expected {
+                if expected != category {
+                    return Err(Error::TypeMismatch {
+                        expected: format!("{expected} ORDER BY expression"),
+                        found: category.into(),
+                    });
+                }
+            } else {
+                expected = Some(category);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_select(select: &Select) -> Result<()> {
+    if select.top.is_some()
+        || select.into.is_some()
+        || !select.lateral_views.is_empty()
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || !select.named_window.is_empty()
+        || select.qualify.is_some()
+    {
+        return Err(Error::Unsupported(
+            "TOP, SELECT INTO, and advanced SELECT clauses".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct Projection {
+    expression: Expr,
+    label: String,
+}
+
+fn build_projection(items: &[SelectItem], columns: &[Column]) -> Result<Vec<Projection>> {
+    let mut output = Vec::new();
+    for item in items {
+        match item {
+            SelectItem::UnnamedExpr(expression) => output.push(Projection {
+                expression: expression.clone(),
+                label: expression_label(expression),
+            }),
+            SelectItem::ExprWithAlias { expr, alias } => output.push(Projection {
+                expression: expr.clone(),
+                label: ident_name(alias),
+            }),
+            SelectItem::Wildcard(options) if options.to_string().is_empty() => {
+                output.extend(columns.iter().map(|column| Projection {
+                    expression: Expr::Identifier(Ident::new(&column.name)),
+                    label: column.name.clone(),
+                }));
+            }
+            SelectItem::QualifiedWildcard(_, options) if options.to_string().is_empty() => {
+                output.extend(columns.iter().map(|column| Projection {
+                    expression: Expr::Identifier(Ident::new(&column.name)),
+                    label: column.name.clone(),
+                }));
+            }
+            wildcard => {
+                return Err(Error::Unsupported(format!(
+                    "wildcard projection {wildcard}"
+                )))
+            }
+        }
+    }
+    Ok(output)
+}
+
+#[derive(Debug)]
+struct Candidate {
+    values: Vec<Value>,
+    order: Vec<Value>,
+}
+
+struct CandidateSink<'a> {
+    storage: CandidateStorage<'a>,
+    seen: Option<HashSet<Vec<UniqueKey>>>,
+}
+
+enum CandidateStorage<'a> {
+    All(Vec<Candidate>),
+    TopK {
+        heap: BinaryHeap<RankedCandidate<'a>>,
+        capacity: usize,
+        order_by: &'a [OrderByExpr],
+    },
+}
+
+struct RankedCandidate<'a> {
+    candidate: Candidate,
+    order_by: &'a [OrderByExpr],
+}
+
+impl<'a> CandidateSink<'a> {
+    fn new(
+        order_by: &'a [OrderByExpr],
+        offset: usize,
+        limit: Option<usize>,
+        distinct: bool,
+    ) -> Result<Self> {
+        let storage = match (order_by.is_empty(), limit) {
+            (false, Some(limit)) => CandidateStorage::TopK {
+                heap: BinaryHeap::new(),
+                capacity: offset
+                    .checked_add(limit)
+                    .ok_or_else(|| Error::InvalidQuery("OFFSET plus LIMIT is too large".into()))?,
+                order_by,
+            },
+            _ => CandidateStorage::All(Vec::new()),
+        };
+        Ok(Self {
+            storage,
+            seen: distinct.then(HashSet::new),
+        })
+    }
+
+    fn push(&mut self, candidate: Candidate) {
+        if let Some(seen) = &mut self.seen {
+            let key = candidate
+                .values
+                .iter()
+                .map(UniqueKey::from)
+                .collect::<Vec<_>>();
+            if !seen.insert(key) {
+                return;
+            }
+        }
+        match &mut self.storage {
+            CandidateStorage::All(candidates) => candidates.push(candidate),
+            CandidateStorage::TopK {
+                heap,
+                capacity,
+                order_by,
+            } => {
+                if *capacity == 0 {
+                    return;
+                }
+                let ranked = RankedCandidate {
+                    candidate,
+                    order_by,
+                };
+                if heap.len() < *capacity {
+                    heap.push(ranked);
+                } else if let Some(worst) = heap.peek() {
+                    if ranked < *worst {
+                        heap.pop();
+                        heap.push(ranked);
+                    }
+                }
+            }
+        }
+    }
+
+    fn into_candidates(self) -> Vec<Candidate> {
+        match self.storage {
+            CandidateStorage::All(candidates) => candidates,
+            CandidateStorage::TopK { heap, .. } => heap
+                .into_iter()
+                .map(|candidate| candidate.candidate)
+                .collect(),
+        }
+    }
+}
+
+impl PartialEq for RankedCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RankedCandidate<'_> {}
+
+impl PartialOrd for RankedCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_order(&self.candidate, &other.candidate, self.order_by)
+    }
+}
+
+fn evaluate_order(
+    order: &OrderByExpr,
+    context: &EvalContext<'_>,
+    labels: &[String],
+    values: &[Value],
+) -> Result<Value> {
+    if let Expr::Identifier(identifier) = &order.expr {
+        let name = ident_name(identifier);
+        if let Some(index) = labels
+            .iter()
+            .position(|label| normalize_name(label) == name)
+        {
+            return Ok(values[index].clone());
+        }
+    }
+    evaluate(&order.expr, context)
+}
+
+fn compare_order(left: &Candidate, right: &Candidate, order_by: &[OrderByExpr]) -> Ordering {
+    for (index, order) in order_by.iter().enumerate() {
+        let nulls_first = order.nulls_first.unwrap_or(order.asc == Some(false));
+        let ordering = match (&left.order[index], &right.order[index]) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Null, _) => {
+                if nulls_first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (_, Value::Null) => {
+                if nulls_first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (left, right) => {
+                let ordering = compare_sort_values(left, right);
+                if order.asc == Some(false) {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
+            }
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_sort_values(left: &Value, right: &Value) -> Ordering {
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Integer(left), Value::Integer(right)) => left.cmp(right),
+        (Value::Integer(left), Value::Float(right)) => {
+            (*left as f64).partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        (Value::Float(left), Value::Integer(right)) => left
+            .partial_cmp(&(*right as f64))
+            .unwrap_or(Ordering::Equal),
+        (Value::Float(left), Value::Float(right)) => {
+            left.partial_cmp(right).unwrap_or(Ordering::Equal)
+        }
+        (Value::Text(left), Value::Text(right)) => left.cmp(right),
+        (Value::Boolean(left), Value::Boolean(right)) => left.cmp(right),
+        // Evaluation/type checking catches most mixed-type cases. Keep sorting total.
+        (left, right) => left.type_name().cmp(right.type_name()),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EvalContext<'a> {
+    columns: &'a [Column],
+    row: &'a [Value],
+    excluded: Option<&'a [Value]>,
+}
+
+impl<'a> EvalContext<'a> {
+    fn new(columns: &'a [Column], row: &'a [Value]) -> Self {
+        Self {
+            columns,
+            row,
+            excluded: None,
+        }
+    }
+
+    fn upsert(columns: &'a [Column], row: &'a [Value], excluded: &'a [Value]) -> Self {
+        Self {
+            columns,
+            row,
+            excluded: Some(excluded),
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            columns: &[],
+            row: &[],
+            excluded: None,
+        }
+    }
+
+    fn column(&self, name: &str) -> Result<Value> {
+        let index = find_column(self.columns, name)?;
+        Ok(self.row[index].clone())
+    }
+
+    fn compound_column(&self, identifiers: &[Ident]) -> Result<Value> {
+        let identifier = identifiers
+            .last()
+            .ok_or_else(|| Error::InvalidQuery("empty identifier".into()))?;
+        let index = find_column(self.columns, &ident_name(identifier))?;
+        if identifiers.len() == 2
+            && identifiers.first().map(ident_name).as_deref() == Some("excluded")
+        {
+            if let Some(excluded) = self.excluded {
+                return Ok(excluded[index].clone());
+            }
+        }
+        Ok(self.row[index].clone())
+    }
+}
+
+fn evaluate(expression: &Expr, context: &EvalContext<'_>) -> Result<Value> {
+    match expression {
+        Expr::Value(value) => sql_literal(value),
+        Expr::Identifier(identifier) => context.column(&ident_name(identifier)),
+        Expr::CompoundIdentifier(identifiers) => context.compound_column(identifiers),
+        Expr::Nested(expression) => evaluate(expression, context),
+        Expr::Array(array) => {
+            let values = array
+                .elem
+                .iter()
+                .map(|element| evaluate(element, context)?.as_f64())
+                .collect::<Result<Vec<_>>>()?;
+            if values.iter().any(Option::is_none) {
+                return Err(Error::InvalidQuery(
+                    "vector literals cannot contain NULL".into(),
+                ));
+            }
+            let values = values
+                .into_iter()
+                .flatten()
+                .map(|value| value as f32)
+                .collect::<Vec<_>>();
+            ensure_finite_f32(&values)?;
+            Ok(Value::Vector(Vector::new(values)?))
+        }
+        Expr::Function(function) => evaluate_function(function, context),
+        Expr::BinaryOp { left, op, right } => evaluate_binary(left, op, right, context),
+        Expr::UnaryOp { op, expr } => evaluate_unary(op, expr, context),
+        Expr::IsNull(expression) => Ok(Value::Boolean(matches!(
+            evaluate(expression, context)?,
+            Value::Null
+        ))),
+        Expr::IsNotNull(expression) => Ok(Value::Boolean(!matches!(
+            evaluate(expression, context)?,
+            Value::Null
+        ))),
+        Expr::IsTrue(expression) => Ok(Value::Boolean(
+            evaluate(expression, context)?.as_bool()? == Some(true),
+        )),
+        Expr::IsFalse(expression) => Ok(Value::Boolean(
+            evaluate(expression, context)?.as_bool()? == Some(false),
+        )),
+        Expr::IsNotTrue(expression) => Ok(Value::Boolean(
+            evaluate(expression, context)?.as_bool()? != Some(true),
+        )),
+        Expr::IsNotFalse(expression) => Ok(Value::Boolean(
+            evaluate(expression, context)?.as_bool()? != Some(false),
+        )),
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
+            let value = evaluate(expr, context)?;
+            let lower = compare_values(&value, &evaluate(low, context)?, BinaryOperator::GtEq)?;
+            let upper = compare_values(&value, &evaluate(high, context)?, BinaryOperator::LtEq)?;
+            boolean_not_if(sql_and(lower, upper)?, *negated)
+        }
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => {
+            let value = evaluate(expr, context)?;
+            let mut found = false;
+            let mut saw_null = matches!(value, Value::Null);
+            for item in list {
+                match compare_values(&value, &evaluate(item, context)?, BinaryOperator::Eq)? {
+                    Value::Boolean(true) => found = true,
+                    Value::Null => saw_null = true,
+                    _ => {}
+                }
+            }
+            let result = if found {
+                Value::Boolean(true)
+            } else if saw_null {
+                Value::Null
+            } else {
+                Value::Boolean(false)
+            };
+            boolean_not_if(result, *negated)
+        }
+        Expr::Like {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        }
+        | Expr::ILike {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        } => {
+            if escape_char.is_some() {
+                return Err(Error::Unsupported("LIKE ... ESCAPE".into()));
+            }
+            let case_insensitive = matches!(expression, Expr::ILike { .. });
+            let value = evaluate(expr, context)?;
+            let pattern = evaluate(pattern, context)?;
+            match (value, pattern) {
+                (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+                (Value::Text(mut value), Value::Text(mut pattern)) => {
+                    if case_insensitive {
+                        value = value.to_lowercase();
+                        pattern = pattern.to_lowercase();
+                    }
+                    boolean_not_if(Value::Boolean(like_matches(&value, &pattern)), *negated)
+                }
+                (left, right) => Err(Error::TypeMismatch {
+                    expected: "TEXT LIKE TEXT".into(),
+                    found: format!("{} LIKE {}", left.type_name(), right.type_name()),
+                }),
+            }
+        }
+        Expr::Cast {
+            expr, data_type, ..
+        } => coerce(evaluate(expr, context)?, &parse_data_type(data_type)?),
+        other => Err(Error::Unsupported(format!("expression {other}"))),
+    }
+}
+
+fn evaluate_binary(
+    left: &Expr,
+    operator: &BinaryOperator,
+    right: &Expr,
+    context: &EvalContext<'_>,
+) -> Result<Value> {
+    if matches!(operator, BinaryOperator::And | BinaryOperator::Or) {
+        let left = evaluate(left, context)?;
+        // Short-circuit without changing SQL's three-valued boolean behavior.
+        if matches!(
+            (operator, left.as_bool()?),
+            (BinaryOperator::And, Some(false))
+        ) {
+            return Ok(Value::Boolean(false));
+        }
+        if matches!(
+            (operator, left.as_bool()?),
+            (BinaryOperator::Or, Some(true))
+        ) {
+            return Ok(Value::Boolean(true));
+        }
+        let right = evaluate(right, context)?;
+        return if *operator == BinaryOperator::And {
+            sql_and(left, right)
+        } else {
+            sql_or(left, right)
+        };
+    }
+
+    let left = evaluate(left, context)?;
+    let right = evaluate(right, context)?;
+    match operator {
+        BinaryOperator::Eq
+        | BinaryOperator::NotEq
+        | BinaryOperator::Gt
+        | BinaryOperator::GtEq
+        | BinaryOperator::Lt
+        | BinaryOperator::LtEq => compare_values(&left, &right, operator.clone()),
+        BinaryOperator::Plus
+        | BinaryOperator::Minus
+        | BinaryOperator::Multiply
+        | BinaryOperator::Divide
+        | BinaryOperator::Modulo => numeric_binary(&left, &right, operator),
+        BinaryOperator::Custom(operator) => vector_operator(&left, &right, operator),
+        _ => Err(Error::Unsupported(format!("binary operator {operator}"))),
+    }
+}
+
+fn vector_operator(left: &Value, right: &Value, operator: &str) -> Result<Value> {
+    let (Some(left), Some(right)) = (left.as_vector()?, right.as_vector()?) else {
+        return Ok(Value::Null);
+    };
+    let result = match operator {
+        "<->" => left.l2_distance(right)?,
+        "<#>" => -left.dot_product(right)?,
+        "<=>" => left.cosine_distance(right)?,
+        _ => return Err(Error::Unsupported(format!("custom operator {operator}"))),
+    };
+    Ok(Value::Float(result as f64))
+}
+
+fn evaluate_unary(
+    operator: &UnaryOperator,
+    expression: &Expr,
+    context: &EvalContext<'_>,
+) -> Result<Value> {
+    let value = evaluate(expression, context)?;
+    match operator {
+        UnaryOperator::Not => match value.as_bool()? {
+            Some(value) => Ok(Value::Boolean(!value)),
+            None => Ok(Value::Null),
+        },
+        UnaryOperator::Plus => match value {
+            Value::Integer(_) | Value::Float(_) | Value::Null => Ok(value),
+            value => Err(type_mismatch("numeric value", &value)),
+        },
+        UnaryOperator::Minus => match value {
+            Value::Integer(value) => value
+                .checked_neg()
+                .map(Value::Integer)
+                .ok_or_else(|| Error::InvalidQuery("integer overflow".into())),
+            Value::Float(value) => Ok(Value::Float(-value)),
+            Value::Null => Ok(Value::Null),
+            value => Err(type_mismatch("numeric value", &value)),
+        },
+        _ => Err(Error::Unsupported(format!("unary operator {operator}"))),
+    }
+}
+
+fn evaluate_function(function: &Function, context: &EvalContext<'_>) -> Result<Value> {
+    if function.distinct
+        || function.filter.is_some()
+        || function.over.is_some()
+        || !function.order_by.is_empty()
+    {
+        return Err(Error::Unsupported(format!(
+            "function modifiers on {}",
+            function.name
+        )));
+    }
+    let name = object_name(&function.name);
+    let arguments = function
+        .args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => {
+                evaluate(expression, context)
+            }
+            _ => Err(Error::Unsupported(
+                "named or wildcard function arguments".into(),
+            )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    match name.as_str() {
+        "vector" => {
+            let mut values = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                let value = argument
+                    .as_f64()?
+                    .ok_or_else(|| Error::InvalidQuery("VECTOR arguments cannot be NULL".into()))?
+                    as f32;
+                values.push(value);
+            }
+            ensure_finite_f32(&values)?;
+            Ok(Value::Vector(Vector::new(values)?))
+        }
+        "vector_dims" | "dimensions" => {
+            require_argument_count(&name, &arguments, 1)?;
+            match arguments[0].as_vector()? {
+                Some(vector) => Ok(Value::Integer(vector.dimensions() as i64)),
+                None => Ok(Value::Null),
+            }
+        }
+        "vector_norm" | "norm" => {
+            require_argument_count(&name, &arguments, 1)?;
+            match arguments[0].as_vector()? {
+                Some(vector) => Ok(Value::Float(vector.norm())),
+                None => Ok(Value::Null),
+            }
+        }
+        "normalize" | "normalize_vector" => {
+            require_argument_count(&name, &arguments, 1)?;
+            match arguments[0].as_vector()? {
+                Some(vector) => Ok(Value::Vector(vector.normalized()?)),
+                None => Ok(Value::Null),
+            }
+        }
+        "l2_distance"
+        | "euclidean_distance"
+        | "squared_l2_distance"
+        | "cosine_distance"
+        | "dot_product"
+        | "inner_product" => {
+            require_argument_count(&name, &arguments, 2)?;
+            let (Some(left), Some(right)) = (arguments[0].as_vector()?, arguments[1].as_vector()?)
+            else {
+                return Ok(Value::Null);
+            };
+            let result = match name.as_str() {
+                "l2_distance" | "euclidean_distance" => left.l2_distance(right)?,
+                "squared_l2_distance" => left.squared_l2_distance(right)?,
+                "cosine_distance" => left.cosine_distance(right)?,
+                "dot_product" | "inner_product" => left.dot_product(right)?,
+                _ => unreachable!(),
+            };
+            Ok(Value::Float(result as f64))
+        }
+        _ => Err(Error::Unsupported(format!("function {name}"))),
+    }
+}
+
+fn require_argument_count(name: &str, arguments: &[Value], expected: usize) -> Result<()> {
+    if arguments.len() != expected {
+        return Err(Error::InvalidQuery(format!(
+            "{name} expects {expected} argument(s), received {}",
+            arguments.len()
+        )));
+    }
+    Ok(())
+}
+
+fn numeric_binary(left: &Value, right: &Value, operator: &BinaryOperator) -> Result<Value> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
+        let value = match operator {
+            BinaryOperator::Plus => left.checked_add(*right),
+            BinaryOperator::Minus => left.checked_sub(*right),
+            BinaryOperator::Multiply => left.checked_mul(*right),
+            BinaryOperator::Divide if *right != 0 => left.checked_div(*right),
+            BinaryOperator::Modulo if *right != 0 => left.checked_rem(*right),
+            BinaryOperator::Divide | BinaryOperator::Modulo => {
+                return Err(Error::InvalidQuery("division by zero".into()))
+            }
+            _ => None,
+        };
+        return value
+            .map(Value::Integer)
+            .ok_or_else(|| Error::InvalidQuery("integer overflow".into()));
+    }
+    let (Some(left), Some(right)) = (left.as_f64()?, right.as_f64()?) else {
+        return Ok(Value::Null);
+    };
+    if right == 0.0 && matches!(operator, BinaryOperator::Divide | BinaryOperator::Modulo) {
+        return Err(Error::InvalidQuery("division by zero".into()));
+    }
+    let value = match operator {
+        BinaryOperator::Plus => left + right,
+        BinaryOperator::Minus => left - right,
+        BinaryOperator::Multiply => left * right,
+        BinaryOperator::Divide => left / right,
+        BinaryOperator::Modulo => left % right,
+        _ => unreachable!(),
+    };
+    if !value.is_finite() {
+        return Err(Error::InvalidQuery("non-finite numeric result".into()));
+    }
+    Ok(Value::Float(value))
+}
+
+fn compare_values(left: &Value, right: &Value, operator: BinaryOperator) -> Result<Value> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let ordering = match (left, right) {
+        (Value::Integer(left), Value::Integer(right)) => left.cmp(right),
+        (Value::Integer(left), Value::Float(right)) => (*left as f64)
+            .partial_cmp(right)
+            .ok_or_else(|| Error::InvalidQuery("cannot compare NaN".into()))?,
+        (Value::Float(left), Value::Integer(right)) => left
+            .partial_cmp(&(*right as f64))
+            .ok_or_else(|| Error::InvalidQuery("cannot compare NaN".into()))?,
+        (Value::Float(left), Value::Float(right)) => left
+            .partial_cmp(right)
+            .ok_or_else(|| Error::InvalidQuery("cannot compare NaN".into()))?,
+        (Value::Text(left), Value::Text(right)) => left.cmp(right),
+        (Value::Boolean(left), Value::Boolean(right)) => left.cmp(right),
+        (Value::Vector(left), Value::Vector(right)) if operator == BinaryOperator::Eq => {
+            return Ok(Value::Boolean(left == right))
+        }
+        (Value::Vector(left), Value::Vector(right)) if operator == BinaryOperator::NotEq => {
+            return Ok(Value::Boolean(left != right))
+        }
+        _ => {
+            return Err(Error::TypeMismatch {
+                expected: "comparable values".into(),
+                found: format!("{} and {}", left.type_name(), right.type_name()),
+            })
+        }
+    };
+    let result = match operator {
+        BinaryOperator::Eq => ordering == Ordering::Equal,
+        BinaryOperator::NotEq => ordering != Ordering::Equal,
+        BinaryOperator::Gt => ordering == Ordering::Greater,
+        BinaryOperator::GtEq => ordering != Ordering::Less,
+        BinaryOperator::Lt => ordering == Ordering::Less,
+        BinaryOperator::LtEq => ordering != Ordering::Greater,
+        _ => unreachable!(),
+    };
+    Ok(Value::Boolean(result))
+}
+
+fn sql_and(left: Value, right: Value) -> Result<Value> {
+    match (left.as_bool()?, right.as_bool()?) {
+        (Some(false), _) | (_, Some(false)) => Ok(Value::Boolean(false)),
+        (Some(true), Some(true)) => Ok(Value::Boolean(true)),
+        _ => Ok(Value::Null),
+    }
+}
+
+fn sql_or(left: Value, right: Value) -> Result<Value> {
+    match (left.as_bool()?, right.as_bool()?) {
+        (Some(true), _) | (_, Some(true)) => Ok(Value::Boolean(true)),
+        (Some(false), Some(false)) => Ok(Value::Boolean(false)),
+        _ => Ok(Value::Null),
+    }
+}
+
+fn boolean_not_if(value: Value, negate: bool) -> Result<Value> {
+    if !negate {
+        return Ok(value);
+    }
+    match value.as_bool()? {
+        Some(value) => Ok(Value::Boolean(!value)),
+        None => Ok(Value::Null),
+    }
+}
+
+fn like_matches(value: &str, pattern: &str) -> bool {
+    let value = value.chars().collect::<Vec<_>>();
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let mut previous = vec![false; value.len() + 1];
+    previous[0] = true;
+    for pattern_char in pattern {
+        let mut current = vec![false; value.len() + 1];
+        if pattern_char == '%' {
+            current[0] = previous[0];
+        }
+        for index in 1..=value.len() {
+            current[index] = match pattern_char {
+                '%' => current[index - 1] || previous[index],
+                '_' => previous[index - 1],
+                literal => previous[index - 1] && value[index - 1] == literal,
+            };
+        }
+        previous = current;
+    }
+    previous[value.len()]
+}
+
+fn sql_literal(value: &SqlValue) -> Result<Value> {
+    match value {
+        SqlValue::Number(value, _) if value.contains(['.', 'e', 'E']) => {
+            let value = value
+                .parse::<f64>()
+                .map_err(|_| Error::InvalidQuery(format!("invalid number {value}")))?;
+            if !value.is_finite() {
+                return Err(Error::InvalidQuery("numbers must be finite".into()));
+            }
+            Ok(Value::Float(value))
+        }
+        SqlValue::Number(value, _) => value
+            .parse::<i64>()
+            .map(Value::Integer)
+            .map_err(|_| Error::InvalidQuery(format!("integer is out of range: {value}"))),
+        SqlValue::SingleQuotedString(value)
+        | SqlValue::DoubleQuotedString(value)
+        | SqlValue::EscapedStringLiteral(value)
+        | SqlValue::NationalStringLiteral(value)
+        | SqlValue::RawStringLiteral(value) => Ok(Value::Text(value.clone())),
+        SqlValue::Boolean(value) => Ok(Value::Boolean(*value)),
+        SqlValue::Null => Ok(Value::Null),
+        other => Err(Error::Unsupported(format!("literal {other}"))),
+    }
+}
+
+fn parse_data_type(data_type: &sqlparser::ast::DataType) -> Result<DataType> {
+    use sqlparser::ast::DataType as SqlDataType;
+    match data_type {
+        SqlDataType::TinyInt(_)
+        | SqlDataType::Int2(_)
+        | SqlDataType::SmallInt(_)
+        | SqlDataType::MediumInt(_)
+        | SqlDataType::Int(_)
+        | SqlDataType::Int4(_)
+        | SqlDataType::Int64
+        | SqlDataType::Integer(_)
+        | SqlDataType::BigInt(_)
+        | SqlDataType::Int8(_) => Ok(DataType::Integer),
+        SqlDataType::Float(_)
+        | SqlDataType::Float4
+        | SqlDataType::Float64
+        | SqlDataType::Real
+        | SqlDataType::Float8
+        | SqlDataType::Double
+        | SqlDataType::DoublePrecision
+        | SqlDataType::Numeric(_)
+        | SqlDataType::Decimal(_)
+        | SqlDataType::Dec(_) => Ok(DataType::Float),
+        SqlDataType::Text
+        | SqlDataType::String(_)
+        | SqlDataType::Character(_)
+        | SqlDataType::Char(_)
+        | SqlDataType::CharacterVarying(_)
+        | SqlDataType::CharVarying(_)
+        | SqlDataType::Varchar(_)
+        | SqlDataType::Nvarchar(_) => Ok(DataType::Text),
+        SqlDataType::Bool | SqlDataType::Boolean => Ok(DataType::Boolean),
+        SqlDataType::Custom(name, modifiers) if object_name(name) == "vector" => {
+            if modifiers.len() != 1 {
+                return Err(Error::InvalidQuery(
+                    "VECTOR type requires exactly one dimension, for example VECTOR(384)".into(),
+                ));
+            }
+            let dimensions = modifiers[0].parse::<usize>().map_err(|_| {
+                Error::InvalidQuery(format!("invalid vector dimension {}", modifiers[0]))
+            })?;
+            if dimensions == 0 {
+                return Err(Error::InvalidVectorDimension);
+            }
+            if dimensions > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::VectorDimensionLimit {
+                    found: dimensions,
+                    max: MAX_VECTOR_DIMENSIONS,
+                });
+            }
+            Ok(DataType::Vector(dimensions))
+        }
+        _ => Err(Error::Unsupported(format!("data type {data_type}"))),
+    }
+}
+
+fn coerce(value: Value, data_type: &DataType) -> Result<Value> {
+    match (value, data_type) {
+        (Value::Null, _) => Ok(Value::Null),
+        (value @ Value::Integer(_), DataType::Integer) => Ok(value),
+        (Value::Integer(value), DataType::Float) => Ok(Value::Float(value as f64)),
+        (value @ Value::Float(_), DataType::Float) => Ok(value),
+        (value @ Value::Text(_), DataType::Text) => Ok(value),
+        (value @ Value::Boolean(_), DataType::Boolean) => Ok(value),
+        (Value::Vector(value), DataType::Vector(dimensions))
+            if value.dimensions() == *dimensions =>
+        {
+            Ok(Value::Vector(value))
+        }
+        (Value::Vector(value), DataType::Vector(dimensions)) => Err(Error::DimensionMismatch {
+            left: *dimensions,
+            right: value.dimensions(),
+        }),
+        (value, expected) => Err(type_mismatch(&expected.to_string(), &value)),
+    }
+}
+
+pub(crate) fn validate_row(columns: &[Column], row: &[Value]) -> Result<()> {
+    for (column, value) in columns.iter().zip(row) {
+        if !column.nullable && matches!(value, Value::Null) {
+            return Err(Error::NullViolation(column.name.clone()));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_unique(table: &Table, pending: &[Vec<Value>]) -> Result<()> {
+    for (column_index, column) in table.columns.iter().enumerate() {
+        if !column.unique {
+            continue;
+        }
+        let mut values = HashSet::new();
+        for row in table.rows.iter().chain(pending) {
+            let value = &row[column_index];
+            if matches!(value, Value::Null) {
+                continue;
+            }
+            if !values.insert(UniqueKey::from(value)) {
+                return Err(Error::UniqueViolation(column.name.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+enum InsertConflictPlan {
+    Fail,
+    DoNothing(Vec<usize>),
+    DoUpdate {
+        conflict_column: usize,
+        update: DoUpdate,
+    },
+}
+
+fn resolve_conflict_plan(table: &Table, on_insert: Option<OnInsert>) -> Result<InsertConflictPlan> {
+    let Some(on_insert) = on_insert else {
+        return Ok(InsertConflictPlan::Fail);
+    };
+    let conflict = match on_insert {
+        OnInsert::OnConflict(conflict) => conflict,
+        OnInsert::DuplicateKeyUpdate(_) => {
+            return Err(Error::Unsupported("ON DUPLICATE KEY UPDATE".into()))
+        }
+        _ => return Err(Error::Unsupported("unknown INSERT conflict clause".into())),
+    };
+    match conflict.action {
+        OnConflictAction::DoNothing => match conflict.conflict_target.as_ref() {
+            None => Ok(InsertConflictPlan::DoNothing(
+                table
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, column)| column.unique.then_some(index))
+                    .collect(),
+            )),
+            Some(target) => Ok(InsertConflictPlan::DoNothing(vec![
+                resolve_conflict_target(table, target)?,
+            ])),
+        },
+        OnConflictAction::DoUpdate(update) => {
+            let target = conflict.conflict_target.as_ref().ok_or_else(|| {
+                Error::InvalidQuery("ON CONFLICT DO UPDATE requires a conflict target".into())
+            })?;
+            Ok(InsertConflictPlan::DoUpdate {
+                conflict_column: resolve_conflict_target(table, target)?,
+                update,
+            })
+        }
+    }
+}
+
+fn resolve_conflict_target(table: &Table, target: &ConflictTarget) -> Result<usize> {
+    match target {
+        ConflictTarget::Columns(columns) if columns.len() == 1 => {
+            let index = find_column(&table.columns, &ident_name(&columns[0]))?;
+            if table.columns[index].unique {
+                Ok(index)
+            } else {
+                Err(Error::InvalidQuery(format!(
+                    "ON CONFLICT target '{}' is not unique",
+                    table.columns[index].name
+                )))
+            }
+        }
+        ConflictTarget::Columns(_) => {
+            Err(Error::Unsupported("composite ON CONFLICT targets".into()))
+        }
+        ConflictTarget::OnConstraint(_) => {
+            Err(Error::Unsupported("named ON CONFLICT constraints".into()))
+        }
+    }
+}
+
+fn apply_conflict_updates(
+    table: &mut Table,
+    pending: Vec<Vec<Value>>,
+    conflict_column: usize,
+    update: &DoUpdate,
+) -> Result<usize> {
+    if update.assignments.is_empty() {
+        return Err(Error::InvalidQuery(
+            "ON CONFLICT DO UPDATE requires at least one assignment".into(),
+        ));
+    }
+
+    let mut seen_columns = HashSet::new();
+    let assignment_indexes = update
+        .assignments
+        .iter()
+        .map(|assignment| {
+            let identifier = assignment
+                .id
+                .last()
+                .ok_or_else(|| Error::InvalidQuery("empty ON CONFLICT assignment".into()))?;
+            let name = ident_name(identifier);
+            if !seen_columns.insert(name.clone()) {
+                return Err(Error::DuplicateColumn(name));
+            }
+            find_column(&table.columns, &name)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Work against a private copy so any expression or constraint failure rolls
+    // back every insert and update from this statement.
+    let mut prospective = table.rows.clone();
+    let mut touched_rows = HashSet::new();
+    let mut rows_affected = 0;
+    for excluded in pending {
+        let conflict = (!matches!(excluded[conflict_column], Value::Null))
+            .then(|| {
+                prospective
+                    .iter()
+                    .position(|row| row[conflict_column] == excluded[conflict_column])
+            })
+            .flatten();
+
+        let Some(row_index) = conflict else {
+            let row_index = prospective.len();
+            prospective.push(excluded);
+            touched_rows.insert(row_index);
+            rows_affected += 1;
+            continue;
+        };
+        if !touched_rows.insert(row_index) {
+            return Err(Error::InvalidQuery(
+                "ON CONFLICT DO UPDATE cannot affect the same row twice".into(),
+            ));
+        }
+
+        let existing = prospective[row_index].clone();
+        let context = EvalContext::upsert(&table.columns, &existing, &excluded);
+        let should_update = match &update.selection {
+            Some(selection) => evaluate(selection, &context)?.as_bool()?.unwrap_or(false),
+            None => true,
+        };
+        if !should_update {
+            continue;
+        }
+
+        let mut replacement = existing.clone();
+        for (assignment, column_index) in update.assignments.iter().zip(&assignment_indexes) {
+            let value = evaluate(&assignment.value, &context)?;
+            replacement[*column_index] = coerce(value, &table.columns[*column_index].data_type)?;
+        }
+        validate_row(&table.columns, &replacement)?;
+        prospective[row_index] = replacement;
+        rows_affected += 1;
+    }
+
+    let empty_table = Table {
+        columns: table.columns.clone(),
+        rows: Vec::new(),
+        indexes: HashMap::new(),
+    };
+    validate_unique(&empty_table, &prospective)?;
+    table.rows = prospective;
+    Ok(rows_affected)
+}
+
+fn row_conflicts(
+    table: &Table,
+    accepted: &[Vec<Value>],
+    candidate: &[Value],
+    conflict_columns: &[usize],
+) -> bool {
+    conflict_columns.iter().any(|column| {
+        let value = &candidate[*column];
+        !matches!(value, Value::Null)
+            && table
+                .rows
+                .iter()
+                .chain(accepted)
+                .any(|row| row[*column] == *value)
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum UniqueKey {
+    Null,
+    Integer(i64),
+    Float(u64),
+    Text(String),
+    Boolean(bool),
+    Vector(Vec<u32>),
+}
+
+impl HashIndex {
+    pub(crate) fn new(column: usize) -> Self {
+        Self {
+            column,
+            buckets: HashMap::new(),
+        }
+    }
+
+    fn rebuild(&mut self, rows: &[Vec<Value>]) {
+        self.buckets.clear();
+        for (row_index, row) in rows.iter().enumerate() {
+            let value = &row[self.column];
+            if matches!(value, Value::Null | Value::Vector(_)) {
+                continue;
+            }
+            self.buckets
+                .entry(UniqueKey::from(value))
+                .or_default()
+                .push(row_index);
+        }
+    }
+}
+
+pub(crate) fn rebuild_indexes(table: &mut Table) {
+    let rows = &table.rows;
+    for index in table.indexes.values_mut() {
+        index.rebuild(rows);
+    }
+}
+
+impl From<&Value> for UniqueKey {
+    fn from(value: &Value) -> Self {
+        match value {
+            Value::Null => Self::Null,
+            Value::Integer(value) => Self::Integer(*value),
+            Value::Float(value) => Self::Float(if *value == 0.0 { 0 } else { value.to_bits() }),
+            Value::Text(value) => Self::Text(value.clone()),
+            Value::Boolean(value) => Self::Boolean(*value),
+            Value::Vector(value) => Self::Vector(
+                value
+                    .as_slice()
+                    .iter()
+                    .map(|element| {
+                        if *element == 0.0 {
+                            0
+                        } else {
+                            element.to_bits()
+                        }
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
+fn usize_expression(expression: &Expr, context: &EvalContext<'_>, label: &str) -> Result<usize> {
+    match evaluate(expression, context)? {
+        Value::Integer(value) if value >= 0 => {
+            usize::try_from(value).map_err(|_| Error::InvalidQuery(format!("{label} is too large")))
+        }
+        value => Err(Error::InvalidQuery(format!(
+            "{label} must be a non-negative integer, found {value}"
+        ))),
+    }
+}
+
+fn table_factor_name(factor: &TableFactor) -> Result<String> {
+    match factor {
+        TableFactor::Table { name, args, .. } if args.is_none() => Ok(object_name(name)),
+        other => Err(Error::Unsupported(format!("table source {other}"))),
+    }
+}
+
+fn find_column(columns: &[Column], name: &str) -> Result<usize> {
+    let name = normalize_name(name);
+    columns
+        .iter()
+        .position(|column| normalize_name(&column.name) == name)
+        .ok_or(Error::ColumnNotFound(name))
+}
+
+fn expression_label(expression: &Expr) -> String {
+    match expression {
+        Expr::Identifier(identifier) => ident_name(identifier),
+        Expr::CompoundIdentifier(identifiers) => identifiers
+            .last()
+            .map(ident_name)
+            .unwrap_or_else(|| expression.to_string()),
+        _ => expression.to_string(),
+    }
+}
+
+fn object_name(name: &ObjectName) -> String {
+    name.0.last().map(ident_name).unwrap_or_default()
+}
+
+fn ident_name(identifier: &Ident) -> String {
+    if identifier.quote_style.is_some() {
+        identifier.value.clone()
+    } else {
+        normalize_name(&identifier.value)
+    }
+}
+
+fn normalize_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+fn type_mismatch(expected: &str, found: &Value) -> Error {
+    Error::TypeMismatch {
+        expected: expected.into(),
+        found: found.type_name().into(),
+    }
+}
+
+fn ensure_finite_f32(values: &[f32]) -> Result<()> {
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(Error::InvalidQuery(
+            "vector elements must be finite numbers".into(),
+        ));
+    }
+    Ok(())
+}
