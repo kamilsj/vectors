@@ -7,10 +7,13 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     groups:
-      rust-dependencies:
-        patterns: ["*"]
+      runtime-dependencies:
+        patterns: ["actix-web", "rayon", "serde", "serde_json", "thiserror"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
