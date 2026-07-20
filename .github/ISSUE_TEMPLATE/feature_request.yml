@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a concrete SQL, vector-search, API, or storage improvement
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: workload
+    attributes:
+      label: Workload and problem
+      description: Describe the application, data shape, scale, and limitation you reached.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Show the desired SQL or API when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: measure
+    attributes:
+      label: Success measure
+      description: How would we know the change solves the problem without weakening correctness?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds or other designs you evaluated.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Compatibility
+      options:
+        - label: I considered effects on SQL semantics, the public API, and snapshot compatibility.
+          required: true
+        - label: I searched the roadmap and existing issues for related work.
+          required: true

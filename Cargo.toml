@@ -4,11 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "An embeddable SQL engine for relational data and vector similarity search"
 readme = "README.md"
+repository = "https://github.com/kamilsj/vectors"
+homepage = "https://github.com/kamilsj/vectors"
+documentation = "https://docs.rs/vectors"
 keywords = ["database", "sql", "vector", "embeddings", "search"]
 categories = ["database-implementations"]
 
 [dependencies]
 actix-web = "4.14.0"
+rayon = "1.12.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlparser = "0.43.0"

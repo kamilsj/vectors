@@ -2,10 +2,16 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,6 +30,7 @@ jobs:
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: cargo package --locked
 
   test:
     name: Tests (${{ matrix.os }})
@@ -35,5 +42,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-targets
-      - run: cargo build --release
+      - run: cargo test --all-targets --locked
+      - run: cargo build --release --locked
+      - name: Smoke-test the vector benchmark
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --release --locked --example benchmark_vector_search
+        env:
+          VECTORS_BENCH_ROWS: 2000
+          VECTORS_BENCH_DIMENSIONS: 32
+          VECTORS_BENCH_ITERATIONS: 2

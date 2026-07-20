@@ -3,11 +3,25 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/kamilsj/vectors/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/kamilsj/vectors/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/kamilsj/vectors/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/kamilsj/vectors?style=flat&logo=github"></a>
+  <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-orange?logo=rust">
+</p>
+
+<p align="center">
   <strong>An embeddable vector database where relational data and embeddings share one query language: SQL.</strong>
 </p>
 
 <p align="center">
   Rust 2021 · SQL parser · exact vector search · Actix Web · atomic snapshots
+</p>
+
+<p align="center">
+  <a href="#try-it-in-two-minutes">Quickstart</a> ·
+  <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="ROADMAP.md">Roadmap</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
@@ -44,6 +58,49 @@ LIMIT 5;
   atomically and can be checkpointed automatically.
 - **No frontend toolchain.** The console ships inside the server with no CDN,
   Node runtime, or asset build required.
+
+## Fast path for SQL vector search
+
+The planner recognizes the common exact-search shape:
+
+```sql
+SELECT id, title,
+       cosine_distance(embedding, ARRAY[1, 0, 0]) AS distance
+FROM documents
+WHERE category = 'tech'
+ORDER BY distance
+LIMIT 20;
+```
+
+For safe projections, this becomes a specialized `VectorTopK` plan:
+
+1. scalar hash indexes prune relational candidates;
+2. the query vector is evaluated once rather than once per row;
+3. distance functions call the vector kernels directly, bypassing generic AST
+   evaluation;
+4. large scans are scored in parallel with thread-local bounded heaps;
+5. text, vectors, and other projected values are cloned only for final winners.
+
+Queries with additional sort keys, `DISTINCT`, or complex projections fall back
+to the general SQL executor without changing their semantics. Use `EXPLAIN` to
+see whether a statement selected `VectorTopK`.
+
+Snapshot I/O uses 1 MiB sequential buffers and encodes or decodes each vector in
+one contiguous operation. The format remains backward compatible and entirely
+safe Rust—no memory mapping or unsafe borrowed file pages.
+
+Run the reproducible local benchmark:
+
+```sh
+cargo run --release --example benchmark_vector_search
+```
+
+On the development machine, a 10,000-row × 64-dimension filtered cosine query
+averaged 0.71 ms through `VectorTopK` versus 11.76 ms through the generic plan
+(16.5× faster). A 2.95 MiB snapshot loaded in 7.7 ms. Treat these numbers as a
+regression baseline, not a cross-database benchmark; hardware and workloads
+matter. The exact method, environment controls, and reporting rules are in
+[the benchmark guide](docs/BENCHMARKS.md).
 
 ## Try it in two minutes
 
@@ -103,7 +160,8 @@ database.save("vectors.vdb")?;
 ```
 
 See [`examples/hybrid_search.rs`](examples/hybrid_search.rs) for a complete
-program.
+program and [`examples/benchmark_vector_search.rs`](examples/benchmark_vector_search.rs)
+for the reproducible performance harness.
 
 ## A deliberately small architecture
 
@@ -113,7 +171,9 @@ flowchart LR
     B["Interactive shell"] --> E
     C["Web console"] --> D["Actix HTTP API"]
     D --> E["sqlparser AST + executor"]
-    E --> F["RwLock catalog"]
+    E --> K["VectorTopK planner"]
+    K --> F["RwLock catalog"]
+    E --> F
     F --> G["Relational rows"]
     F --> H["VECTOR(n) values"]
     F --> I["Scalar hash indexes"]
@@ -136,6 +196,7 @@ request containing writes commits as one unit or leaves the catalog unchanged.
 | Aggregates | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `GROUP BY`, `HAVING` |
 | Expressions | arithmetic, comparisons, boolean logic, `NULL`, `BETWEEN`, `IN`, `LIKE`, `ILIKE` |
 | Planning | `EXPLAIN`, hash-index pruning, bounded top-k execution |
+| Fast search | direct distance scoring, deferred projection, parallel top-k heaps |
 | Types | integers, floating point, decimals, text, booleans, fixed-width `VECTOR(n)` |
 
 Vector literals can be written as `ARRAY[1, 2, 3]` or `VECTOR(1, 2, 3)`.
@@ -238,7 +299,8 @@ after the last completed checkpoint.
 - no roles, per-user authorization, or built-in TLS.
 
 Keeping these boundaries visible is intentional: `vectors` should be easy to
-understand before it becomes broad.
+understand before it becomes broad. Planned work and its acceptance criteria
+are tracked in [ROADMAP.md](ROADMAP.md).
 
 ## Development
 
@@ -251,4 +313,7 @@ cargo doc --no-deps
 
 CI runs formatting, linting, documentation, tests, and release builds on Linux
 and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a large SQL
-or storage change.
+or storage change. Design invariants live in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), performance results in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md), and security reporting guidance in
+[SECURITY.md](SECURITY.md).

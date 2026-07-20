@@ -47,15 +47,18 @@ impl Vector {
         })
     }
 
+    #[inline]
     pub fn dimensions(&self) -> usize {
         self.values.len()
     }
 
+    #[inline]
     pub fn as_slice(&self) -> &[f32] {
         &self.values
     }
 
     /// Euclidean norm cached when the vector is constructed.
+    #[inline]
     pub fn norm(&self) -> f64 {
         self.norm
     }
@@ -74,6 +77,7 @@ impl Vector {
     }
 
     /// Squared Euclidean distance. Useful when only relative ordering matters.
+    #[inline]
     pub fn squared_l2_distance(&self, other: &Self) -> Result<f32> {
         self.ensure_same_dimensions(other)?;
         let mut sum = 0.0_f32;
@@ -100,6 +104,7 @@ impl Vector {
         Ok(self.squared_l2_distance(other)?.sqrt())
     }
 
+    #[inline]
     pub fn dot_product(&self, other: &Self) -> Result<f32> {
         self.ensure_same_dimensions(other)?;
         let mut sum = 0.0_f32;
@@ -119,20 +124,29 @@ impl Vector {
     }
 
     /// Cosine distance in the range `[0, 2]` (subject to floating-point error).
+    #[inline]
     pub fn cosine_distance(&self, other: &Self) -> Result<f32> {
         self.ensure_same_dimensions(other)?;
         if self.norm == 0.0 || other.norm == 0.0 {
             return Err(Error::ZeroNorm);
         }
-        let dot = self
-            .values
-            .iter()
-            .zip(other.values.iter())
-            .map(|(left, right)| f64::from(*left) * f64::from(*right))
-            .sum::<f64>();
+        let mut dot = 0.0_f64;
+        let mut index = 0;
+        while index + 4 <= self.values.len() {
+            dot += f64::from(self.values[index]) * f64::from(other.values[index])
+                + f64::from(self.values[index + 1]) * f64::from(other.values[index + 1])
+                + f64::from(self.values[index + 2]) * f64::from(other.values[index + 2])
+                + f64::from(self.values[index + 3]) * f64::from(other.values[index + 3]);
+            index += 4;
+        }
+        while index < self.values.len() {
+            dot += f64::from(self.values[index]) * f64::from(other.values[index]);
+            index += 1;
+        }
         Ok((1.0 - dot / (self.norm * other.norm)) as f32)
     }
 
+    #[inline]
     fn ensure_same_dimensions(&self, other: &Self) -> Result<()> {
         if self.dimensions() != other.dimensions() {
             return Err(Error::DimensionMismatch {

@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,6 +22,7 @@ const MAX_ROWS: usize = 10_000_000;
 const MAX_STRING_BYTES: usize = 64 * 1024 * 1024;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
+const SNAPSHOT_IO_BUFFER_BYTES: usize = 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn save(catalog: &Catalog, path: &Path) -> Result<()> {
@@ -42,7 +44,8 @@ pub(crate) fn save(catalog: &Catalog, path: &Path) -> Result<()> {
 
 pub(crate) fn load(path: &Path) -> Result<Catalog> {
     let file = File::open(path).map_err(|error| path_io("open snapshot", path, error))?;
-    let mut reader = ChecksumIo::new(BufReader::new(file));
+    let mut reader = ChecksumIo::new(BufReader::with_capacity(SNAPSHOT_IO_BUFFER_BYTES, file));
+    let mut vector_bytes = Vec::new();
 
     let mut magic = [0_u8; MAGIC.len()];
     read_exact(&mut reader, &mut magic)?;
@@ -127,7 +130,11 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
         for _ in 0..row_count {
             let mut row = Vec::with_capacity(columns.len());
             for column in &columns {
-                row.push(read_value(&mut reader, &column.data_type)?);
+                row.push(read_value(
+                    &mut reader,
+                    &column.data_type,
+                    &mut vector_bytes,
+                )?);
             }
             validate_row(&columns, &row)
                 .map_err(|error| corrupt(format!("invalid row in table '{name}': {error}")))?;
@@ -163,7 +170,8 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
 
 fn write_catalog(file: File, catalog: &Catalog) -> Result<()> {
     ensure_maximum("table count", catalog.tables.len(), MAX_TABLES)?;
-    let mut writer = ChecksumIo::new(BufWriter::new(file));
+    let mut writer = ChecksumIo::new(BufWriter::with_capacity(SNAPSHOT_IO_BUFFER_BYTES, file));
+    let mut vector_bytes = Vec::new();
     write_bytes(&mut writer, MAGIC)?;
     write_u32(&mut writer, FORMAT_VERSION)?;
     write_count(&mut writer, catalog.tables.len())?;
@@ -202,7 +210,7 @@ fn write_catalog(file: File, catalog: &Catalog) -> Result<()> {
                 corrupt(format!("invalid in-memory row in table '{name}': {error}"))
             })?;
             for (value, column) in row.iter().zip(&table.columns) {
-                write_value(&mut writer, value, &column.data_type)?;
+                write_value(&mut writer, value, &column.data_type, &mut vector_bytes)?;
             }
         }
     }
@@ -249,7 +257,12 @@ fn read_data_type(reader: &mut impl Read) -> Result<DataType> {
     }
 }
 
-fn write_value(writer: &mut impl Write, value: &Value, data_type: &DataType) -> Result<()> {
+fn write_value(
+    writer: &mut impl Write,
+    value: &Value,
+    data_type: &DataType,
+    vector_bytes: &mut Vec<u8>,
+) -> Result<()> {
     if matches!(value, Value::Null) {
         return write_u8(writer, 0);
     }
@@ -264,13 +277,15 @@ fn write_value(writer: &mut impl Write, value: &Value, data_type: &DataType) -> 
         (Value::Vector(value), DataType::Vector(dimensions))
             if value.dimensions() == *dimensions =>
         {
+            vector_bytes.clear();
+            vector_bytes.reserve(value.dimensions().saturating_mul(size_of::<f32>()));
             for element in value.as_slice() {
                 if !element.is_finite() {
                     return Err(corrupt("in-memory vector contains a non-finite value"));
                 }
-                write_u32(writer, element.to_bits())?;
+                vector_bytes.extend_from_slice(&element.to_bits().to_le_bytes());
             }
-            Ok(())
+            write_bytes(writer, vector_bytes)
         }
         (value, expected) => Err(corrupt(format!(
             "in-memory {} value does not match {expected}",
@@ -279,7 +294,11 @@ fn write_value(writer: &mut impl Write, value: &Value, data_type: &DataType) -> 
     }
 }
 
-fn read_value(reader: &mut impl Read, data_type: &DataType) -> Result<Value> {
+fn read_value(
+    reader: &mut impl Read,
+    data_type: &DataType,
+    vector_bytes: &mut Vec<u8>,
+) -> Result<Value> {
     match read_u8(reader)? {
         0 => return Ok(Value::Null),
         1 => {}
@@ -297,9 +316,14 @@ fn read_value(reader: &mut impl Read, data_type: &DataType) -> Result<Value> {
         DataType::Text => Ok(Value::Text(read_string(reader)?)),
         DataType::Boolean => Ok(Value::Boolean(read_bool(reader, "boolean value")?)),
         DataType::Vector(dimensions) => {
+            let byte_length = dimensions
+                .checked_mul(size_of::<f32>())
+                .ok_or_else(|| corrupt("vector byte length overflow"))?;
+            vector_bytes.resize(byte_length, 0);
+            read_exact(reader, vector_bytes)?;
             let mut values = Vec::with_capacity(*dimensions);
-            for _ in 0..*dimensions {
-                let value = f32::from_bits(read_u32(reader)?);
+            for bytes in vector_bytes.chunks_exact(size_of::<f32>()) {
+                let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 if !value.is_finite() {
                     return Err(corrupt("vector contains a non-finite value"));
                 }

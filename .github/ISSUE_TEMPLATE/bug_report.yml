@@ -1,0 +1,69 @@
+name: Bug report
+description: Report incorrect SQL, API, storage, or console behavior
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to make vectors more reliable.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Paste `git rev-parse --short HEAD` or the release version.
+      placeholder: 0.1.0 or abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Interface
+      options:
+        - Rust library
+        - SQL shell
+        - HTTP API
+        - Web console
+        - Snapshot storage
+        - Build or packaging
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest schema, data, SQL, or request that reproduces the problem.
+      render: sql
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the complete error text or response, with secrets removed.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Rust version, CPU architecture, and relevant server settings.
+      placeholder: Windows 11, rustc 1.xx, x86-64
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed credentials, bearer tokens, and private data.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: This is not a security vulnerability; those are reported privately through SECURITY.md.
+          required: true

@@ -4,6 +4,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
+use rayon::prelude::*;
 use sqlparser::ast::{
     Assignment, BinaryOperator, ColumnDef, ColumnOption, ConflictTarget, DoUpdate, Expr, Function,
     FunctionArg, FunctionArgExpr, Ident, ObjectName, ObjectType, OnConflictAction, OnInsert,
@@ -982,6 +983,26 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
         .as_ref()
         .map(|limit| usize_expression(limit, &empty, "LIMIT"))
         .transpose()?;
+    let result_columns = projection
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
+    let fast_vector_plan = if !aggregate {
+        match limit {
+            Some(limit) => FastVectorTopKPlan::build(
+                select,
+                query,
+                columns,
+                &projection,
+                &result_columns,
+                offset,
+                limit,
+            )?,
+            None => None,
+        }
+    } else {
+        None
+    };
     if !query.order_by.is_empty() {
         let order = query
             .order_by
@@ -993,7 +1014,14 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
             let retained = offset
                 .checked_add(limit)
                 .ok_or_else(|| Error::InvalidQuery("OFFSET plus LIMIT is too large".into()))?;
-            plan.push(format!("TopK: {order} (retain {retained} row(s))"));
+            if let Some(vector_plan) = &fast_vector_plan {
+                plan.push(format!(
+                    "VectorTopK: {order} (direct scoring on {}; deferred projection; retain {retained} row(s))",
+                    columns[vector_plan.vector_column].name
+                ));
+            } else {
+                plan.push(format!("TopK: {order} (retain {retained} row(s))"));
+            }
         } else {
             plan.push(format!("Sort: {order}"));
         }
@@ -1139,6 +1167,26 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         return Err(Error::InvalidQuery(
             "HAVING requires GROUP BY or an aggregate expression".into(),
         ));
+    }
+    if let (Some(table), Some(limit)) = (table, limit) {
+        if let Some(plan) = FastVectorTopKPlan::build(
+            select,
+            query,
+            columns,
+            &projection,
+            &result_columns,
+            offset,
+            limit,
+        )? {
+            return run_fast_vector_top_k(
+                table,
+                indexed_rows.as_deref(),
+                select.selection.as_ref(),
+                plan,
+                result_columns,
+                rows_examined,
+            );
+        }
     }
     let mut candidates =
         CandidateSink::new(&query.order_by, offset, limit, select.distinct.is_some())?;
@@ -2122,6 +2170,421 @@ fn build_projection(items: &[SelectItem], columns: &[Column]) -> Result<Vec<Proj
         }
     }
     Ok(output)
+}
+
+const PARALLEL_VECTOR_SCAN_THRESHOLD: usize = 4_096;
+
+#[derive(Clone, Copy, Debug)]
+enum FastVectorMetric {
+    L2,
+    SquaredL2,
+    Cosine,
+    DotProduct,
+    NegativeDotProduct,
+}
+
+impl FastVectorMetric {
+    fn score(self, vector: &Vector, query: &Vector) -> Result<f64> {
+        let score = match self {
+            Self::L2 => vector.l2_distance(query)?,
+            Self::SquaredL2 => vector.squared_l2_distance(query)?,
+            Self::Cosine => vector.cosine_distance(query)?,
+            Self::DotProduct => vector.dot_product(query)?,
+            Self::NegativeDotProduct => -vector.dot_product(query)?,
+        };
+        Ok(f64::from(score))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FastProjection {
+    Column(usize),
+    Score,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FastSortOrder {
+    descending: bool,
+    nulls_first: bool,
+}
+
+impl FastSortOrder {
+    fn new(order: &OrderByExpr) -> Self {
+        Self {
+            descending: order.asc == Some(false),
+            nulls_first: order.nulls_first.unwrap_or(order.asc == Some(false)),
+        }
+    }
+
+    fn compare(self, left: &Value, right: &Value) -> Ordering {
+        match (left, right) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Null, _) => {
+                if self.nulls_first {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                }
+            }
+            (_, Value::Null) => {
+                if self.nulls_first {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                }
+            }
+            (left, right) => {
+                let ordering = compare_sort_values(left, right);
+                if self.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
+            }
+        }
+    }
+}
+
+struct FastVectorTopKPlan {
+    vector_column: usize,
+    query: Vector,
+    metric: FastVectorMetric,
+    projections: Vec<FastProjection>,
+    order: FastSortOrder,
+    offset: usize,
+    limit: usize,
+    capacity: usize,
+}
+
+impl FastVectorTopKPlan {
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        select: &Select,
+        query: &Query,
+        columns: &[Column],
+        projection: &[Projection],
+        result_columns: &[String],
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<Self>> {
+        if select.distinct.is_some() || query.order_by.len() != 1 {
+            return Ok(None);
+        }
+        let order = &query.order_by[0];
+        let order_expression = match &order.expr {
+            Expr::Identifier(identifier) => {
+                let name = ident_name(identifier);
+                match result_columns
+                    .iter()
+                    .position(|label| normalize_name(label) == name)
+                {
+                    Some(index) => &projection[index].expression,
+                    None => &order.expr,
+                }
+            }
+            _ => &order.expr,
+        };
+        let Some((vector_column, query_vector, metric)) =
+            parse_fast_vector_distance(order_expression, columns)?
+        else {
+            return Ok(None);
+        };
+        let expected_dimensions = match columns[vector_column].data_type {
+            DataType::Vector(dimensions) => dimensions,
+            _ => return Ok(None),
+        };
+        if query_vector.dimensions() != expected_dimensions {
+            return Err(Error::DimensionMismatch {
+                left: expected_dimensions,
+                right: query_vector.dimensions(),
+            });
+        }
+
+        let mut projections = Vec::with_capacity(projection.len());
+        for item in projection {
+            if item.expression == *order_expression {
+                projections.push(FastProjection::Score);
+            } else if let Some(column) = simple_column_expression(&item.expression, columns) {
+                projections.push(FastProjection::Column(column));
+            } else {
+                return Ok(None);
+            }
+        }
+        let capacity = offset
+            .checked_add(limit)
+            .ok_or_else(|| Error::InvalidQuery("OFFSET plus LIMIT is too large".into()))?;
+        Ok(Some(Self {
+            vector_column,
+            query: query_vector,
+            metric,
+            projections,
+            order: FastSortOrder::new(order),
+            offset,
+            limit,
+            capacity,
+        }))
+    }
+
+    fn score_row<'a>(
+        &self,
+        columns: &[Column],
+        row: &'a [Value],
+        selection: Option<&Expr>,
+    ) -> Result<Option<FastVectorCandidate<'a>>> {
+        let context = EvalContext::new(columns, row);
+        if let Some(selection) = selection {
+            if !evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
+                return Ok(None);
+            }
+        }
+        let score = match &row[self.vector_column] {
+            Value::Null => Value::Null,
+            Value::Vector(vector) => Value::Float(self.metric.score(vector, &self.query)?),
+            value => return Err(type_mismatch("VECTOR", value)),
+        };
+        Ok(Some(FastVectorCandidate {
+            row,
+            score,
+            order: self.order,
+        }))
+    }
+
+    fn materialize(&self, candidate: FastVectorCandidate<'_>) -> Vec<Value> {
+        self.projections
+            .iter()
+            .map(|projection| match projection {
+                FastProjection::Column(index) => candidate.row[*index].clone(),
+                FastProjection::Score => candidate.score.clone(),
+            })
+            .collect()
+    }
+}
+
+fn simple_column_expression(expression: &Expr, columns: &[Column]) -> Option<usize> {
+    let identifier = match expression {
+        Expr::Identifier(identifier) => identifier,
+        Expr::CompoundIdentifier(identifiers) => identifiers.last()?,
+        Expr::Nested(expression) => return simple_column_expression(expression, columns),
+        _ => return None,
+    };
+    find_column(columns, &ident_name(identifier)).ok()
+}
+
+fn parse_fast_vector_distance(
+    expression: &Expr,
+    columns: &[Column],
+) -> Result<Option<(usize, Vector, FastVectorMetric)>> {
+    let expression = match expression {
+        Expr::Nested(expression) => expression.as_ref(),
+        expression => expression,
+    };
+    let (left, right, metric) = match expression {
+        Expr::Function(function)
+            if !function.distinct
+                && function.filter.is_none()
+                && function.over.is_none()
+                && function.order_by.is_empty() =>
+        {
+            let arguments = function
+                .args
+                .iter()
+                .map(|argument| match argument {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Some(expression),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(arguments) = arguments else {
+                return Ok(None);
+            };
+            if arguments.len() != 2 {
+                return Ok(None);
+            }
+            let metric = match object_name(&function.name).as_str() {
+                "l2_distance" | "euclidean_distance" => FastVectorMetric::L2,
+                "squared_l2_distance" => FastVectorMetric::SquaredL2,
+                "cosine_distance" => FastVectorMetric::Cosine,
+                "dot_product" | "inner_product" => FastVectorMetric::DotProduct,
+                _ => return Ok(None),
+            };
+            (arguments[0], arguments[1], metric)
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Custom(operator),
+            right,
+        } => {
+            let metric = match operator.as_str() {
+                "<->" => FastVectorMetric::L2,
+                "<#>" => FastVectorMetric::NegativeDotProduct,
+                "<=>" => FastVectorMetric::Cosine,
+                _ => return Ok(None),
+            };
+            (left.as_ref(), right.as_ref(), metric)
+        }
+        _ => return Ok(None),
+    };
+
+    for (column_expression, query_expression) in [(left, right), (right, left)] {
+        let Some(column) = simple_column_expression(column_expression, columns) else {
+            continue;
+        };
+        if !matches!(columns[column].data_type, DataType::Vector(_)) {
+            continue;
+        }
+        match evaluate(query_expression, &EvalContext::empty()) {
+            Ok(Value::Vector(query)) => return Ok(Some((column, query, metric))),
+            Ok(_) | Err(Error::ColumnNotFound(_)) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+struct FastVectorCandidate<'a> {
+    row: &'a [Value],
+    score: Value,
+    order: FastSortOrder,
+}
+
+impl PartialEq for FastVectorCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for FastVectorCandidate<'_> {}
+
+impl PartialOrd for FastVectorCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FastVectorCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.order.compare(&self.score, &other.score)
+    }
+}
+
+fn push_fast_vector_candidate<'a>(
+    heap: &mut BinaryHeap<FastVectorCandidate<'a>>,
+    candidate: FastVectorCandidate<'a>,
+    capacity: usize,
+) {
+    if capacity == 0 {
+        return;
+    }
+    if heap.len() < capacity {
+        heap.push(candidate);
+    } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+        heap.pop();
+        heap.push(candidate);
+    }
+}
+
+fn score_and_push_fast_vector_candidate<'a>(
+    heap: &mut BinaryHeap<FastVectorCandidate<'a>>,
+    row: &'a [Value],
+    columns: &[Column],
+    selection: Option<&Expr>,
+    plan: &FastVectorTopKPlan,
+) -> Result<()> {
+    if let Some(candidate) = plan.score_row(columns, row, selection)? {
+        push_fast_vector_candidate(heap, candidate, plan.capacity);
+    }
+    Ok(())
+}
+
+fn parallel_fast_vector_heap<'a, I>(
+    rows: I,
+    columns: &[Column],
+    selection: Option<&Expr>,
+    plan: &FastVectorTopKPlan,
+) -> Result<BinaryHeap<FastVectorCandidate<'a>>>
+where
+    I: ParallelIterator<Item = &'a [Value]>,
+{
+    rows.try_fold(BinaryHeap::new, |mut heap, row| {
+        if let Some(candidate) = plan.score_row(columns, row, selection)? {
+            push_fast_vector_candidate(&mut heap, candidate, plan.capacity);
+        }
+        Ok(heap)
+    })
+    .try_reduce(BinaryHeap::new, |mut left, right| {
+        for candidate in right {
+            push_fast_vector_candidate(&mut left, candidate, plan.capacity);
+        }
+        Ok(left)
+    })
+}
+
+fn run_fast_vector_top_k(
+    table: &Table,
+    indexed_rows: Option<&[usize]>,
+    selection: Option<&Expr>,
+    plan: FastVectorTopKPlan,
+    result_columns: Vec<String>,
+    rows_examined: usize,
+) -> Result<QueryResult> {
+    let source_count = indexed_rows.map_or(table.rows.len(), <[usize]>::len);
+    let mut heap = if source_count >= PARALLEL_VECTOR_SCAN_THRESHOLD {
+        match indexed_rows {
+            Some(indexes) => parallel_fast_vector_heap(
+                indexes
+                    .par_iter()
+                    .map(|index| table.rows[*index].as_slice()),
+                &table.columns,
+                selection,
+                &plan,
+            )?,
+            None => parallel_fast_vector_heap(
+                table.rows.par_iter().map(Vec::as_slice),
+                &table.columns,
+                selection,
+                &plan,
+            )?,
+        }
+    } else {
+        let mut heap = BinaryHeap::new();
+        match indexed_rows {
+            Some(indexes) => {
+                for index in indexes {
+                    score_and_push_fast_vector_candidate(
+                        &mut heap,
+                        &table.rows[*index],
+                        &table.columns,
+                        selection,
+                        &plan,
+                    )?;
+                }
+            }
+            None => {
+                for row in &table.rows {
+                    score_and_push_fast_vector_candidate(
+                        &mut heap,
+                        row,
+                        &table.columns,
+                        selection,
+                        &plan,
+                    )?;
+                }
+            }
+        }
+        heap
+    };
+    let mut candidates = heap.drain().collect::<Vec<_>>();
+    candidates.sort();
+    let rows = candidates
+        .into_iter()
+        .skip(plan.offset)
+        .take(plan.limit)
+        .map(|candidate| plan.materialize(candidate))
+        .collect();
+    Ok(QueryResult {
+        columns: result_columns,
+        rows,
+        rows_examined,
+    })
 }
 
 #[derive(Debug)]

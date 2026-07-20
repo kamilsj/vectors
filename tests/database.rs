@@ -415,6 +415,47 @@ fn concurrent_snapshot_requests_from_cloned_handles_are_serialized() {
 }
 
 #[test]
+fn snapshots_bulk_decode_high_dimensional_vectors() {
+    let database = Database::new();
+    let dimensions = 257;
+    database
+        .execute(&format!(
+            "CREATE TABLE wide_vectors (
+                id INTEGER PRIMARY KEY,
+                embedding VECTOR({dimensions})
+            )"
+        ))
+        .unwrap();
+    let rows = (0..24)
+        .map(|id| {
+            let vector = (0..dimensions)
+                .map(|dimension| ((id * 7 + dimension * 3) % 29).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("({id}, ARRAY[{vector}])")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    database
+        .execute(&format!("INSERT INTO wide_vectors VALUES {rows}"))
+        .unwrap();
+    let query_vector = std::iter::repeat_n("0", dimensions)
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT id, squared_l2_distance(embedding, ARRAY[{query_vector}]) AS distance
+         FROM wide_vectors ORDER BY distance LIMIT 6"
+    );
+    let expected = query(&database, &sql);
+
+    let path = snapshot_path("wide-vectors");
+    database.save(&path).unwrap();
+    let restored = Database::open(&path).unwrap();
+    assert_eq!(query(&restored, &sql), expected);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn catalog_revisions_track_committed_changes_and_skip_redundant_saves() {
     let database = Database::new();
     let initial = database.revision().unwrap();
@@ -681,6 +722,104 @@ fn bounded_top_k_ordering_preserves_limit_and_offset() {
             .rev()
             .map(|id| vec![Value::Integer(id)])
             .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn specialized_vector_top_k_matches_generic_sql_and_parallelizes_large_scans() {
+    let database = Database::new();
+    database
+        .execute(
+            "CREATE TABLE points (
+                id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL,
+                category TEXT,
+                embedding VECTOR(2)
+            )",
+        )
+        .unwrap();
+    let values = (0..5_000)
+        .map(|id| {
+            let category = if id % 2 == 0 { "even" } else { "odd" };
+            format!(
+                "({id}, 'point-{id}', '{category}', ARRAY[{}, {}])",
+                id + 1,
+                id % 11
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    database
+        .execute(&format!("INSERT INTO points VALUES {values}"))
+        .unwrap();
+
+    let optimized = query(
+        &database,
+        "SELECT id, label,
+                squared_l2_distance(embedding, ARRAY[0, 0]) AS distance
+         FROM points
+         ORDER BY distance
+         LIMIT 12 OFFSET 7",
+    );
+    let generic = query(
+        &database,
+        "SELECT id, label,
+                squared_l2_distance(embedding, ARRAY[0, 0]) AS distance,
+                id + 0 AS force_generic_projection
+         FROM points
+         ORDER BY distance
+         LIMIT 12 OFFSET 7",
+    );
+    assert_eq!(optimized.rows_examined, 5_000);
+    assert_eq!(optimized.rows.len(), 12);
+    assert_eq!(
+        optimized.rows,
+        generic
+            .rows
+            .into_iter()
+            .map(|mut row| {
+                row.pop();
+                row
+            })
+            .collect::<Vec<_>>()
+    );
+
+    let plan = query(
+        &database,
+        "EXPLAIN
+         SELECT id, label,
+                squared_l2_distance(embedding, ARRAY[0, 0]) AS distance
+         FROM points
+         ORDER BY distance
+         LIMIT 12 OFFSET 7",
+    );
+    let plan = plan
+        .rows
+        .iter()
+        .map(|row| row[0].to_string())
+        .collect::<Vec<_>>();
+    assert!(plan.iter().any(|step| step.contains(
+        "VectorTopK: distance (direct scoring on embedding; deferred projection; retain 19 row(s))"
+    )));
+
+    let descending = query(
+        &database,
+        "SELECT id, dot_product(ARRAY[1, 0], embedding) AS similarity
+         FROM points
+         ORDER BY similarity DESC
+         LIMIT 3",
+    );
+    assert_eq!(
+        descending
+            .rows
+            .iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::Integer(4_999),
+            Value::Integer(4_998),
+            Value::Integer(4_997)
+        ]
     );
 }
 
