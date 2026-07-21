@@ -89,6 +89,13 @@ for accepted rows. Updates, deletes, and conflict updates conservatively rebuild
 affected table indexes because existing row values may change. Indexes are also
 rebuilt and validated while loading snapshots.
 
+Primary-key and `UNIQUE` columns have separate internal key-to-row maps. Live
+insert validation and conflict checks use those maps rather than scanning the
+table. Snapshot loading deliberately validates persisted rows before rebuilding
+the maps, so corrupt data cannot be hidden by cached index state. Replacement
+updates are validated against an empty prospective table and rebuild maps only
+after the complete mutation succeeds.
+
 Vector columns do not yet have an approximate-nearest-neighbor index. Exact
 search is useful for small and filtered working sets and provides the reference
 result against which a future ANN implementation must be tested.

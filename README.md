@@ -86,6 +86,8 @@ release, starts it, and checks the health endpoint on both operating systems.
   insert core without being serialized into SQL literals and parsed again.
 - **Incremental scalar indexes.** Append-only batches add hash buckets for new
   rows without rescanning the existing table.
+- **Indexed uniqueness.** Primary-key and `UNIQUE` checks use maintained key
+  maps, making idempotent batch replay independent of existing table scans.
 - **One binary, three interfaces.** Embed the library, use the interactive
   shell, or run the Actix HTTP server with its built-in web console.
 - **Simple persistence.** Deterministic, checksummed snapshots are installed

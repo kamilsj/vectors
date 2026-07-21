@@ -33,7 +33,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let indexed_inputs = (0..iterations)
         .map(|_| append_rows.clone())
         .collect::<Vec<_>>();
-    let indexed_time = benchmark_indexed_append(indexed_databases, indexed_inputs, row_count)?;
+    let indexed_time = benchmark_indexed_append(&indexed_databases, indexed_inputs, row_count)?;
+    let conflict_inputs = (0..iterations)
+        .map(|_| append_rows.clone())
+        .collect::<Vec<_>>();
+    let conflict_time = benchmark_idempotent_replay(&indexed_databases, conflict_inputs)?;
     println!("rows per batch:          {row_count}");
     println!("vector dimensions:       {dimensions}");
     println!(
@@ -52,6 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "indexed append average:  {:?}",
         indexed_time / iterations as u32
+    );
+    println!(
+        "idempotent replay avg:   {:?}",
+        conflict_time / iterations as u32
     );
     Ok(())
 }
@@ -83,7 +91,7 @@ fn prepare_indexed_databases(
             let database = Database::new();
             database.execute(&format!(
                 "CREATE TABLE indexed_ingestion (
-                    id INTEGER,
+                    id INTEGER PRIMARY KEY,
                     label TEXT NOT NULL,
                     category TEXT,
                     embedding VECTOR({dimensions})
@@ -182,14 +190,33 @@ fn benchmark_sql(
 }
 
 fn benchmark_indexed_append(
-    databases: Vec<Database>,
+    databases: &[Database],
     inputs: Vec<Vec<Vec<Value>>>,
     expected_rows: usize,
 ) -> vectors::Result<Duration> {
     let started = Instant::now();
-    for (database, rows) in databases.into_iter().zip(inputs) {
+    for (database, rows) in databases.iter().zip(inputs) {
         let affected = database.insert_rows("indexed_ingestion", rows, InsertConflict::Fail)?;
         assert_eq!(affected, expected_rows, "indexed append lost rows");
+        black_box(affected);
+    }
+    Ok(started.elapsed())
+}
+
+fn benchmark_idempotent_replay(
+    databases: &[Database],
+    inputs: Vec<Vec<Vec<Value>>>,
+) -> vectors::Result<Duration> {
+    let started = Instant::now();
+    for (database, rows) in databases.iter().zip(inputs) {
+        let affected = database.insert_rows(
+            "indexed_ingestion",
+            rows,
+            InsertConflict::DoNothing {
+                target: Some("id".into()),
+            },
+        )?;
+        assert_eq!(affected, 0, "idempotent replay inserted duplicate rows");
         black_box(affected);
     }
     Ok(started.elapsed())

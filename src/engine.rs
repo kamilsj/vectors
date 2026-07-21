@@ -171,6 +171,22 @@ pub(crate) struct Table {
     pub(crate) columns: Vec<Column>,
     pub(crate) rows: Vec<Vec<Value>>,
     pub(crate) indexes: HashMap<String, HashIndex>,
+    unique_keys: HashMap<usize, HashMap<UniqueKey, usize>>,
+}
+
+impl Table {
+    pub(crate) fn new(
+        columns: Vec<Column>,
+        rows: Vec<Vec<Value>>,
+        indexes: HashMap<String, HashIndex>,
+    ) -> Self {
+        Self {
+            columns,
+            rows,
+            indexes,
+            unique_keys: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -677,14 +693,9 @@ impl Database {
             }
             return Err(Error::TableAlreadyExists(name));
         }
-        catalog.tables.insert(
-            name,
-            Table {
-                columns,
-                rows: Vec::new(),
-                indexes: HashMap::new(),
-            },
-        );
+        let mut table = Table::new(columns, Vec::new(), HashMap::new());
+        rebuild_indexes(&mut table);
+        catalog.tables.insert(name, table);
         catalog.mark_changed();
         Ok(ExecutionResult::Command {
             tag: "CREATE TABLE",
@@ -861,11 +872,7 @@ impl Database {
             replacement_rows.push(replacement);
         }
 
-        let empty_table = Table {
-            columns: table.columns.clone(),
-            rows: Vec::new(),
-            indexes: HashMap::new(),
-        };
+        let empty_table = Table::new(table.columns.clone(), Vec::new(), HashMap::new());
         validate_unique(&empty_table, &replacement_rows)?;
         table.rows = replacement_rows;
         rebuild_indexes(table);
@@ -3488,13 +3495,28 @@ pub(crate) fn validate_unique(table: &Table, pending: &[Vec<Value>]) -> Result<(
             continue;
         }
         let mut values = HashSet::new();
-        for row in table.rows.iter().chain(pending) {
-            let value = &row[column_index];
-            if matches!(value, Value::Null) {
-                continue;
+        if let Some(existing) = table.unique_keys.get(&column_index) {
+            for row in pending {
+                let value = &row[column_index];
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                let key = UniqueKey::from(value);
+                if existing.contains_key(&key) || !values.insert(key) {
+                    return Err(Error::UniqueViolation(column.name.clone()));
+                }
             }
-            if !values.insert(UniqueKey::from(value)) {
-                return Err(Error::UniqueViolation(column.name.clone()));
+        } else {
+            // Snapshots and prospective replacement tables deliberately start
+            // without maps so validation remains independent of cached state.
+            for row in table.rows.iter().chain(pending) {
+                let value = &row[column_index];
+                if matches!(value, Value::Null) {
+                    continue;
+                }
+                if !values.insert(UniqueKey::from(value)) {
+                    return Err(Error::UniqueViolation(column.name.clone()));
+                }
             }
         }
     }
@@ -3798,11 +3820,7 @@ fn apply_conflict_updates_with(
         rows_affected += 1;
     }
 
-    let empty_table = Table {
-        columns: table.columns.clone(),
-        rows: Vec::new(),
-        indexes: HashMap::new(),
-    };
+    let empty_table = Table::new(table.columns.clone(), Vec::new(), HashMap::new());
     validate_unique(&empty_table, &prospective)?;
     table.rows = prospective;
     Ok(rows_affected)
@@ -3816,12 +3834,15 @@ fn row_conflicts(
 ) -> bool {
     conflict_columns.iter().any(|column| {
         let value = &candidate[*column];
-        !matches!(value, Value::Null)
-            && table
-                .rows
-                .iter()
-                .chain(accepted)
-                .any(|row| row[*column] == *value)
+        if matches!(value, Value::Null) {
+            return false;
+        }
+        let existing_conflict = table
+            .unique_keys
+            .get(column)
+            .map(|keys| keys.contains_key(&UniqueKey::from(value)))
+            .unwrap_or_else(|| table.rows.iter().any(|row| row[*column] == *value));
+        existing_conflict || accepted.iter().any(|row| row[*column] == *value)
     })
 }
 
@@ -3867,12 +3888,35 @@ fn extend_indexes(table: &mut Table, first_new_row: usize) {
     for index in table.indexes.values_mut() {
         index.extend(new_rows, first_new_row);
     }
+    for (column, keys) in &mut table.unique_keys {
+        for (offset, row) in new_rows.iter().enumerate() {
+            let value = &row[*column];
+            if !matches!(value, Value::Null) {
+                keys.insert(UniqueKey::from(value), first_new_row + offset);
+            }
+        }
+    }
 }
 
 pub(crate) fn rebuild_indexes(table: &mut Table) {
     let rows = &table.rows;
     for index in table.indexes.values_mut() {
         index.rebuild(rows);
+    }
+    table.unique_keys.clear();
+    for (column_index, column) in table.columns.iter().enumerate() {
+        if !column.unique {
+            continue;
+        }
+        let mut keys = HashMap::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            let value = &row[column_index];
+            if !matches!(value, Value::Null) {
+                let previous = keys.insert(UniqueKey::from(value), row_index);
+                debug_assert!(previous.is_none(), "validated unique value is duplicated");
+            }
+        }
+        table.unique_keys.insert(column_index, keys);
     }
 }
 

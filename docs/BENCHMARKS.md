@@ -99,13 +99,14 @@ paths use the same validation, uniqueness, mutation, and revision code, and the
 harness verifies the affected row count.
 
 The median of three processes on the reference machine, with ten 1,000-row ×
-64-dimension batches per process, was 0.17 ms for typed insertion and 51.73 ms
-for SQL literal parsing plus insertion—roughly 300x at this boundary. This is
+64-dimension batches per process, was 0.23 ms for typed insertion and 51.67 ms
+for SQL literal parsing plus insertion—roughly 230x at this boundary. This is
 not an end-to-end HTTP throughput claim. Use an HTTP load generator when
 measuring an application deployment.
 
-The same harness appends 1,000 rows to a 20,000-row table with a scalar hash
-index. Incremental bucket maintenance reduced this local case from 3.07 ms with
-a full rebuild to a 1.61 ms median, while preserving exact indexed lookup
-results. The expected complexity for append-only maintenance is proportional to
-the new batch rather than the full table.
+The same harness appends 1,000 rows to a 20,000-row table with a primary key and
+a scalar hash index. Incremental scalar and unique-key maintenance reduced this
+local case from a 1.35 ms scan baseline to a 0.30 ms median (4.5x). Replaying
+the same batch with `DO NOTHING` took 0.21 ms instead of a 35.01 ms scan
+baseline—about 164x faster. The harness keeps databases alive until timing ends,
+verifies affected-row counts, and checks indexed lookup behavior separately.

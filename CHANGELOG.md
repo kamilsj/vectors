@@ -6,6 +6,11 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+### Changed
+
+- Primary-key and unique-constraint checks use maintained internal key maps for
+  inserts and idempotent conflict handling.
+
 ## 0.2.0 - 2026-07-21
 
 ### Added

@@ -140,11 +140,7 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
                 .map_err(|error| corrupt(format!("invalid row in table '{name}': {error}")))?;
             rows.push(row);
         }
-        let mut table = Table {
-            columns,
-            rows,
-            indexes,
-        };
+        let mut table = Table::new(columns, rows, indexes);
         validate_unique(&table, &[])
             .map_err(|error| corrupt(format!("invalid table '{name}': {error}")))?;
         rebuild_indexes(&mut table);
