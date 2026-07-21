@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -169,6 +169,56 @@ pub(crate) struct Catalog {
     pub(crate) revision: u64,
 }
 
+const PARSE_CACHE_MAX_ENTRIES: usize = 64;
+const PARSE_CACHE_MAX_SQL_BYTES: usize = 1024 * 1024;
+const PARSE_CACHE_MAX_ENTRY_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+struct CachedSql {
+    sql: String,
+    statements: Vec<Statement>,
+}
+
+#[derive(Debug, Default)]
+struct ParseCache {
+    entries: VecDeque<CachedSql>,
+    sql_bytes: usize,
+}
+
+impl ParseCache {
+    fn get(&mut self, sql: &str) -> Option<Vec<Statement>> {
+        let position = self.entries.iter().position(|entry| entry.sql == sql)?;
+        let entry = self.entries.remove(position)?;
+        let statements = entry.statements.clone();
+        self.entries.push_front(entry);
+        Some(statements)
+    }
+
+    fn insert(&mut self, sql: &str, statements: &[Statement]) {
+        if sql.len() > PARSE_CACHE_MAX_ENTRY_BYTES {
+            return;
+        }
+        if let Some(position) = self.entries.iter().position(|entry| entry.sql == sql) {
+            if let Some(entry) = self.entries.remove(position) {
+                self.sql_bytes -= entry.sql.len();
+            }
+        }
+        while self.entries.len() >= PARSE_CACHE_MAX_ENTRIES
+            || self.sql_bytes + sql.len() > PARSE_CACHE_MAX_SQL_BYTES
+        {
+            let Some(entry) = self.entries.pop_back() else {
+                break;
+            };
+            self.sql_bytes -= entry.sql.len();
+        }
+        self.sql_bytes += sql.len();
+        self.entries.push_front(CachedSql {
+            sql: sql.into(),
+            statements: statements.to_vec(),
+        });
+    }
+}
+
 impl Catalog {
     fn mark_changed(&mut self) {
         self.revision = self.revision.wrapping_add(1);
@@ -180,6 +230,7 @@ impl Catalog {
 pub struct Database {
     catalog: Arc<RwLock<Catalog>>,
     snapshot_lock: Arc<Mutex<()>>,
+    parse_cache: Arc<Mutex<ParseCache>>,
 }
 
 impl Database {
@@ -192,6 +243,7 @@ impl Database {
         Ok(Self {
             catalog: Arc::new(RwLock::new(storage::load(path.as_ref())?)),
             snapshot_lock: Arc::new(Mutex::new(())),
+            parse_cache: Arc::new(Mutex::new(ParseCache::default())),
         })
     }
 
@@ -240,8 +292,7 @@ impl Database {
     /// catalog snapshot first and committed under one write lock. If any
     /// statement fails, none of the writes in that request become visible.
     pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
-        let statements = Parser::parse_sql(&GenericDialect {}, sql)
-            .map_err(|error| Error::Parse(error.to_string()))?;
+        let statements = self.parse_sql(sql)?;
         if statements.len() <= 1
             || statements
                 .iter()
@@ -257,6 +308,7 @@ impl Database {
         let staging = Self {
             catalog: Arc::new(RwLock::new(catalog.clone())),
             snapshot_lock: self.snapshot_lock.clone(),
+            parse_cache: self.parse_cache.clone(),
         };
         let results = statements
             .into_iter()
@@ -269,6 +321,22 @@ impl Database {
             .clone();
         *catalog = committed;
         Ok(results)
+    }
+
+    fn parse_sql(&self, sql: &str) -> Result<Vec<Statement>> {
+        // A poisoned or contended cache must never make SQL unavailable. Cache
+        // access is short and parsing happens after the lock has been released.
+        if let Ok(mut cache) = self.parse_cache.lock() {
+            if let Some(statements) = cache.get(sql) {
+                return Ok(statements);
+            }
+        }
+        let statements = Parser::parse_sql(&GenericDialect {}, sql)
+            .map_err(|error| Error::Parse(error.to_string()))?;
+        if let Ok(mut cache) = self.parse_cache.lock() {
+            cache.insert(sql, &statements);
+        }
+        Ok(statements)
     }
 
     /// Return a copy of a table schema for inspection by an embedding application.
@@ -3700,4 +3768,45 @@ fn ensure_finite_f32(values: &[f32]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cache_is_shared_bounded_and_catalog_independent() {
+        let database = Database::new();
+        let clone = database.clone();
+        assert!(Arc::ptr_eq(&database.parse_cache, &clone.parse_cache));
+
+        database
+            .execute("CREATE TABLE cached (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let query = "SELECT COUNT(*) FROM cached";
+        assert_eq!(database.execute(query).unwrap().len(), 1);
+        clone.execute("INSERT INTO cached VALUES (1)").unwrap();
+        let result = database.execute(query).unwrap();
+        let ExecutionResult::Query(result) = &result[0] else {
+            panic!("expected a query result");
+        };
+        assert_eq!(result.rows, [vec![Value::Integer(1)]]);
+
+        for value in 0..(PARSE_CACHE_MAX_ENTRIES + 16) {
+            database.execute(&format!("SELECT {value}")).unwrap();
+        }
+        let oversized = format!("SELECT 1 -- {}", "x".repeat(PARSE_CACHE_MAX_ENTRY_BYTES));
+        database.execute(&oversized).unwrap();
+        assert!(matches!(database.execute("SELECT ("), Err(Error::Parse(_))));
+
+        let cache = database.parse_cache.lock().unwrap();
+        assert_eq!(cache.entries.len(), PARSE_CACHE_MAX_ENTRIES);
+        assert!(cache.sql_bytes <= PARSE_CACHE_MAX_SQL_BYTES);
+        assert!(!cache.entries.iter().any(|entry| entry.sql == oversized));
+        assert!(!cache.entries.iter().any(|entry| entry.sql == "SELECT ("));
+        assert_eq!(
+            cache.entries.front().map(|entry| entry.sql.as_str()),
+            Some("SELECT 79")
+        );
+    }
 }

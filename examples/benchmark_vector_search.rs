@@ -101,17 +101,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let optimized_time = benchmark(iterations, || database.execute(&optimized));
+    let uncached_queries = (0..iterations)
+        .map(|iteration| format!("{optimized}\n-- parse-cache-miss-{iteration}"))
+        .collect::<Vec<_>>();
+    let mut uncached_iteration = 0;
+    let uncached_time = benchmark(iterations, || {
+        let result = database.execute(&uncached_queries[uncached_iteration]);
+        uncached_iteration += 1;
+        result
+    });
     let generic_time = benchmark(iterations, || database.execute(&generic));
     println!(
-        "optimized top-k average: {:?}",
+        "cached top-k average:    {:?}",
         optimized_time / iterations as u32
     );
     println!(
-        "generic SQL average:      {:?}",
+        "uncached top-k average:  {:?}",
+        uncached_time / iterations as u32
+    );
+    println!(
+        "parse-cache speedup:     {:.2}x",
+        uncached_time.as_secs_f64() / optimized_time.as_secs_f64()
+    );
+    println!(
+        "generic SQL average:     {:?}",
         generic_time / iterations as u32
     );
     println!(
-        "top-k speedup:             {:.2}x",
+        "top-k speedup:           {:.2}x",
         generic_time.as_secs_f64() / optimized_time.as_secs_f64()
     );
 
@@ -129,11 +146,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     black_box(restored);
     let _ = fs::remove_file(snapshot);
     println!(
-        "snapshot size:             {:.2} MiB",
+        "snapshot size:           {:.2} MiB",
         snapshot_bytes as f64 / 1_048_576.0
     );
-    println!("snapshot save:             {save_time:?}");
-    println!("snapshot load:             {load_time:?}");
+    println!("snapshot save:           {save_time:?}");
+    println!("snapshot load:           {load_time:?}");
     Ok(())
 }
 

@@ -22,7 +22,11 @@ flowchart LR
 
 The Actix server and interactive shell both call the same public `Database`
 API. The HTTP vector-search endpoint validates structured JSON and translates
-it into SQL, so it does not maintain a second query implementation.
+it into SQL, so it does not maintain a second query implementation. Parsed ASTs
+for repeated SQL are kept in a shared least-recently-used cache capped at 64
+entries, 64 KiB per request string, and 1 MiB of SQL text in total. ASTs do
+not contain catalog data and are validated against the current schema every
+time they execute.
 
 ## Catalog and concurrency
 
@@ -37,6 +41,8 @@ catalog rather than copying data.
 - Snapshot saves copy a coherent catalog while holding a read lock, then release
   the lock before disk I/O. A separate mutex serializes saves from cloned
   handles.
+- Cloned handles share the bounded parse cache. Cache failure or lock poisoning
+  falls back to parsing and cannot make SQL execution unavailable.
 
 The catalog currently stores rows as `Vec<Vec<Value>>`. That layout favors a
 small implementation and flexible SQL values, but is not the final layout for

@@ -10,6 +10,7 @@ semantic versioning while the public API remains pre-1.0.
 
 - Specialized `VectorTopK` execution for common exact vector-search queries.
 - Parallel scoring with thread-local bounded heaps for large candidate sets.
+- Bounded shared SQL AST caching for repeated queries across cloned handles.
 - Reproducible search and snapshot benchmark example.
 - Architecture, performance, security, and roadmap documentation.
 - GitHub issue templates, dependency updates, and tagged-release automation.

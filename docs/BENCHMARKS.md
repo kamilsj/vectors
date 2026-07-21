@@ -1,8 +1,8 @@
 # Benchmarks
 
 Performance work in `vectors` starts with a reproducible query and a correctness
-check. The repository benchmark compares two execution paths inside this
-project; it is not presented as a comparison with another database.
+check. The repository benchmark compares execution and parsing paths inside
+this project; it is not presented as a comparison with another database.
 
 ## Run the benchmark
 
@@ -16,8 +16,9 @@ The benchmark:
 2. inserts deterministic data through SQL;
 3. builds a scalar hash index for the filter;
 4. verifies that `VectorTopK` and the general executor return the same rows;
-5. times both paths; and
-6. saves and reloads a snapshot.
+5. times cached and uncached parsing of the same `VectorTopK` query;
+6. times the general executor; and
+7. saves and reloads a snapshot.
 
 The generated snapshot is removed after the run. No network service is involved.
 
@@ -42,8 +43,9 @@ cargo run --release --example benchmark_vector_search
 
 ## Reference result
 
-This result is a local regression baseline recorded on 2026-07-21. It should
-not be used to claim a ranking against other databases.
+This result is the median of three local benchmark processes recorded on
+2026-07-21, with 20 timed iterations per process. It should not be used to claim
+a ranking against other databases.
 
 | Item | Value |
 | --- | --- |
@@ -52,15 +54,19 @@ not be used to claim a ranking against other databases.
 | OS/toolchain | Windows x86-64 MSVC, Rust 1.96.1 |
 | Dataset | 10,000 rows, 64 dimensions, 50% scalar-filter selectivity |
 | Query | cosine distance, exact top 20 |
-| Optimized SQL | 0.71 ms average |
-| General SQL | 11.76 ms average |
-| In-engine speedup | 16.5x |
-| Snapshot | 2.95 MiB; 35.3 ms save; 7.7 ms load |
+| Cached optimized SQL | 0.49 ms average |
+| Uncached optimized SQL | 0.58 ms average |
+| Parse-cache speedup | 1.20x |
+| General SQL | 12.90 ms average |
+| In-engine top-k speedup | 26.2x |
+| Snapshot | 2.95 MiB; 19.5 ms save; 11.2 ms load |
 
 The optimized query exercises hash-index pruning, one-time query-vector
 evaluation, direct distance scoring, bounded heaps, and deferred projection.
-The comparison query adds an arithmetic projection to select the general SQL
-executor while keeping the result set equivalent.
+Cache-miss queries add unique trailing comments so their ASTs are parsed again
+without changing the plan. The general comparison query adds an arithmetic
+projection to select the generic SQL executor while keeping the result set
+equivalent.
 
 ## Interpreting results
 

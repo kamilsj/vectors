@@ -52,6 +52,8 @@ LIMIT 5;
   exact vector distance evaluation.
 - **Rust all the way down.** Memory-safe engine code, immutable vector values,
   cached norms, and SIMD-friendly distance loops.
+- **Low repeat-query overhead.** Cloned handles share a bounded SQL AST cache;
+  schema checks still run against the current catalog on every execution.
 - **One binary, three interfaces.** Embed the library, use the interactive
   shell, or run the Actix HTTP server with its built-in web console.
 - **Simple persistence.** Deterministic, checksummed snapshots are installed
@@ -95,12 +97,13 @@ Run the reproducible local benchmark:
 cargo run --release --example benchmark_vector_search
 ```
 
-On the development machine, a 10,000-row × 64-dimension filtered cosine query
-averaged 0.71 ms through `VectorTopK` versus 11.76 ms through the generic plan
-(16.5× faster). A 2.95 MiB snapshot loaded in 7.7 ms. Treat these numbers as a
-regression baseline, not a cross-database benchmark; hardware and workloads
-matter. The exact method, environment controls, and reporting rules are in
-[the benchmark guide](docs/BENCHMARKS.md).
+On the development machine, the median 10,000-row × 64-dimension filtered
+cosine query took 0.49 ms through `VectorTopK` versus 12.90 ms through the
+generic plan (26.2× faster in-engine). Reusing its parsed AST was 1.20× faster
+than parsing otherwise identical SQL. Treat these numbers as a regression
+baseline, not a cross-database benchmark; hardware and workloads matter. The
+exact method, environment controls, and reporting rules are in [the benchmark
+guide](docs/BENCHMARKS.md).
 
 ## Try it in two minutes
 
