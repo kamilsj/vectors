@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use vectors::{DataType, Database, Error, ExecutionResult, Value, Vector};
+use vectors::{DataType, Database, Error, ExecutionResult, InsertConflict, Value, Vector};
 
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1151,4 +1151,122 @@ fn insert_on_conflict_supports_idempotent_batches_and_atomic_upserts() {
         ),
         Err(Error::InvalidQuery(_))
     ));
+}
+
+#[test]
+fn typed_bulk_inserts_share_sql_constraints_and_upsert_semantics() {
+    let database = Database::new();
+    database
+        .execute(
+            "CREATE TABLE typed_entries (
+                id INTEGER PRIMARY KEY,
+                label TEXT UNIQUE,
+                score DOUBLE,
+                embedding VECTOR(2)
+            )",
+        )
+        .unwrap();
+
+    let inserted = database
+        .insert_rows(
+            "typed_entries",
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Text("one".into()),
+                    Value::Integer(7),
+                    Value::Vector(Vector::new(vec![1.0, 0.0]).unwrap()),
+                ],
+                vec![
+                    Value::Integer(2),
+                    Value::Text("two".into()),
+                    Value::Float(8.5),
+                    Value::Vector(Vector::new(vec![0.0, 1.0]).unwrap()),
+                ],
+            ],
+            InsertConflict::Fail,
+        )
+        .unwrap();
+    assert_eq!(inserted, 2);
+    assert_eq!(
+        query(&database, "SELECT score FROM typed_entries WHERE id = 1").rows[0][0],
+        Value::Float(7.0)
+    );
+
+    let inserted = database
+        .insert_rows(
+            "typed_entries",
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Text("duplicate".into()),
+                    Value::Float(0.0),
+                    Value::Vector(Vector::new(vec![1.0, 0.0]).unwrap()),
+                ],
+                vec![
+                    Value::Integer(3),
+                    Value::Text("three".into()),
+                    Value::Float(3.0),
+                    Value::Vector(Vector::new(vec![1.0, 1.0]).unwrap()),
+                ],
+            ],
+            InsertConflict::DoNothing { target: None },
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
+
+    let affected = database
+        .insert_rows(
+            "typed_entries",
+            vec![
+                vec![
+                    Value::Integer(1),
+                    Value::Text("one-updated".into()),
+                    Value::Float(9.0),
+                    Value::Vector(Vector::new(vec![0.5, 0.5]).unwrap()),
+                ],
+                vec![
+                    Value::Integer(4),
+                    Value::Text("four".into()),
+                    Value::Float(4.0),
+                    Value::Vector(Vector::new(vec![0.25, 0.75]).unwrap()),
+                ],
+            ],
+            InsertConflict::DoUpdate {
+                target: "id".into(),
+                update_columns: vec!["label".into(), "score".into(), "embedding".into()],
+            },
+        )
+        .unwrap();
+    assert_eq!(affected, 2);
+    assert_eq!(
+        query(
+            &database,
+            "SELECT label, score FROM typed_entries WHERE id = 1"
+        )
+        .rows[0],
+        [Value::Text("one-updated".into()), Value::Float(9.0)]
+    );
+
+    let revision = database.revision().unwrap();
+    assert_eq!(
+        database
+            .insert_rows(
+                "typed_entries",
+                vec![vec![
+                    Value::Integer(5),
+                    Value::Text("one-updated".into()),
+                    Value::Float(5.0),
+                    Value::Vector(Vector::new(vec![1.0, 0.0]).unwrap()),
+                ]],
+                InsertConflict::Fail,
+            )
+            .unwrap_err(),
+        Error::UniqueViolation("label".into())
+    );
+    assert_eq!(database.revision().unwrap(), revision);
+    assert_eq!(
+        query(&database, "SELECT COUNT(*) FROM typed_entries").rows[0][0],
+        Value::Integer(4)
+    );
 }

@@ -150,6 +150,22 @@ pub enum ExecutionResult {
     },
 }
 
+/// Conflict behavior for typed bulk insertion through [`Database::insert_rows`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum InsertConflict {
+    /// Reject the entire batch when any unique constraint is violated.
+    #[default]
+    Fail,
+    /// Skip rows that conflict with the target, or any unique column when the
+    /// target is `None`.
+    DoNothing { target: Option<String> },
+    /// Replace the listed columns from the incoming row when `target` conflicts.
+    DoUpdate {
+        target: String,
+        update_columns: Vec<String>,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Table {
     pub(crate) columns: Vec<Column>,
@@ -393,6 +409,51 @@ impl Database {
             .collect::<Vec<_>>();
         indexes.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         Ok(indexes)
+    }
+
+    /// Insert fully typed rows without serializing them through SQL text.
+    ///
+    /// Values are supplied in schema order. The complete batch is validated
+    /// before it becomes visible, and conflict handling follows the same core
+    /// path as SQL `INSERT`.
+    pub fn insert_rows(
+        &self,
+        table_name: &str,
+        rows: Vec<Vec<Value>>,
+        conflict: InsertConflict,
+    ) -> Result<usize> {
+        let table_name = normalize_name(table_name);
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let table = catalog
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        let conflict_plan = resolve_typed_conflict_plan(table, &conflict)?;
+
+        let mut pending = Vec::with_capacity(rows.len());
+        for row in rows {
+            if row.len() != table.columns.len() {
+                return Err(Error::InvalidQuery(format!(
+                    "typed insert row has {} value(s), expected {}",
+                    row.len(),
+                    table.columns.len()
+                )));
+            }
+            let row = row
+                .into_iter()
+                .zip(&table.columns)
+                .map(|(value, column)| coerce(value, &column.data_type))
+                .collect::<Result<Vec<_>>>()?;
+            validate_row(&table.columns, &row)?;
+            pending.push(row);
+        }
+
+        let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
+        if rows_affected > 0 {
+            rebuild_indexes(table);
+            catalog.mark_changed();
+        }
+        Ok(rows_affected)
     }
 
     fn execute_statement(&self, statement: Statement) -> Result<ExecutionResult> {
@@ -687,32 +748,9 @@ impl Database {
             validate_row(&table.columns, &row)?;
             pending.push(row);
         }
-        let rows_affected = match conflict_plan {
-            InsertConflictPlan::Fail => {
-                validate_unique(table, &pending)?;
-                let rows_affected = pending.len();
-                table.rows.extend(pending);
-                rows_affected
-            }
-            InsertConflictPlan::DoNothing(conflict_columns) => {
-                let mut accepted = Vec::with_capacity(pending.len());
-                for row in pending {
-                    if !row_conflicts(table, &accepted, &row, &conflict_columns) {
-                        accepted.push(row);
-                    }
-                }
-                validate_unique(table, &accepted)?;
-                let rows_affected = accepted.len();
-                table.rows.extend(accepted);
-                rows_affected
-            }
-            InsertConflictPlan::DoUpdate {
-                conflict_column,
-                update,
-            } => apply_conflict_updates(table, pending, conflict_column, &update)?,
-        };
-        rebuild_indexes(table);
+        let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
         if rows_affected > 0 {
+            rebuild_indexes(table);
             catalog.mark_changed();
         }
         Ok(ExecutionResult::Command {
@@ -3472,6 +3510,103 @@ enum InsertConflictPlan {
         conflict_column: usize,
         update: DoUpdate,
     },
+    ReplaceColumns {
+        conflict_column: usize,
+        update_columns: Vec<usize>,
+    },
+}
+
+fn resolve_typed_conflict_plan(
+    table: &Table,
+    conflict: &InsertConflict,
+) -> Result<InsertConflictPlan> {
+    match conflict {
+        InsertConflict::Fail => Ok(InsertConflictPlan::Fail),
+        InsertConflict::DoNothing { target } => {
+            let columns = match target {
+                Some(target) => vec![resolve_unique_column(table, target)?],
+                None => table
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, column)| column.unique.then_some(index))
+                    .collect(),
+            };
+            Ok(InsertConflictPlan::DoNothing(columns))
+        }
+        InsertConflict::DoUpdate {
+            target,
+            update_columns,
+        } => {
+            if update_columns.is_empty() {
+                return Err(Error::InvalidQuery(
+                    "typed conflict update requires at least one update column".into(),
+                ));
+            }
+            let mut seen = HashSet::new();
+            let update_columns = update_columns
+                .iter()
+                .map(|name| {
+                    let name = normalize_name(name);
+                    if !seen.insert(name.clone()) {
+                        return Err(Error::DuplicateColumn(name));
+                    }
+                    find_column(&table.columns, &name)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(InsertConflictPlan::ReplaceColumns {
+                conflict_column: resolve_unique_column(table, target)?,
+                update_columns,
+            })
+        }
+    }
+}
+
+fn resolve_unique_column(table: &Table, name: &str) -> Result<usize> {
+    let index = find_column(&table.columns, name)?;
+    if table.columns[index].unique {
+        Ok(index)
+    } else {
+        Err(Error::InvalidQuery(format!(
+            "conflict target '{}' is not unique",
+            table.columns[index].name
+        )))
+    }
+}
+
+fn apply_insert_plan(
+    table: &mut Table,
+    pending: Vec<Vec<Value>>,
+    conflict_plan: InsertConflictPlan,
+) -> Result<usize> {
+    match conflict_plan {
+        InsertConflictPlan::Fail => {
+            validate_unique(table, &pending)?;
+            let rows_affected = pending.len();
+            table.rows.extend(pending);
+            Ok(rows_affected)
+        }
+        InsertConflictPlan::DoNothing(conflict_columns) => {
+            let mut accepted = Vec::with_capacity(pending.len());
+            for row in pending {
+                if !row_conflicts(table, &accepted, &row, &conflict_columns) {
+                    accepted.push(row);
+                }
+            }
+            validate_unique(table, &accepted)?;
+            let rows_affected = accepted.len();
+            table.rows.extend(accepted);
+            Ok(rows_affected)
+        }
+        InsertConflictPlan::DoUpdate {
+            conflict_column,
+            update,
+        } => apply_conflict_updates(table, pending, conflict_column, &update),
+        InsertConflictPlan::ReplaceColumns {
+            conflict_column,
+            update_columns,
+        } => apply_conflict_replacements(table, pending, conflict_column, &update_columns),
+    }
 }
 
 fn resolve_conflict_plan(table: &Table, on_insert: Option<OnInsert>) -> Result<InsertConflictPlan> {
@@ -3562,6 +3697,56 @@ fn apply_conflict_updates(
         })
         .collect::<Result<Vec<_>>>()?;
 
+    apply_conflict_updates_with(
+        table,
+        pending,
+        conflict_column,
+        |columns, existing, excluded| {
+            let context = EvalContext::upsert(columns, existing, excluded);
+            let should_update = match &update.selection {
+                Some(selection) => evaluate(selection, &context)?.as_bool()?.unwrap_or(false),
+                None => true,
+            };
+            if !should_update {
+                return Ok(None);
+            }
+
+            let mut replacement = existing.to_vec();
+            for (assignment, column_index) in update.assignments.iter().zip(&assignment_indexes) {
+                let value = evaluate(&assignment.value, &context)?;
+                replacement[*column_index] = coerce(value, &columns[*column_index].data_type)?;
+            }
+            Ok(Some(replacement))
+        },
+    )
+}
+
+fn apply_conflict_replacements(
+    table: &mut Table,
+    pending: Vec<Vec<Value>>,
+    conflict_column: usize,
+    update_columns: &[usize],
+) -> Result<usize> {
+    apply_conflict_updates_with(
+        table,
+        pending,
+        conflict_column,
+        |_columns, existing, excluded| {
+            let mut replacement = existing.to_vec();
+            for column in update_columns {
+                replacement[*column] = excluded[*column].clone();
+            }
+            Ok(Some(replacement))
+        },
+    )
+}
+
+fn apply_conflict_updates_with(
+    table: &mut Table,
+    pending: Vec<Vec<Value>>,
+    conflict_column: usize,
+    mut replacement_for: impl FnMut(&[Column], &[Value], &[Value]) -> Result<Option<Vec<Value>>>,
+) -> Result<usize> {
     // Work against a private copy so any expression or constraint failure rolls
     // back every insert and update from this statement.
     let mut prospective = table.rows.clone();
@@ -3590,20 +3775,9 @@ fn apply_conflict_updates(
         }
 
         let existing = prospective[row_index].clone();
-        let context = EvalContext::upsert(&table.columns, &existing, &excluded);
-        let should_update = match &update.selection {
-            Some(selection) => evaluate(selection, &context)?.as_bool()?.unwrap_or(false),
-            None => true,
-        };
-        if !should_update {
+        let Some(replacement) = replacement_for(&table.columns, &existing, &excluded)? else {
             continue;
-        }
-
-        let mut replacement = existing.clone();
-        for (assignment, column_index) in update.assignments.iter().zip(&assignment_indexes) {
-            let value = evaluate(&assignment.value, &context)?;
-            replacement[*column_index] = coerce(value, &table.columns[*column_index].data_type)?;
-        }
+        };
         validate_row(&table.columns, &replacement)?;
         prospective[row_index] = replacement;
         rows_affected += 1;

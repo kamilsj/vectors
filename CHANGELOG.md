@@ -11,6 +11,7 @@ semantic versioning while the public API remains pre-1.0.
 - Specialized `VectorTopK` execution for common exact vector-search queries.
 - Parallel scoring with thread-local bounded heaps for large candidate sets.
 - Bounded shared SQL AST caching for repeated queries across cloned handles.
+- Typed atomic bulk insertion shared by the Rust API and HTTP ingestion route.
 - Reproducible search and snapshot benchmark example.
 - Architecture, performance, security, and roadmap documentation.
 - GitHub issue templates, dependency updates, and tagged-release automation.
@@ -19,6 +20,8 @@ semantic versioning while the public API remains pre-1.0.
 
 - Snapshot vector I/O now uses reusable contiguous buffers and 1 MiB streams.
 - Cosine similarity kernels use an unrolled, compiler-vectorizable loop.
+- Structured JSON ingestion no longer serializes values into SQL and reparses
+  them before insertion.
 
 ## 0.1.0 - 2026-07-20
 

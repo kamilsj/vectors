@@ -44,9 +44,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-targets --locked
       - run: cargo build --release --locked
-      - name: Smoke-test the vector benchmark
+      - name: Smoke-test performance harnesses
         if: matrix.os == 'ubuntu-latest'
-        run: cargo run --release --locked --example benchmark_vector_search
+        run: |
+          cargo run --release --locked --example benchmark_vector_search
+          cargo run --release --locked --example benchmark_ingestion
         env:
           VECTORS_BENCH_ROWS: 2000
           VECTORS_BENCH_DIMENSIONS: 32

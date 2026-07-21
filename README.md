@@ -54,6 +54,8 @@ LIMIT 5;
   cached norms, and SIMD-friendly distance loops.
 - **Low repeat-query overhead.** Cloned handles share a bounded SQL AST cache;
   schema checks still run against the current catalog on every execution.
+- **Direct typed ingestion.** JSON and Rust values enter the shared atomic
+  insert core without being serialized into SQL literals and parsed again.
 - **One binary, three interfaces.** Embed the library, use the interactive
   shell, or run the Actix HTTP server with its built-in web console.
 - **Simple persistence.** Deterministic, checksummed snapshots are installed
@@ -162,6 +164,25 @@ database.save("vectors.vdb")?;
 # Ok::<(), vectors::Error>(())
 ```
 
+Applications that already have typed values can bypass SQL literal generation:
+
+```rust
+use vectors::{Database, InsertConflict, Value, Vector};
+
+# let database = Database::new();
+# database.execute("CREATE TABLE points (id INTEGER PRIMARY KEY, label TEXT, v VECTOR(2))")?;
+database.insert_rows(
+    "points",
+    vec![vec![
+        Value::Integer(2),
+        Value::Text("second".into()),
+        Value::Vector(Vector::new(vec![0.2, 0.8])?),
+    ]],
+    InsertConflict::Fail,
+)?;
+# Ok::<(), vectors::Error>(())
+```
+
 See [`examples/hybrid_search.rs`](examples/hybrid_search.rs) for a complete
 program and [`examples/benchmark_vector_search.rs`](examples/benchmark_vector_search.rs)
 for the reproducible performance harness.
@@ -254,7 +275,9 @@ curl http://127.0.0.1:8080/v1/vector/search \
 ```
 
 Requests are limited to 16 MiB, bulk ingestion to 1,000 rows per request, and
-search results to 1,000 rows.
+search results to 1,000 rows. Typed ingestion performs JSON validation on a
+blocking worker and shares SQL `INSERT` constraint, conflict, revision, and
+index-maintenance semantics without reparsing generated SQL.
 
 ## Server configuration
 

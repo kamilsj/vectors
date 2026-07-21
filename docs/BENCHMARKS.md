@@ -84,3 +84,21 @@ Cross-database comparisons require equivalent durability, exact-versus-ANN
 behavior, index build time, recall, hardware, and client overhead. Add such a
 benchmark only when its harness and raw results can be reviewed in the
 repository.
+
+## Typed ingestion benchmark
+
+```sh
+cargo run --release --example benchmark_ingestion
+```
+
+This benchmark prepares equivalent typed rows and SQL text before timing, then
+loads each into fresh databases. It isolates the engine insertion boundary: it
+does not include JSON decoding, request transport, or input generation. Both
+paths use the same validation, uniqueness, mutation, and revision code, and the
+harness verifies the affected row count.
+
+The median of three processes on the reference machine, with ten 1,000-row ×
+64-dimension batches per process, was 0.17 ms for typed insertion and 51.73 ms
+for SQL literal parsing plus insertion—roughly 300x at this boundary. This is
+not an end-to-end HTTP throughput claim. Use an HTTP load generator when
+measuring an application deployment.

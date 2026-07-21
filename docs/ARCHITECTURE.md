@@ -22,11 +22,13 @@ flowchart LR
 
 The Actix server and interactive shell both call the same public `Database`
 API. The HTTP vector-search endpoint validates structured JSON and translates
-it into SQL, so it does not maintain a second query implementation. Parsed ASTs
-for repeated SQL are kept in a shared least-recently-used cache capped at 64
-entries, 64 KiB per request string, and 1 MiB of SQL text in total. ASTs do
-not contain catalog data and are validated against the current schema every
-time they execute.
+it into SQL, so it does not maintain a second query implementation. The typed
+ingestion endpoint converts JSON directly to `Value` rows and calls the same
+atomic insert core used by SQL `INSERT`; it does not serialize values back into
+SQL. Parsed ASTs for repeated SQL are kept in a shared least-recently-used cache
+capped at 64 entries, 64 KiB per request string, and 1 MiB of SQL text in total.
+ASTs do not contain catalog data and are validated against the current schema
+every time they execute.
 
 ## Catalog and concurrency
 
@@ -107,6 +109,8 @@ save, not writes made after the last checkpoint.
 
 - The optimized and general query paths must return equivalent rows.
 - Failed multi-statement writes must leave the visible catalog unchanged.
+- SQL and typed bulk insertion must share coercion, constraint, conflict,
+  revision, and index-maintenance behavior.
 - Stored vectors contain only finite `f32` values of the declared dimension.
 - Snapshot readers bound allocations before reading attacker-controlled sizes.
 - Existing snapshot versions remain readable unless a migration and a format

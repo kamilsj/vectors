@@ -11,7 +11,9 @@ use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, ResponseError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
 
-use crate::{Column, DataType, Database, Error, ExecutionResult, QueryResult, Value, Vector};
+use crate::{
+    Column, DataType, Database, Error, ExecutionResult, InsertConflict, QueryResult, Value, Vector,
+};
 
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BULK_ROWS: usize = 1_000;
@@ -355,25 +357,28 @@ async fn insert_rows(
         ));
     }
 
-    let database_handle = database.get_ref().clone();
-    let lookup = table.clone();
-    let schema = web::block(move || database_handle.schema(&lookup))
-        .await
-        .map_err(ApiError::from_blocking)??;
-    let sql = build_insert_sql(
-        &table,
-        &schema,
-        &request.rows,
-        request.normalize_vectors,
-        request.on_conflict,
-        request.conflict_target.as_deref(),
-        &request.update_columns,
-    )?;
+    let request = request.into_inner();
     let database = database.get_ref().clone();
-    let results = web::block(move || database.execute(&sql))
-        .await
-        .map_err(ApiError::from_blocking)??;
-    Ok(web::Json(SqlResponse::from(results)))
+    let response = web::block(move || {
+        let schema = database.schema(&table)?;
+        let rows = build_insert_values(&schema, &request.rows, request.normalize_vectors)?;
+        let conflict = build_insert_conflict(
+            &schema,
+            request.on_conflict,
+            request.conflict_target.as_deref(),
+            &request.update_columns,
+        )?;
+        let rows_affected = database.insert_rows(&table, rows, conflict)?;
+        Ok::<_, ApiError>(SqlResponse {
+            results: vec![ApiExecutionResult::Command {
+                tag: "INSERT",
+                rows_affected,
+            }],
+        })
+    })
+    .await
+    .map_err(ApiError::from_blocking)??;
+    Ok(web::Json(response))
 }
 
 /// Distance metric accepted by the structured search endpoint.
@@ -455,15 +460,11 @@ async fn vector_search(
     Ok(web::Json(ApiExecutionResult::from(result)))
 }
 
-fn build_insert_sql(
-    table: &str,
+fn build_insert_values(
     schema: &[Column],
     rows: &[Map<String, JsonValue>],
     normalize_vectors: bool,
-    on_conflict: InsertConflictPolicy,
-    conflict_target: Option<&str>,
-    update_columns: &[String],
-) -> Result<String, ApiError> {
+) -> Result<Vec<Vec<Value>>, ApiError> {
     let known = schema
         .iter()
         .map(|column| (column.name.to_ascii_lowercase(), column))
@@ -486,11 +487,6 @@ fn build_insert_sql(
         }
     }
 
-    let columns = schema
-        .iter()
-        .map(|column| quote_identifier(&column.name))
-        .collect::<Vec<_>>()
-        .join(", ");
     let mut values = Vec::with_capacity(rows.len());
     for row in rows {
         let normalized = row
@@ -504,26 +500,20 @@ fn build_insert_sql(
                     .get(&column.name.to_ascii_lowercase())
                     .copied()
                     .unwrap_or(&JsonValue::Null);
-                json_literal(value, &column.data_type, &column.name, normalize_vectors)
+                json_typed_value(value, &column.data_type, &column.name, normalize_vectors)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        values.push(format!("({})", row_values.join(", ")));
+        values.push(row_values);
     }
-    let conflict_clause =
-        build_conflict_clause(schema, on_conflict, conflict_target, update_columns)?;
-    Ok(format!(
-        "INSERT INTO {} ({columns}) VALUES {}{conflict_clause}",
-        quote_identifier(&table.to_ascii_lowercase()),
-        values.join(", ")
-    ))
+    Ok(values)
 }
 
-fn build_conflict_clause(
+fn build_insert_conflict(
     schema: &[Column],
     policy: InsertConflictPolicy,
     conflict_target: Option<&str>,
     update_columns: &[String],
-) -> Result<String, ApiError> {
+) -> Result<InsertConflict, ApiError> {
     if matches!(policy, InsertConflictPolicy::Fail)
         && (conflict_target.is_some() || !update_columns.is_empty())
     {
@@ -552,13 +542,9 @@ fn build_conflict_clause(
     }
 
     match policy {
-        InsertConflictPolicy::Fail => Ok(String::new()),
-        InsertConflictPolicy::DoNothing => Ok(match target {
-            Some(target) => format!(
-                " ON CONFLICT ({}) DO NOTHING",
-                quote_identifier(&target.name)
-            ),
-            None => " ON CONFLICT DO NOTHING".into(),
+        InsertConflictPolicy::Fail => Ok(InsertConflict::Fail),
+        InsertConflictPolicy::DoNothing => Ok(InsertConflict::DoNothing {
+            target: target.map(|column| column.name.clone()),
         }),
         InsertConflictPolicy::DoUpdate => {
             let target = target.ok_or_else(|| {
@@ -574,7 +560,7 @@ fn build_conflict_clause(
                 ));
             }
             let mut seen = std::collections::HashSet::new();
-            let assignments = update_columns
+            let update_columns = update_columns
                 .iter()
                 .map(|name| {
                     let column = resolve_column(schema, name)?;
@@ -584,15 +570,13 @@ fn build_conflict_clause(
                             format!("update column '{}' appears more than once", column.name),
                         ));
                     }
-                    let identifier = quote_identifier(&column.name);
-                    Ok(format!("{identifier} = excluded.{identifier}"))
+                    Ok(column.name.clone())
                 })
                 .collect::<Result<Vec<_>, ApiError>>()?;
-            Ok(format!(
-                " ON CONFLICT ({}) DO UPDATE SET {}",
-                quote_identifier(&target.name),
-                assignments.join(", ")
-            ))
+            Ok(InsertConflict::DoUpdate {
+                target: target.name.clone(),
+                update_columns,
+            })
         }
     }
 }
@@ -721,8 +705,39 @@ fn json_literal(
     column: &str,
     normalize_vector: bool,
 ) -> Result<String, ApiError> {
+    let value = json_typed_value(value, data_type, column, normalize_vector)?;
+    Ok(match value {
+        Value::Null => "NULL".into(),
+        Value::Integer(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
+        Value::Text(value) => format!("'{}'", value.replace('\'', "''")),
+        Value::Boolean(value) => {
+            if value {
+                "TRUE".into()
+            } else {
+                "FALSE".into()
+            }
+        }
+        Value::Vector(vector) => format!(
+            "ARRAY[{}]",
+            vector
+                .as_slice()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+fn json_typed_value(
+    value: &JsonValue,
+    data_type: &DataType,
+    column: &str,
+    normalize_vector: bool,
+) -> Result<Value, ApiError> {
     if value.is_null() {
-        return Ok("NULL".into());
+        return Ok(Value::Null);
     }
     let invalid = || {
         ApiError::bad_request(
@@ -731,23 +746,17 @@ fn json_literal(
         )
     };
     match data_type {
-        DataType::Integer => value
-            .as_i64()
-            .map(|value| value.to_string())
-            .ok_or_else(invalid),
+        DataType::Integer => value.as_i64().map(Value::Integer).ok_or_else(invalid),
         DataType::Float => value
             .as_f64()
             .filter(|value| value.is_finite())
-            .map(|value| value.to_string())
+            .map(Value::Float)
             .ok_or_else(invalid),
         DataType::Text => value
             .as_str()
-            .map(|value| format!("'{}'", value.replace('\'', "''")))
+            .map(|value| Value::Text(value.into()))
             .ok_or_else(invalid),
-        DataType::Boolean => value
-            .as_bool()
-            .map(|value| if value { "TRUE" } else { "FALSE" }.into())
-            .ok_or_else(invalid),
+        DataType::Boolean => value.as_bool().map(Value::Boolean).ok_or_else(invalid),
         DataType::Vector(dimensions) => {
             let values = value.as_array().ok_or_else(invalid)?;
             if values.len() != *dimensions {
@@ -775,15 +784,7 @@ fn json_literal(
             } else {
                 vector
             };
-            Ok(format!(
-                "ARRAY[{}]",
-                vector
-                    .as_slice()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
+            Ok(Value::Vector(vector))
         }
     }
 }
