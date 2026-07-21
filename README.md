@@ -69,7 +69,8 @@ The console opens at [http://127.0.0.1:8080](http://127.0.0.1:8080). Pass
 run. Both scripts support a fixed release version and custom install directory;
 save the script locally and run `./install.sh --help` or
 `Get-Help .\install.ps1 -Full` before execution if you want to inspect or
-customize it.
+customize it. A scheduled GitHub Actions smoke test installs the latest public
+release, starts it, and checks the health endpoint on both operating systems.
 
 ## Why vectors?
 

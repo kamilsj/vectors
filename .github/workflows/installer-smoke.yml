@@ -1,0 +1,85 @@
+name: Installer smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag; leave empty to test the latest release
+        required: false
+        type: string
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    name: Install and start (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Linux installer and startup
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VECTORS_VERSION: ${{ inputs.version }}
+          VECTORS_INSTALL_DIR: ${{ runner.temp }}/vectors-bin
+          VECTORS_STATE_DIR: ${{ runner.temp }}/vectors-state
+          VECTORS_DATA_DIR: ${{ runner.temp }}/vectors-data
+          VECTORS_BIND: 127.0.0.1:18080
+          VECTORS_NO_OPEN: 1
+        run: |
+          set -euo pipefail
+          cleanup() {
+            if [[ -f "$VECTORS_STATE_DIR/server.pid" ]]; then
+              kill "$(cat "$VECTORS_STATE_DIR/server.pid")" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
+            -o "$RUNNER_TEMP/install.sh"
+          chmod +x "$RUNNER_TEMP/install.sh"
+          "$RUNNER_TEMP/install.sh" --no-open
+          test "$(curl -fsS http://127.0.0.1:18080/healthz)" = '{"status":"ok"}'
+          "$VECTORS_INSTALL_DIR/vectors" --version
+          "$VECTORS_INSTALL_DIR/vectors-server" --version
+      - name: Windows installer and startup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VECTORS_VERSION: ${{ inputs.version }}
+          VECTORS_INSTALL_DIR: ${{ runner.temp }}\vectors-bin
+          VECTORS_STATE_DIR: ${{ runner.temp }}\vectors-state
+          VECTORS_DATA_DIR: ${{ runner.temp }}\vectors-data
+          VECTORS_BIND: 127.0.0.1:18080
+          VECTORS_NO_OPEN: 1
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $env:RUNNER_TEMP "install.ps1"
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/kamilsj/vectors/releases/latest/download/install.ps1" `
+            -OutFile $installer
+          try {
+            & $installer -NoOpen
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:18080/healthz"
+            if ($health.status -ne "ok") {
+              throw "Unexpected health response"
+            }
+            & "$env:VECTORS_INSTALL_DIR\vectors.exe" --version
+            & "$env:VECTORS_INSTALL_DIR\vectors-server.exe" --version
+          } finally {
+            $pidFile = Join-Path $env:VECTORS_STATE_DIR "server.pid"
+            if (Test-Path -LiteralPath $pidFile) {
+              $serverId = Get-Content -LiteralPath $pidFile | Select-Object -First 1
+              Stop-Process -Id $serverId -Force -ErrorAction SilentlyContinue
+            }
+          }
