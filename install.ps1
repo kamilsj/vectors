@@ -3,7 +3,7 @@
 Installs vectors for Windows x86-64 and starts the local web console.
 
 .PARAMETER Version
-Release tag such as v0.2.0. The latest release is used by default.
+Release tag such as v0.2.1. The latest release is used by default.
 
 .PARAMETER InstallDir
 Destination for vectors.exe and vectors-server.exe.

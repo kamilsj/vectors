@@ -7,30 +7,33 @@ use std::time::Duration;
 
 use vectors::{api, Database};
 
+#[derive(Debug, PartialEq, Eq)]
+enum StartupAction {
+    Run { bind_override: Option<String> },
+    Help,
+    Version,
+}
+
 #[actix_web::main]
 async fn main() -> io::Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    match arguments.as_slice() {
-        [argument] if matches!(argument.as_str(), "--version" | "-V") => {
+    let bind_override = match parse_arguments(&arguments)? {
+        StartupAction::Version => {
             println!("vectors-server {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        [argument] if matches!(argument.as_str(), "--help" | "-h") => {
+        StartupAction::Help => {
             println!(
-                "vectors-server {}\n\nUsage: vectors-server\n\nStarts the HTTP API and web console. Configuration uses VECTORS_* environment variables.\n\nOptions:\n  -h, --help       Show this help\n  -V, --version    Show version",
+                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line bind options override VECTORS_BIND.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n  -h, --help            Show this help\n  -V, --version         Show version",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
         }
-        [] => {}
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "unexpected argument; run 'vectors-server --help'",
-            ));
-        }
-    }
-    let bind_address = env::var("VECTORS_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+        StartupAction::Run { bind_override } => bind_override,
+    };
+    let bind_address = bind_override
+        .or_else(|| env::var("VECTORS_BIND").ok())
+        .unwrap_or_else(|| "127.0.0.1:8080".into());
     let snapshot = env::var_os("VECTORS_SNAPSHOT").map(PathBuf::from);
     let autosave_interval = autosave_interval(snapshot.as_deref())?;
     let api_token = env::var("VECTORS_API_TOKEN")
@@ -56,7 +59,7 @@ async fn main() -> io::Result<()> {
         _ => None,
     };
 
-    eprintln!("vectors HTTP API listening on http://{bind_address}");
+    eprintln!("vectors HTTP API starting on http://{bind_address}");
     let result = match api_token {
         Some(token) => api::serve_authenticated(database.clone(), &bind_address, token).await,
         None => api::serve(database.clone(), &bind_address).await,
@@ -64,11 +67,67 @@ async fn main() -> io::Result<()> {
     if let Some(autosave) = autosave {
         autosave.stop()?;
     }
-    result?;
+    if let Err(error) = result {
+        if error.kind() == io::ErrorKind::AddrInUse {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "cannot listen on {bind_address}: address already in use; try 'vectors-server --port {}'",
+                    suggested_port(&bind_address)
+                ),
+            ));
+        }
+        return Err(error);
+    }
     if let Some(path) = snapshot {
         database.save(path).map_err(database_error)?;
     }
     Ok(())
+}
+
+fn parse_arguments(arguments: &[String]) -> io::Result<StartupAction> {
+    match arguments {
+        [] => Ok(StartupAction::Run {
+            bind_override: None,
+        }),
+        [argument] if matches!(argument.as_str(), "--version" | "-V") => Ok(StartupAction::Version),
+        [argument] if matches!(argument.as_str(), "--help" | "-h") => Ok(StartupAction::Help),
+        [option, port] if matches!(option.as_str(), "--port" | "-p") => {
+            let port = port.parse::<u16>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--port must be an integer from 1 through 65535",
+                )
+            })?;
+            if port == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--port must be an integer from 1 through 65535",
+                ));
+            }
+            Ok(StartupAction::Run {
+                bind_override: Some(format!("127.0.0.1:{port}")),
+            })
+        }
+        [option, address] if option == "--bind" && !address.trim().is_empty() => {
+            Ok(StartupAction::Run {
+                bind_override: Some(address.clone()),
+            })
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid arguments; run 'vectors-server --help'",
+        )),
+    }
+}
+
+fn suggested_port(bind_address: &str) -> u16 {
+    bind_address
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .and_then(|port| port.checked_add(1))
+        .filter(|port| *port != 0)
+        .unwrap_or(8081)
 }
 
 fn database_error(error: vectors::Error) -> io::Error {
@@ -213,6 +272,26 @@ mod tests {
             parse_autosave_interval("soon").unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    #[test]
+    fn parses_bind_options_and_suggests_another_port() {
+        assert_eq!(
+            parse_arguments(&["--port".into(), "8081".into()]).unwrap(),
+            StartupAction::Run {
+                bind_override: Some("127.0.0.1:8081".into())
+            }
+        );
+        assert_eq!(
+            parse_arguments(&["--bind".into(), "0.0.0.0:9000".into()]).unwrap(),
+            StartupAction::Run {
+                bind_override: Some("0.0.0.0:9000".into())
+            }
+        );
+        assert!(parse_arguments(&["--port".into(), "0".into()]).is_err());
+        assert!(parse_arguments(&["--port".into(), "busy".into()]).is_err());
+        assert_eq!(suggested_port("127.0.0.1:8080"), 8081);
+        assert_eq!(suggested_port("invalid"), 8081);
     }
 
     #[test]

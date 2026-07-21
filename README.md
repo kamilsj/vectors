@@ -72,6 +72,18 @@ save the script locally and run `./install.sh --help` or
 customize it. A scheduled GitHub Actions smoke test installs the latest public
 release, starts it, and checks the health endpoint on both operating systems.
 
+If port 8080 is already occupied, choose another address during installation:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/kamilsj/vectors/releases/latest/download/install.sh | \
+  sh -s -- --bind 127.0.0.1:8081
+```
+
+```powershell
+& ([scriptblock]::Create((irm 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1'))) -BindAddress '127.0.0.1:8081'
+```
+
 ## Why vectors?
 
 - **SQL first.** Create schemas, filter metadata, aggregate rows, upsert data,
@@ -165,7 +177,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.2.0 | in-memory SQL vector database
+vectors 0.2.1 | in-memory SQL vector database
 Type .help for help. End SQL with ';'.
 vectors>
 ```
@@ -313,6 +325,17 @@ index-maintenance semantics without reparsing generated SQL.
 
 ## Server configuration
 
+Select a local port directly from the command line:
+
+```sh
+vectors-server --port 8081
+vectors-server --bind 0.0.0.0:9000
+```
+
+`--port` listens on localhost. Use `--bind` when the host address also needs to
+change. Command-line options override `VECTORS_BIND`; without either setting,
+the server uses `127.0.0.1:8080`.
+
 ```sh
 VECTORS_BIND=127.0.0.1:9000 \
 VECTORS_SNAPSHOT=./vectors.vdb \
@@ -323,7 +346,7 @@ cargo run --release --bin vectors-server
 
 | Variable | Meaning |
 | --- | --- |
-| `VECTORS_BIND` | Listen address; defaults to `127.0.0.1:8080` |
+| `VECTORS_BIND` | Listen address when `--port` or `--bind` is not supplied; defaults to `127.0.0.1:8080` |
 | `VECTORS_SNAPSHOT` | Snapshot loaded at startup and saved on graceful shutdown |
 | `VECTORS_AUTOSAVE_INTERVAL_SECS` | Positive checkpoint interval; unchanged revisions are skipped |
 | `VECTORS_API_TOKEN` | Requires `Authorization: Bearer …` on every `/v1` endpoint |

@@ -6,10 +6,19 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-21
+
+### Added
+
+- `vectors-server --port` and `--bind` options for selecting a listen address
+  without setting an environment variable.
+
 ### Changed
 
 - Primary-key and unique-constraint checks use maintained internal key maps for
   inserts and idempotent conflict handling.
+- Address conflicts report a recovery command with a suggested alternative port
+  instead of first claiming that the server is listening.
 
 ## 0.2.0 - 2026-07-21
 

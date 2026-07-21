@@ -1,6 +1,6 @@
 [package]
 name = "vectors"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "An embeddable SQL engine for relational data and vector similarity search"
 readme = "README.md"
