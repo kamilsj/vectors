@@ -450,7 +450,6 @@ impl Database {
 
         let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
         if rows_affected > 0 {
-            rebuild_indexes(table);
             catalog.mark_changed();
         }
         Ok(rows_affected)
@@ -750,7 +749,6 @@ impl Database {
         }
         let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
         if rows_affected > 0 {
-            rebuild_indexes(table);
             catalog.mark_changed();
         }
         Ok(ExecutionResult::Command {
@@ -3583,7 +3581,9 @@ fn apply_insert_plan(
         InsertConflictPlan::Fail => {
             validate_unique(table, &pending)?;
             let rows_affected = pending.len();
+            let first_new_row = table.rows.len();
             table.rows.extend(pending);
+            extend_indexes(table, first_new_row);
             Ok(rows_affected)
         }
         InsertConflictPlan::DoNothing(conflict_columns) => {
@@ -3595,17 +3595,32 @@ fn apply_insert_plan(
             }
             validate_unique(table, &accepted)?;
             let rows_affected = accepted.len();
+            let first_new_row = table.rows.len();
             table.rows.extend(accepted);
+            extend_indexes(table, first_new_row);
             Ok(rows_affected)
         }
         InsertConflictPlan::DoUpdate {
             conflict_column,
             update,
-        } => apply_conflict_updates(table, pending, conflict_column, &update),
+        } => {
+            let rows_affected = apply_conflict_updates(table, pending, conflict_column, &update)?;
+            if rows_affected > 0 {
+                rebuild_indexes(table);
+            }
+            Ok(rows_affected)
+        }
         InsertConflictPlan::ReplaceColumns {
             conflict_column,
             update_columns,
-        } => apply_conflict_replacements(table, pending, conflict_column, &update_columns),
+        } => {
+            let rows_affected =
+                apply_conflict_replacements(table, pending, conflict_column, &update_columns)?;
+            if rows_affected > 0 {
+                rebuild_indexes(table);
+            }
+            Ok(rows_affected)
+        }
     }
 }
 
@@ -3830,7 +3845,11 @@ impl HashIndex {
 
     fn rebuild(&mut self, rows: &[Vec<Value>]) {
         self.buckets.clear();
-        for (row_index, row) in rows.iter().enumerate() {
+        self.extend(rows, 0);
+    }
+
+    fn extend(&mut self, rows: &[Vec<Value>], first_row: usize) {
+        for (offset, row) in rows.iter().enumerate() {
             let value = &row[self.column];
             if matches!(value, Value::Null | Value::Vector(_)) {
                 continue;
@@ -3838,8 +3857,15 @@ impl HashIndex {
             self.buckets
                 .entry(UniqueKey::from(value))
                 .or_default()
-                .push(row_index);
+                .push(first_row + offset);
         }
+    }
+}
+
+fn extend_indexes(table: &mut Table, first_new_row: usize) {
+    let new_rows = &table.rows[first_new_row..];
+    for index in table.indexes.values_mut() {
+        index.extend(new_rows, first_new_row);
     }
 }
 

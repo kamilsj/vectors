@@ -13,7 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let row_count = environment_usize("VECTORS_BENCH_ROWS", 1_000);
     let dimensions = environment_usize("VECTORS_BENCH_DIMENSIONS", 64);
     let iterations = environment_usize("VECTORS_BENCH_ITERATIONS", 10);
-    let typed_rows = generate_typed_rows(row_count, dimensions)?;
+    let existing_rows = environment_usize("VECTORS_BENCH_EXISTING_ROWS", 20_000);
+    let typed_rows = generate_typed_rows(0, row_count, dimensions)?;
     let sql = generate_insert_sql(&typed_rows);
 
     // Prepare databases and owned inputs before starting either timer. This
@@ -26,6 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let typed_time = benchmark_typed(typed_databases, typed_inputs, row_count)?;
     let sql_time = benchmark_sql(sql_databases, &sql, row_count)?;
+    let seed_rows = generate_typed_rows(0, existing_rows, dimensions)?;
+    let append_rows = generate_typed_rows(existing_rows, row_count, dimensions)?;
+    let indexed_databases = prepare_indexed_databases(iterations, dimensions, &seed_rows)?;
+    let indexed_inputs = (0..iterations)
+        .map(|_| append_rows.clone())
+        .collect::<Vec<_>>();
+    let indexed_time = benchmark_indexed_append(indexed_databases, indexed_inputs, row_count)?;
     println!("rows per batch:          {row_count}");
     println!("vector dimensions:       {dimensions}");
     println!(
@@ -39,6 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "typed ingestion speedup: {:.2}x",
         sql_time.as_secs_f64() / typed_time.as_secs_f64()
+    );
+    println!("existing indexed rows:   {existing_rows}");
+    println!(
+        "indexed append average:  {:?}",
+        indexed_time / iterations as u32
     );
     Ok(())
 }
@@ -60,11 +73,42 @@ fn prepare_databases(count: usize, dimensions: usize) -> vectors::Result<Vec<Dat
         .collect()
 }
 
+fn prepare_indexed_databases(
+    count: usize,
+    dimensions: usize,
+    seed_rows: &[Vec<Value>],
+) -> vectors::Result<Vec<Database>> {
+    (0..count)
+        .map(|_| {
+            let database = Database::new();
+            database.execute(&format!(
+                "CREATE TABLE indexed_ingestion (
+                    id INTEGER,
+                    label TEXT NOT NULL,
+                    category TEXT,
+                    embedding VECTOR({dimensions})
+                )"
+            ))?;
+            database.insert_rows(
+                "indexed_ingestion",
+                seed_rows.to_vec(),
+                InsertConflict::Fail,
+            )?;
+            database.execute(
+                "CREATE INDEX indexed_ingestion_category_idx
+                 ON indexed_ingestion USING HASH (category)",
+            )?;
+            Ok(database)
+        })
+        .collect()
+}
+
 fn generate_typed_rows(
+    start: usize,
     row_count: usize,
     dimensions: usize,
 ) -> Result<Vec<Vec<Value>>, Box<dyn std::error::Error>> {
-    (0..row_count)
+    (start..start + row_count)
         .map(|row| {
             let vector = (0..dimensions)
                 .map(|dimension| ((row * 31 + dimension * 17 + 1) % 997) as f32 / 997.0)
@@ -133,6 +177,20 @@ fn benchmark_sql(
             }] if *rows_affected == expected_rows
         ));
         black_box(results);
+    }
+    Ok(started.elapsed())
+}
+
+fn benchmark_indexed_append(
+    databases: Vec<Database>,
+    inputs: Vec<Vec<Vec<Value>>>,
+    expected_rows: usize,
+) -> vectors::Result<Duration> {
+    let started = Instant::now();
+    for (database, rows) in databases.into_iter().zip(inputs) {
+        let affected = database.insert_rows("indexed_ingestion", rows, InsertConflict::Fail)?;
+        assert_eq!(affected, expected_rows, "indexed append lost rows");
+        black_box(affected);
     }
     Ok(started.elapsed())
 }

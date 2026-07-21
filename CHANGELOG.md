@@ -22,6 +22,8 @@ semantic versioning while the public API remains pre-1.0.
 - Cosine similarity kernels use an unrolled, compiler-vectorizable loop.
 - Structured JSON ingestion no longer serializes values into SQL and reparses
   them before insertion.
+- Append-only insert batches extend scalar hash indexes incrementally instead
+  of rebuilding buckets for every existing row.
 
 ## 0.1.0 - 2026-07-20
 

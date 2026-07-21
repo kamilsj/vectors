@@ -1192,6 +1192,9 @@ fn typed_bulk_inserts_share_sql_constraints_and_upsert_semantics() {
         query(&database, "SELECT score FROM typed_entries WHERE id = 1").rows[0][0],
         Value::Float(7.0)
     );
+    database
+        .execute("CREATE INDEX typed_entries_label_idx ON typed_entries (label)")
+        .unwrap();
 
     let inserted = database
         .insert_rows(
@@ -1214,6 +1217,12 @@ fn typed_bulk_inserts_share_sql_constraints_and_upsert_semantics() {
         )
         .unwrap();
     assert_eq!(inserted, 1);
+    let indexed = query(
+        &database,
+        "SELECT id FROM typed_entries WHERE label = 'three'",
+    );
+    assert_eq!(indexed.rows_examined, 1);
+    assert_eq!(indexed.rows, [vec![Value::Integer(3)]]);
 
     let affected = database
         .insert_rows(

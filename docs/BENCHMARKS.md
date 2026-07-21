@@ -26,11 +26,12 @@ The generated snapshot is removed after the run. No network service is involved.
 
 Environment variables make the data shape repeatable:
 
-| Variable | Default | Meaning |
-| --- | ---: | --- |
-| `VECTORS_BENCH_ROWS` | `20000` | Number of generated rows |
-| `VECTORS_BENCH_DIMENSIONS` | `64` | Dimensions per vector |
-| `VECTORS_BENCH_ITERATIONS` | `8` | Timed query repetitions |
+| Variable | Search default | Ingestion default | Meaning |
+| --- | ---: | ---: | --- |
+| `VECTORS_BENCH_ROWS` | `20000` | `1000` | Generated rows or rows per batch |
+| `VECTORS_BENCH_DIMENSIONS` | `64` | `64` | Dimensions per vector |
+| `VECTORS_BENCH_ITERATIONS` | `8` | `10` | Timed repetitions |
+| `VECTORS_BENCH_EXISTING_ROWS` | — | `20000` | Existing rows for the indexed-append case |
 
 PowerShell example:
 
@@ -102,3 +103,9 @@ The median of three processes on the reference machine, with ten 1,000-row ×
 for SQL literal parsing plus insertion—roughly 300x at this boundary. This is
 not an end-to-end HTTP throughput claim. Use an HTTP load generator when
 measuring an application deployment.
+
+The same harness appends 1,000 rows to a 20,000-row table with a scalar hash
+index. Incremental bucket maintenance reduced this local case from 3.07 ms with
+a full rebuild to a 1.61 ms median, while preserving exact indexed lookup
+results. The expected complexity for append-only maintenance is proportional to
+the new batch rather than the full table.

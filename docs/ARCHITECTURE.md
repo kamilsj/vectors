@@ -84,8 +84,10 @@ correctness tests, and measured improvements on more than one target.
 
 Scalar hash indexes map normalized scalar keys to row positions. Equality
 predicates can use them to reduce the candidate set before expression or vector
-evaluation. Indexes are rebuilt while loading snapshots and maintained with
-table mutations.
+evaluation. Append-only `INSERT` and `DO NOTHING` batches extend buckets only
+for accepted rows. Updates, deletes, and conflict updates conservatively rebuild
+affected table indexes because existing row values may change. Indexes are also
+rebuilt and validated while loading snapshots.
 
 Vector columns do not yet have an approximate-nearest-neighbor index. Exact
 search is useful for small and filtered working sets and provides the reference

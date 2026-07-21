@@ -56,6 +56,8 @@ LIMIT 5;
   schema checks still run against the current catalog on every execution.
 - **Direct typed ingestion.** JSON and Rust values enter the shared atomic
   insert core without being serialized into SQL literals and parsed again.
+- **Incremental scalar indexes.** Append-only batches add hash buckets for new
+  rows without rescanning the existing table.
 - **One binary, three interfaces.** Embed the library, use the interactive
   shell, or run the Actix HTTP server with its built-in web console.
 - **Simple persistence.** Deterministic, checksummed snapshots are installed
