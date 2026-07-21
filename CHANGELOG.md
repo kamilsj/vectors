@@ -6,6 +6,8 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-21
+
 ### Added
 
 - Specialized `VectorTopK` execution for common exact vector-search queries.
@@ -15,6 +17,8 @@ semantic versioning while the public API remains pre-1.0.
 - Reproducible search and snapshot benchmark example.
 - Architecture, performance, security, and roadmap documentation.
 - GitHub issue templates, dependency updates, and tagged-release automation.
+- Checksum-verifying Linux and Windows installers with optional automatic web
+  console startup.
 
 ### Changed
 

@@ -44,6 +44,33 @@ LIMIT 5;
 > tools, tests, and small embedded workloads. It is not yet a replacement for a
 > distributed or write-ahead-logged production database.
 
+## Install and launch
+
+The installers verify the release archive checksum, install both binaries for
+the current user, add the install directory to future shell sessions, start the
+server with autosave enabled, and open the web console when a desktop is
+available.
+
+Linux x86-64:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh
+```
+
+Windows x86-64 PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1')))
+```
+
+The console opens at [http://127.0.0.1:8080](http://127.0.0.1:8080). Pass
+`--no-start` to the Linux script or `-NoStart` to PowerShell for an install-only
+run. Both scripts support a fixed release version and custom install directory;
+save the script locally and run `./install.sh --help` or
+`Get-Help .\install.ps1 -Full` before execution if you want to inspect or
+customize it.
+
 ## Why vectors?
 
 - **SQL first.** Create schemas, filter metadata, aggregate rows, upsert data,
@@ -135,7 +162,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.1.0 | in-memory SQL vector database
+vectors 0.2.0 | in-memory SQL vector database
 Type .help for help. End SQL with ';'.
 vectors>
 ```

@@ -32,6 +32,18 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo test --all-targets --locked --target ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Verify Linux binaries
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          target/${{ matrix.target }}/release/vectors --version
+          target/${{ matrix.target }}/release/vectors-server --version
+      - name: Verify Windows binaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "target/${{ matrix.target }}/release/vectors.exe" --version
+          & "target/${{ matrix.target }}/release/vectors-server.exe" --version
       - name: Package Linux binaries
         if: runner.os == 'Linux'
         shell: bash
@@ -58,10 +70,19 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+      - name: Verify tag and package version
+        shell: bash
+        run: |
+          package_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test "v$package_version" = "${{ github.ref_name }}"
+      - name: Add installers
+        shell: bash
+        run: cp install.sh install.ps1 dist/
       - name: Create checksums
         shell: bash
         run: cd dist && sha256sum vectors-* > SHA256SUMS
@@ -74,3 +95,37 @@ jobs:
           --title "${{ github.ref_name }}"
           --generate-notes
           --verify-tag
+
+  verify-installers:
+    name: Verify installer (${{ matrix.os }})
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify Linux installer
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          VECTORS_VERSION: ${{ github.ref_name }}
+          VECTORS_INSTALL_DIR: ${{ runner.temp }}/vectors-bin
+          VECTORS_NO_START: 1
+        run: |
+          chmod +x install.sh
+          ./install.sh --no-start --no-open
+          "$VECTORS_INSTALL_DIR/vectors" --version
+          "$VECTORS_INSTALL_DIR/vectors-server" --version
+      - name: Verify Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./install.ps1 `
+            -Version "${{ github.ref_name }}" `
+            -InstallDir "$env:RUNNER_TEMP\vectors-bin" `
+            -NoStart `
+            -NoOpen
+          & "$env:RUNNER_TEMP\vectors-bin\vectors.exe" --version
+          & "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --version

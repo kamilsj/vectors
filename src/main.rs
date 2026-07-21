@@ -1,3 +1,4 @@
+use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
@@ -20,6 +21,25 @@ Shell commands:
 Terminate SQL statements with a semicolon.";
 
 fn main() {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [argument] if matches!(argument.as_str(), "--version" | "-V") => {
+            println!("vectors {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        [argument] if matches!(argument.as_str(), "--help" | "-h") => {
+            println!(
+                "vectors {}\n\nUsage: vectors\n\nStarts the interactive SQL shell.\n\nOptions:\n  -h, --help       Show this help\n  -V, --version    Show version",
+                env!("CARGO_PKG_VERSION")
+            );
+            return;
+        }
+        [] => {}
+        _ => {
+            eprintln!("error: unexpected argument; run 'vectors --help'");
+            std::process::exit(2);
+        }
+    }
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
@@ -534,7 +554,11 @@ mod tests {
         run_shell(input, &mut output, &mut errors).unwrap();
 
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("vectors 0.1.0 | in-memory SQL vector database"));
+        assert!(output.contains(concat!(
+            "vectors ",
+            env!("CARGO_PKG_VERSION"),
+            " | in-memory SQL vector database"
+        )));
         assert!(output.contains("     ...> "));
         assert!(output.contains(".indexes TABLE"));
         assert!(output.contains("table  \n-------\nentries"));

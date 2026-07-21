@@ -9,6 +9,27 @@ use vectors::{api, Database};
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [argument] if matches!(argument.as_str(), "--version" | "-V") => {
+            println!("vectors-server {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        [argument] if matches!(argument.as_str(), "--help" | "-h") => {
+            println!(
+                "vectors-server {}\n\nUsage: vectors-server\n\nStarts the HTTP API and web console. Configuration uses VECTORS_* environment variables.\n\nOptions:\n  -h, --help       Show this help\n  -V, --version    Show version",
+                env!("CARGO_PKG_VERSION")
+            );
+            return Ok(());
+        }
+        [] => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unexpected argument; run 'vectors-server --help'",
+            ));
+        }
+    }
     let bind_address = env::var("VECTORS_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let snapshot = env::var_os("VECTORS_SNAPSHOT").map(PathBuf::from);
     let autosave_interval = autosave_interval(snapshot.as_deref())?;
