@@ -1254,6 +1254,10 @@ fn query_intent_expands_columns_and_recognizes_vector_ranking() {
     assert_eq!(wildcard.columns[2].role, QueryColumnRole::Attribute);
     assert_eq!(wildcard.columns[5].role, QueryColumnRole::Embedding);
     assert_eq!(wildcard.filter.as_deref(), Some("active = true"));
+    assert!(!wildcard.distinct);
+    assert!(!wildcard.aggregation);
+    assert!(wildcard.group_by.is_empty());
+    assert!(wildcard.having.is_none());
     assert_eq!(wildcard.limit, Some(3));
     assert!(wildcard
         .summary
@@ -1276,6 +1280,33 @@ fn query_intent_expands_columns_and_recognizes_vector_ranking() {
     assert!(!search.descending);
     assert!(search.optimized);
     assert_eq!(vector.columns[2].role, QueryColumnRole::SimilarityScore);
+    assert_eq!(vector.columns[2].data_type, Some(DataType::Float));
+
+    let aggregate = database
+        .query_intent(
+            "SELECT DISTINCT category,
+                    COUNT(*) AS documents,
+                    AVG(vector_norm(embedding)) AS average_norm
+             FROM documents
+             WHERE active = TRUE
+             GROUP BY category
+             HAVING COUNT(*) > 0
+             ORDER BY documents DESC",
+        )
+        .unwrap();
+    assert!(aggregate.distinct);
+    assert!(aggregate.aggregation);
+    assert_eq!(aggregate.group_by, ["category"]);
+    assert_eq!(aggregate.having.as_deref(), Some("COUNT(*) > 0"));
+    assert_eq!(aggregate.columns[0].data_type, Some(DataType::Text));
+    assert_eq!(aggregate.columns[1].data_type, Some(DataType::Integer));
+    assert_eq!(aggregate.columns[2].data_type, Some(DataType::Float));
+    assert_eq!(aggregate.columns[1].role, QueryColumnRole::Aggregate);
+    assert_eq!(aggregate.columns[2].role, QueryColumnRole::Aggregate);
+    assert!(aggregate
+        .summary
+        .contains("Aggregate rows from 'documents'"));
+    assert!(aggregate.summary.contains("grouped by category"));
 
     assert!(matches!(
         database.query_intent("DELETE FROM documents"),
@@ -1285,6 +1316,97 @@ fn query_intent_expands_columns_and_recognizes_vector_ranking() {
         database.query_intent("SELECT * FROM missing"),
         Err(Error::TableNotFound(_))
     ));
+    assert!(matches!(
+        database.query_intent("SELECT category, COUNT(*) FROM documents"),
+        Err(Error::InvalidQuery(_))
+    ));
+}
+
+#[test]
+fn query_results_report_declared_types_even_when_no_rows_match() {
+    let database = seeded_database();
+    let result = query(
+        &database,
+        "SELECT id,
+                title,
+                embedding,
+                id + 1 AS next_id,
+                cosine_distance(embedding, ARRAY[1, 0, 0]) AS distance,
+                active = TRUE AS enabled
+         FROM documents
+         WHERE FALSE",
+    );
+    assert!(result.rows.is_empty());
+    assert_eq!(
+        result.column_types,
+        [
+            Some(DataType::Integer),
+            Some(DataType::Text),
+            Some(DataType::Vector(3)),
+            Some(DataType::Integer),
+            Some(DataType::Float),
+            Some(DataType::Boolean),
+        ]
+    );
+
+    let aggregate = query(
+        &database,
+        "SELECT COUNT(*) AS documents, AVG(rating) AS average_rating
+         FROM documents
+         WHERE FALSE",
+    );
+    assert_eq!(
+        aggregate.column_types,
+        [Some(DataType::Integer), Some(DataType::Float)]
+    );
+    assert_eq!(aggregate.rows[0], [Value::Integer(0), Value::Null]);
+}
+
+#[test]
+fn expression_types_are_validated_before_scanning_rows() {
+    let database = Database::new();
+    database
+        .execute(
+            "CREATE TABLE empty_documents (
+                title TEXT,
+                active BOOLEAN,
+                embedding VECTOR(2)
+            )",
+        )
+        .unwrap();
+
+    for sql in [
+        "SELECT title + 1 FROM empty_documents",
+        "SELECT * FROM empty_documents WHERE title",
+        "SELECT vector_norm(title) FROM empty_documents",
+        "SELECT * FROM empty_documents ORDER BY embedding",
+    ] {
+        assert!(
+            matches!(database.execute(sql), Err(Error::TypeMismatch { .. })),
+            "query should fail type validation: {sql}"
+        );
+    }
+    assert!(matches!(
+        database.execute("SELECT cosine_distance(embedding, ARRAY[1, 2, 3]) FROM empty_documents"),
+        Err(Error::DimensionMismatch { left: 2, right: 3 })
+    ));
+    assert!(matches!(
+        database.query_intent("SELECT title + 1 FROM empty_documents"),
+        Err(Error::TypeMismatch { .. })
+    ));
+    for sql in [
+        "SELECT * FROM empty_documents WHERE COUNT(*) > 0",
+        "SELECT COUNT(*) FROM empty_documents GROUP BY COUNT(*)",
+    ] {
+        assert!(
+            matches!(database.execute(sql), Err(Error::InvalidQuery(_))),
+            "query should fail aggregate placement validation: {sql}"
+        );
+        assert!(
+            matches!(database.query_intent(sql), Err(Error::InvalidQuery(_))),
+            "intent should fail aggregate placement validation: {sql}"
+        );
+    }
 }
 
 #[test]

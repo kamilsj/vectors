@@ -36,9 +36,17 @@ expansion, expression validation, and `VectorTopK` recognizer without scanning
 rows or executing the statement. It accepts exactly one `SELECT`. Direct
 columns receive deterministic roles (identifier, content, attribute, or
 embedding); vector-distance outputs become similarity scores and other
-expressions remain computed values. This is catalog interpretation, not a
-natural-language model: ambiguous or absent tables and columns are rejected
-instead of guessed.
+expressions are statically typed from the AST. Aggregate outputs, `DISTINCT`,
+`GROUP BY`, and `HAVING` are described explicitly. This is catalog
+interpretation, not a natural-language model: ambiguous or absent tables and
+columns are rejected instead of guessed.
+
+The executor carries declared output types beside column labels through the
+general, aggregate, and `VectorTopK` paths. The HTTP API serializes that metadata
+as a `schema` array, so clients can prepare result handling before seeing a row
+and never need to infer types from JSON values or `NULL`. The same inference pass
+validates arithmetic, predicates, scalar and vector functions, vector
+dimensions, and sort keys before any rows are scanned.
 
 ## Catalog and concurrency
 

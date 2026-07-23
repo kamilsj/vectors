@@ -212,6 +212,7 @@ pub struct SqlResponse {
 pub enum ApiExecutionResult {
     Query {
         columns: Vec<String>,
+        schema: Vec<ApiResultColumn>,
         rows: Vec<Vec<JsonValue>>,
         row_count: usize,
         rows_examined: usize,
@@ -220,6 +221,13 @@ pub enum ApiExecutionResult {
         tag: &'static str,
         rows_affected: usize,
     },
+}
+
+/// Name and declared SQL type of one query result column.
+#[derive(Debug, Serialize)]
+pub struct ApiResultColumn {
+    pub name: String,
+    pub data_type: Option<String>,
 }
 
 async fn execute_sql(
@@ -245,7 +253,11 @@ struct QueryIntentResponse {
     operation: &'static str,
     table: Option<String>,
     columns: Vec<QueryIntentColumnResponse>,
+    distinct: bool,
+    aggregation: bool,
     filter: Option<String>,
+    group_by: Vec<String>,
+    having: Option<String>,
     order_by: Vec<String>,
     limit: Option<usize>,
     offset: usize,
@@ -303,7 +315,11 @@ impl From<QueryIntent> for QueryIntentResponse {
                     role: column.role.to_string(),
                 })
                 .collect(),
+            distinct: intent.distinct,
+            aggregation: intent.aggregation,
             filter: intent.filter,
+            group_by: intent.group_by,
+            having: intent.having,
             order_by: intent.order_by,
             limit: intent.limit,
             offset: intent.offset,
@@ -939,8 +955,19 @@ impl From<ExecutionResult> for ApiExecutionResult {
 impl From<QueryResult> for ApiExecutionResult {
     fn from(result: QueryResult) -> Self {
         let row_count = result.row_count();
+        let schema = result
+            .columns
+            .iter()
+            .cloned()
+            .zip(result.column_types.iter())
+            .map(|(name, data_type)| ApiResultColumn {
+                name,
+                data_type: data_type.as_ref().map(ToString::to_string),
+            })
+            .collect();
         Self::Query {
             columns: result.columns,
+            schema,
             rows: result
                 .rows
                 .into_iter()

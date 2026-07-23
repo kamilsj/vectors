@@ -11,7 +11,7 @@ body:
     attributes:
       label: Version or commit
       description: Paste `git rev-parse --short HEAD` or the release version.
-      placeholder: 0.4.0 or abc1234
+      placeholder: 0.5.0 or abc1234
     validations:
       required: true
   - type: dropdown

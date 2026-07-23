@@ -6,6 +6,27 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+## 0.5.0 - 2026-07-24
+
+### Added
+
+- Declared result-column types throughout the general, aggregate, and optimized
+  vector execution paths, including correct metadata for empty and all-`NULL`
+  result sets.
+- A `schema` array on HTTP query responses while retaining the existing
+  `columns` and `rows` fields for compatibility.
+- Aggregate-aware SQL intent metadata for `DISTINCT`, `GROUP BY`, `HAVING`,
+  aggregate output roles, and statically inferred computed-column types.
+
+### Changed
+
+- Expression types are validated from the AST before row scanning, so invalid
+  arithmetic, predicates, function arguments, vector dimensions, and sort keys
+  fail consistently even for empty tables; aggregates are also rejected in
+  illegal `WHERE` and `GROUP BY` positions before execution.
+- The web console displays declared result types and richer aggregate intent
+  details instead of inferring meaning from returned values.
+
 ## 0.4.0 - 2026-07-23
 
 ### Added

@@ -298,12 +298,16 @@ function renderQueryIntent(intent) {
   const metrics = clear($("#query-metrics"));
   metrics.append(node("span", "metric-chip", intent.operation.toUpperCase()));
   if (intent.table) metrics.append(node("span", "metric-chip", intent.table));
+  if (intent.distinct) metrics.append(node("span", "metric-chip", "DISTINCT"));
+  if (intent.aggregation) metrics.append(node("span", "metric-chip", "AGGREGATE"));
   if (intent.vector_search?.optimized) metrics.append(node("span", "metric-chip", "VectorTopK"));
 
   const summary = node("div", "intent-summary");
   summary.append(node("span", "panel-kicker", "SCHEMA-AWARE INTERPRETATION"), node("h3", "", intent.summary));
   const details = node("div", "intent-details");
   if (intent.filter) details.append(node("span", "", `Filter · ${intent.filter}`));
+  if (intent.group_by.length) details.append(node("span", "", `Group · ${intent.group_by.join(", ")}`));
+  if (intent.having) details.append(node("span", "", `Having · ${intent.having}`));
   if (intent.order_by.length) details.append(node("span", "", `Order · ${intent.order_by.join(", ")}`));
   if (intent.limit !== null) details.append(node("span", "", `Limit · ${intent.limit}`));
   if (intent.vector_search) {
@@ -340,19 +344,24 @@ function renderResult(result) {
     block.append(command);
     return block;
   }
-  block.append(renderDataTable(result.columns, result.rows));
+  block.append(renderDataTable(result.columns, result.rows, result.schema));
   const meta = node("div", "result-meta");
   meta.append(node("span", "", `${result.row_count} row(s)`), node("span", "", `${result.rows_examined} examined`));
   block.append(meta);
   return block;
 }
 
-function renderDataTable(columns, rows) {
+function renderDataTable(columns, rows, schema = null) {
   const wrap = node("div", "data-table-wrap");
   const table = node("table", "data-table");
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
-  columns.forEach((column) => headRow.append(node("th", "", column)));
+  columns.forEach((column, index) => {
+    const cell = node("th", "", column);
+    const dataType = schema?.[index]?.data_type;
+    if (dataType) cell.append(node("small", "result-column-type", dataType));
+    headRow.append(cell);
+  });
   head.append(headRow);
   const body = document.createElement("tbody");
   rows.forEach((row) => {

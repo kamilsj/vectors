@@ -114,6 +114,9 @@ pub struct Column {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryResult {
     pub columns: Vec<String>,
+    /// Declared type of each output column. `None` is used only when SQL does
+    /// not provide enough information to type an expression, such as `NULL`.
+    pub column_types: Vec<Option<DataType>>,
     pub rows: Vec<Vec<Value>>,
     /// Number of source rows evaluated after index pruning.
     pub rows_examined: usize,
@@ -133,6 +136,7 @@ pub enum QueryColumnRole {
     Attribute,
     Embedding,
     SimilarityScore,
+    Aggregate,
     Computed,
 }
 
@@ -144,6 +148,7 @@ impl fmt::Display for QueryColumnRole {
             Self::Attribute => "attribute",
             Self::Embedding => "embedding",
             Self::SimilarityScore => "similarity_score",
+            Self::Aggregate => "aggregate",
             Self::Computed => "computed",
         })
     }
@@ -173,7 +178,11 @@ pub struct VectorQueryIntent {
 pub struct QueryIntent {
     pub table: Option<String>,
     pub columns: Vec<QueryIntentColumn>,
+    pub distinct: bool,
+    pub aggregation: bool,
     pub filter: Option<String>,
+    pub group_by: Vec<String>,
+    pub having: Option<String>,
     pub order_by: Vec<String>,
     pub limit: Option<usize>,
     pub offset: usize,
@@ -1279,6 +1288,7 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
         sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
         sqlparser::ast::GroupByExpr::Expressions(expressions) => expressions.as_slice(),
     };
+    validate_aggregate_placement(select, group_by)?;
     let aggregate = !group_by.is_empty()
         || projection
             .iter()
@@ -1384,6 +1394,7 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
 
     Ok(QueryResult {
         columns: vec!["plan".into()],
+        column_types: vec![Some(DataType::Text)],
         rows: plan
             .into_iter()
             .map(|step| vec![Value::Text(step)])
@@ -1434,6 +1445,8 @@ fn analyze_query_intent(catalog: &Catalog, query: &Query) -> Result<QueryIntent>
     }
     if let Some(selection) = &select.selection {
         validate_expression_columns(selection, schema)?;
+        let selection_type = expression_data_type(selection, schema)?;
+        ensure_boolean_type(&selection_type)?;
     }
 
     let result_columns = projection
@@ -1443,6 +1456,8 @@ fn analyze_query_intent(catalog: &Catalog, query: &Query) -> Result<QueryIntent>
     for order in &query.order_by {
         let expression = resolve_order_expression(order, &projection, &result_columns);
         validate_expression_columns(expression, schema)?;
+        let order_type = expression_data_type(expression, schema)?;
+        ensure_sortable_scalar_type(&order_type)?;
     }
     let empty = EvalContext::empty();
     let offset = query
@@ -1461,6 +1476,7 @@ fn analyze_query_intent(catalog: &Catalog, query: &Query) -> Result<QueryIntent>
         sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
         sqlparser::ast::GroupByExpr::Expressions(expressions) => expressions.as_slice(),
     };
+    validate_aggregate_placement(select, group_by)?;
     let aggregate = !group_by.is_empty()
         || projection
             .iter()
@@ -1469,6 +1485,28 @@ fn analyze_query_intent(catalog: &Catalog, query: &Query) -> Result<QueryIntent>
             .having
             .as_ref()
             .is_some_and(expression_contains_aggregate);
+    if aggregate {
+        for expression in group_by {
+            validate_expression_columns(expression, schema)?;
+            expression_data_type(expression, schema)?;
+        }
+        for item in &projection {
+            validate_group_expression(&item.expression, group_by, schema)?;
+        }
+        if let Some(having) = &select.having {
+            validate_group_expression(having, group_by, schema)?;
+            let having_type = expression_data_type(having, schema)?;
+            ensure_boolean_type(&having_type)?;
+        }
+        for order in &query.order_by {
+            let expression = resolve_order_expression(order, &projection, &result_columns);
+            validate_group_expression(expression, group_by, schema)?;
+        }
+    } else if select.having.is_some() {
+        return Err(Error::InvalidQuery(
+            "HAVING requires GROUP BY or an aggregate expression".into(),
+        ));
+    }
     let optimized = match (aggregate, limit) {
         (false, Some(limit)) => FastVectorTopKPlan::build(
             select,
@@ -1521,27 +1559,43 @@ fn analyze_query_intent(catalog: &Catalog, query: &Query) -> Result<QueryIntent>
                     role: QueryColumnRole::SimilarityScore,
                 });
             }
+            let data_type = expression_data_type(&item.expression, schema)?;
             Ok(QueryIntentColumn {
                 output_name: item.label.clone(),
                 source_column: None,
-                data_type: None,
-                role: QueryColumnRole::Computed,
+                data_type,
+                role: if expression_contains_aggregate(&item.expression) {
+                    QueryColumnRole::Aggregate
+                } else {
+                    QueryColumnRole::Computed
+                },
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let distinct = select.distinct.is_some();
     let filter = select.selection.as_ref().map(ToString::to_string);
+    let group_by = group_by.iter().map(ToString::to_string).collect::<Vec<_>>();
+    let having = select.having.as_ref().map(ToString::to_string);
     let order_by = query.order_by.iter().map(ToString::to_string).collect();
-    let summary = intent_summary(
-        table_name.as_deref(),
-        columns.len(),
-        filter.is_some(),
+    let summary = intent_summary(IntentSummary {
+        table: table_name.as_deref(),
+        column_count: columns.len(),
+        distinct,
+        aggregate,
+        filtered: filter.is_some(),
+        group_by: &group_by,
+        having: having.is_some(),
         limit,
-        vector_search.as_ref(),
-    );
+        vector_search: vector_search.as_ref(),
+    });
     Ok(QueryIntent {
         table: table_name,
         columns,
+        distinct,
+        aggregation: aggregate,
         filter,
+        group_by,
+        having,
         order_by,
         limit,
         offset,
@@ -1617,13 +1671,30 @@ fn content_column_name(name: &str) -> bool {
             .any(|part| CONTENT_NAMES.contains(&part))
 }
 
-fn intent_summary(
-    table: Option<&str>,
+struct IntentSummary<'a> {
+    table: Option<&'a str>,
     column_count: usize,
+    distinct: bool,
+    aggregate: bool,
     filtered: bool,
+    group_by: &'a [String],
+    having: bool,
     limit: Option<usize>,
-    vector_search: Option<&VectorQueryIntent>,
-) -> String {
+    vector_search: Option<&'a VectorQueryIntent>,
+}
+
+fn intent_summary(intent: IntentSummary<'_>) -> String {
+    let IntentSummary {
+        table,
+        column_count,
+        distinct,
+        aggregate,
+        filtered,
+        group_by,
+        having,
+        limit,
+        vector_search,
+    } = intent;
     let columns = if column_count == 1 {
         "1 selected column".into()
     } else {
@@ -1638,12 +1709,28 @@ fn intent_summary(
     } else {
         ""
     };
+    let distinct = if distinct { " distinct" } else { "" };
+    let grouped = if group_by.is_empty() {
+        String::new()
+    } else {
+        format!(", grouped by {}", group_by.join(", "))
+    };
+    let having = if having {
+        " and filter the resulting groups"
+    } else {
+        ""
+    };
     match (table, vector_search) {
         (Some(table), Some(vector)) => format!(
             "Rank rows from '{table}' by {} on '{}'{filter}; return {columns}{limit}",
             vector.metric, vector.column,
         ),
-        (Some(table), None) => format!("Read {columns} from '{table}'{filter}{limit}"),
+        (Some(table), None) if aggregate => format!(
+            "Aggregate rows from '{table}'{filter}{grouped}{having}; return {columns}{limit}"
+        ),
+        (Some(table), None) => {
+            format!("Read{distinct} {columns} from '{table}'{filter}{limit}")
+        }
         (None, _) => format!("Compute {columns}{limit}"),
     }
 }
@@ -1706,11 +1793,17 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         .iter()
         .map(|item| item.label.clone())
         .collect::<Vec<_>>();
+    let result_types = projection
+        .iter()
+        .map(|item| expression_data_type(&item.expression, columns))
+        .collect::<Result<Vec<_>>>()?;
     for item in &projection {
         validate_expression_columns(&item.expression, columns)?;
     }
     if let Some(selection) = &select.selection {
         validate_expression_columns(selection, columns)?;
+        let selection_type = expression_data_type(selection, columns)?;
+        ensure_boolean_type(&selection_type)?;
     }
     for order in &query.order_by {
         let is_alias = match &order.expr {
@@ -1725,6 +1818,9 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         if !is_alias {
             validate_expression_columns(&order.expr, columns)?;
         }
+        let expression = resolve_order_expression(order, &projection, &result_columns);
+        let order_type = expression_data_type(expression, columns)?;
+        ensure_sortable_scalar_type(&order_type)?;
     }
     let empty = EvalContext::empty();
     let offset = match &query.offset {
@@ -1739,6 +1835,14 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
         sqlparser::ast::GroupByExpr::Expressions(expressions) => expressions.as_slice(),
     };
+    validate_aggregate_placement(select, group_by)?;
+    for expression in group_by {
+        expression_data_type(expression, columns)?;
+    }
+    if let Some(having) = &select.having {
+        let having_type = expression_data_type(having, columns)?;
+        ensure_boolean_type(&having_type)?;
+    }
     let aggregate_mode = !group_by.is_empty()
         || projection
             .iter()
@@ -1755,6 +1859,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             source_rows,
             &projection,
             result_columns,
+            result_types,
             group_by,
             offset,
             limit,
@@ -1782,6 +1887,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
                 select.selection.as_ref(),
                 plan,
                 result_columns,
+                result_types,
                 rows_examined,
             );
         }
@@ -1809,7 +1915,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
 
     finish_candidates(
         candidates.into_candidates(),
-        result_columns,
+        (result_columns, result_types),
         false,
         &query.order_by,
         offset,
@@ -1820,13 +1926,14 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
 
 fn finish_candidates(
     mut candidates: Vec<Candidate>,
-    result_columns: Vec<String>,
+    result_schema: (Vec<String>, Vec<Option<DataType>>),
     distinct_results: bool,
     order_by: &[OrderByExpr],
     offset: usize,
     limit: Option<usize>,
     rows_examined: usize,
 ) -> Result<QueryResult> {
+    let (result_columns, result_types) = result_schema;
     if distinct_results {
         let mut distinct = Vec::with_capacity(candidates.len());
         let mut seen = HashSet::with_capacity(candidates.len());
@@ -1869,6 +1976,7 @@ fn finish_candidates(
 
     Ok(QueryResult {
         columns: result_columns,
+        column_types: result_types,
         rows,
         rows_examined,
     })
@@ -1903,6 +2011,7 @@ fn run_aggregate_query<'a>(
     source_rows: Box<dyn Iterator<Item = &'a [Value]> + 'a>,
     projection: &[Projection],
     result_columns: Vec<String>,
+    result_types: Vec<Option<DataType>>,
     group_by: &[Expr],
     offset: usize,
     limit: Option<usize>,
@@ -2006,7 +2115,7 @@ fn run_aggregate_query<'a>(
 
     finish_candidates(
         candidates,
-        result_columns,
+        (result_columns, result_types),
         select.distinct.is_some(),
         &query.order_by,
         offset,
@@ -2094,6 +2203,24 @@ fn expression_contains_aggregate(expression: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn validate_aggregate_placement(select: &Select, group_by: &[Expr]) -> Result<()> {
+    if select
+        .selection
+        .as_ref()
+        .is_some_and(expression_contains_aggregate)
+    {
+        return Err(Error::InvalidQuery(
+            "aggregate functions are not allowed in WHERE".into(),
+        ));
+    }
+    if group_by.iter().any(expression_contains_aggregate) {
+        return Err(Error::InvalidQuery(
+            "aggregate functions are not allowed in GROUP BY".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_aggregate(function: &Function) -> Result<AggregateSpec<'_>> {
@@ -2977,6 +3104,363 @@ fn simple_column_expression(expression: &Expr, columns: &[Column]) -> Option<usi
     find_column(columns, &ident_name(identifier)).ok()
 }
 
+fn expression_data_type(expression: &Expr, columns: &[Column]) -> Result<Option<DataType>> {
+    match expression {
+        Expr::Value(value) => Ok(value_data_type(&sql_literal(value)?)),
+        Expr::Identifier(identifier) => Ok(Some(
+            columns[find_column(columns, &ident_name(identifier))?]
+                .data_type
+                .clone(),
+        )),
+        Expr::CompoundIdentifier(identifiers) => {
+            let identifier = identifiers
+                .last()
+                .ok_or_else(|| Error::InvalidQuery("empty identifier".into()))?;
+            Ok(Some(
+                columns[find_column(columns, &ident_name(identifier))?]
+                    .data_type
+                    .clone(),
+            ))
+        }
+        Expr::Nested(expression) => expression_data_type(expression, columns),
+        Expr::Array(array) => {
+            for element in &array.elem {
+                let data_type = expression_data_type(element, columns)?;
+                ensure_numeric_type(&data_type)?;
+            }
+            if array.elem.is_empty() {
+                return Err(Error::InvalidVectorDimension);
+            }
+            if array.elem.len() > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::VectorDimensionLimit {
+                    found: array.elem.len(),
+                    max: MAX_VECTOR_DIMENSIONS,
+                });
+            }
+            Ok(Some(DataType::Vector(array.elem.len())))
+        }
+        Expr::Function(function) => function_data_type(function, columns),
+        Expr::BinaryOp { left, op, right } => {
+            let left = expression_data_type(left, columns)?;
+            let right = expression_data_type(right, columns)?;
+            match op {
+                BinaryOperator::Eq
+                | BinaryOperator::NotEq
+                | BinaryOperator::Gt
+                | BinaryOperator::GtEq
+                | BinaryOperator::Lt
+                | BinaryOperator::LtEq => {
+                    ensure_comparable_types(&left, &right, op)?;
+                    Ok(Some(DataType::Boolean))
+                }
+                BinaryOperator::And | BinaryOperator::Or => {
+                    ensure_boolean_type(&left)?;
+                    ensure_boolean_type(&right)?;
+                    Ok(Some(DataType::Boolean))
+                }
+                BinaryOperator::Plus
+                | BinaryOperator::Minus
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide
+                | BinaryOperator::Modulo => numeric_result_type(left, right),
+                BinaryOperator::Custom(operator)
+                    if matches!(operator.as_str(), "<->" | "<#>" | "<=>") =>
+                {
+                    ensure_vector_pair(&left, &right)?;
+                    Ok(Some(DataType::Float))
+                }
+                BinaryOperator::Custom(operator) => {
+                    Err(Error::Unsupported(format!("custom operator {operator}")))
+                }
+                operator => Err(Error::Unsupported(format!("binary operator {operator}"))),
+            }
+        }
+        Expr::UnaryOp { op, expr } => {
+            let data_type = expression_data_type(expr, columns)?;
+            match op {
+                UnaryOperator::Not => {
+                    ensure_boolean_type(&data_type)?;
+                    Ok(Some(DataType::Boolean))
+                }
+                UnaryOperator::Plus | UnaryOperator::Minus => {
+                    ensure_numeric_type(&data_type)?;
+                    Ok(data_type)
+                }
+                operator => Err(Error::Unsupported(format!("unary operator {operator}"))),
+            }
+        }
+        Expr::IsNull(expression) | Expr::IsNotNull(expression) => {
+            expression_data_type(expression, columns)?;
+            Ok(Some(DataType::Boolean))
+        }
+        Expr::IsTrue(expression)
+        | Expr::IsFalse(expression)
+        | Expr::IsNotTrue(expression)
+        | Expr::IsNotFalse(expression) => {
+            let data_type = expression_data_type(expression, columns)?;
+            ensure_boolean_type(&data_type)?;
+            Ok(Some(DataType::Boolean))
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            let value = expression_data_type(expr, columns)?;
+            let low = expression_data_type(low, columns)?;
+            let high = expression_data_type(high, columns)?;
+            ensure_comparable_types(&value, &low, &BinaryOperator::GtEq)?;
+            ensure_comparable_types(&value, &high, &BinaryOperator::LtEq)?;
+            Ok(Some(DataType::Boolean))
+        }
+        Expr::InList { expr, list, .. } => {
+            let value = expression_data_type(expr, columns)?;
+            for item in list {
+                let item = expression_data_type(item, columns)?;
+                ensure_comparable_types(&value, &item, &BinaryOperator::Eq)?;
+            }
+            Ok(Some(DataType::Boolean))
+        }
+        Expr::Like { expr, pattern, .. } | Expr::ILike { expr, pattern, .. } => {
+            let value = expression_data_type(expr, columns)?;
+            let pattern = expression_data_type(pattern, columns)?;
+            ensure_text_type(&value)?;
+            ensure_text_type(&pattern)?;
+            Ok(Some(DataType::Boolean))
+        }
+        Expr::Cast {
+            expr, data_type, ..
+        } => {
+            expression_data_type(expr, columns)?;
+            Ok(Some(parse_data_type(data_type)?))
+        }
+        other => Err(Error::Unsupported(format!("expression {other}"))),
+    }
+}
+
+fn function_data_type(function: &Function, columns: &[Column]) -> Result<Option<DataType>> {
+    let name = object_name(&function.name);
+    if matches!(name.as_str(), "count" | "sum" | "avg" | "min" | "max") {
+        let spec = parse_aggregate(function)?;
+        let argument_type = spec
+            .argument
+            .map(|argument| expression_data_type(argument, columns))
+            .transpose()?
+            .flatten();
+        return Ok(match spec.kind {
+            AggregateKind::Count => Some(DataType::Integer),
+            AggregateKind::Average => {
+                ensure_numeric_type(&argument_type)?;
+                Some(DataType::Float)
+            }
+            AggregateKind::Sum => {
+                ensure_numeric_type(&argument_type)?;
+                argument_type
+            }
+            AggregateKind::Minimum | AggregateKind::Maximum => {
+                ensure_sortable_scalar_type(&argument_type)?;
+                argument_type
+            }
+        });
+    }
+    if function.distinct
+        || function.filter.is_some()
+        || function.over.is_some()
+        || !function.order_by.is_empty()
+    {
+        return Err(Error::Unsupported(format!(
+            "function modifiers on {}",
+            function.name
+        )));
+    }
+    let arguments = function
+        .args
+        .iter()
+        .map(|argument| match argument {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expression)) => Ok(expression),
+            _ => Err(Error::Unsupported(
+                "named or wildcard function arguments".into(),
+            )),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let argument_types = arguments
+        .iter()
+        .map(|argument| expression_data_type(argument, columns))
+        .collect::<Result<Vec<_>>>()?;
+    match name.as_str() {
+        "vector" => {
+            if arguments.is_empty() {
+                return Err(Error::InvalidVectorDimension);
+            }
+            if arguments.len() > MAX_VECTOR_DIMENSIONS {
+                return Err(Error::VectorDimensionLimit {
+                    found: arguments.len(),
+                    max: MAX_VECTOR_DIMENSIONS,
+                });
+            }
+            for data_type in &argument_types {
+                ensure_numeric_type(data_type)?;
+            }
+            Ok(Some(DataType::Vector(arguments.len())))
+        }
+        "vector_dims" | "dimensions" => {
+            require_type_argument_count(&name, arguments.len(), 1)?;
+            ensure_vector_type(&argument_types[0])?;
+            Ok(Some(DataType::Integer))
+        }
+        "vector_norm" | "norm" => {
+            require_type_argument_count(&name, arguments.len(), 1)?;
+            ensure_vector_type(&argument_types[0])?;
+            Ok(Some(DataType::Float))
+        }
+        "normalize" | "normalize_vector" => {
+            require_type_argument_count(&name, arguments.len(), 1)?;
+            ensure_vector_type(&argument_types[0])?;
+            Ok(argument_types[0].clone())
+        }
+        "l2_distance"
+        | "euclidean_distance"
+        | "squared_l2_distance"
+        | "cosine_distance"
+        | "dot_product"
+        | "inner_product" => {
+            require_type_argument_count(&name, arguments.len(), 2)?;
+            ensure_vector_pair(&argument_types[0], &argument_types[1])?;
+            Ok(Some(DataType::Float))
+        }
+        _ => Err(Error::Unsupported(format!("function {name}"))),
+    }
+}
+
+fn require_type_argument_count(name: &str, found: usize, expected: usize) -> Result<()> {
+    if found != expected {
+        return Err(Error::InvalidQuery(format!(
+            "{name} expects {expected} argument(s), received {found}"
+        )));
+    }
+    Ok(())
+}
+
+fn numeric_result_type(
+    left: Option<DataType>,
+    right: Option<DataType>,
+) -> Result<Option<DataType>> {
+    ensure_numeric_type(&left)?;
+    ensure_numeric_type(&right)?;
+    Ok(match (left, right) {
+        (Some(DataType::Float), _) | (_, Some(DataType::Float)) => Some(DataType::Float),
+        (Some(DataType::Integer), Some(DataType::Integer)) => Some(DataType::Integer),
+        (Some(data_type), None) | (None, Some(data_type)) => Some(data_type),
+        _ => None,
+    })
+}
+
+fn ensure_numeric_type(data_type: &Option<DataType>) -> Result<()> {
+    match data_type {
+        None | Some(DataType::Integer | DataType::Float) => Ok(()),
+        Some(found) => Err(declared_type_mismatch("numeric value", found)),
+    }
+}
+
+fn ensure_boolean_type(data_type: &Option<DataType>) -> Result<()> {
+    match data_type {
+        None | Some(DataType::Boolean) => Ok(()),
+        Some(found) => Err(declared_type_mismatch("BOOLEAN", found)),
+    }
+}
+
+fn ensure_text_type(data_type: &Option<DataType>) -> Result<()> {
+    match data_type {
+        None | Some(DataType::Text) => Ok(()),
+        Some(found) => Err(declared_type_mismatch("TEXT", found)),
+    }
+}
+
+fn ensure_vector_type(data_type: &Option<DataType>) -> Result<Option<usize>> {
+    match data_type {
+        None => Ok(None),
+        Some(DataType::Vector(dimensions)) => Ok(Some(*dimensions)),
+        Some(found) => Err(declared_type_mismatch("VECTOR", found)),
+    }
+}
+
+fn ensure_vector_pair(left: &Option<DataType>, right: &Option<DataType>) -> Result<()> {
+    let left = ensure_vector_type(left)?;
+    let right = ensure_vector_type(right)?;
+    if let (Some(left), Some(right)) = (left, right) {
+        if left != right {
+            return Err(Error::DimensionMismatch { left, right });
+        }
+    }
+    Ok(())
+}
+
+fn ensure_sortable_scalar_type(data_type: &Option<DataType>) -> Result<()> {
+    match data_type {
+        None | Some(DataType::Integer | DataType::Float | DataType::Text | DataType::Boolean) => {
+            Ok(())
+        }
+        Some(found) => Err(declared_type_mismatch("sortable scalar value", found)),
+    }
+}
+
+fn ensure_comparable_types(
+    left: &Option<DataType>,
+    right: &Option<DataType>,
+    operator: &BinaryOperator,
+) -> Result<()> {
+    let (Some(left), Some(right)) = (left, right) else {
+        return Ok(());
+    };
+    let comparable = matches!(
+        (left, right),
+        (
+            DataType::Integer | DataType::Float,
+            DataType::Integer | DataType::Float
+        )
+    ) || left == right && !matches!(left, DataType::Vector(_))
+        || matches!((left, right), (DataType::Vector(_), DataType::Vector(_)))
+            && matches!(operator, BinaryOperator::Eq | BinaryOperator::NotEq);
+    if comparable {
+        Ok(())
+    } else {
+        Err(Error::TypeMismatch {
+            expected: "comparable values".into(),
+            found: format!(
+                "{} and {}",
+                declared_value_type_name(left),
+                declared_value_type_name(right)
+            ),
+        })
+    }
+}
+
+fn declared_type_mismatch(expected: &str, found: &DataType) -> Error {
+    Error::TypeMismatch {
+        expected: expected.into(),
+        found: declared_value_type_name(found).into(),
+    }
+}
+
+fn declared_value_type_name(data_type: &DataType) -> &'static str {
+    match data_type {
+        DataType::Integer => "INTEGER",
+        DataType::Float => "FLOAT",
+        DataType::Text => "TEXT",
+        DataType::Boolean => "BOOLEAN",
+        DataType::Vector(_) => "VECTOR",
+    }
+}
+
+fn value_data_type(value: &Value) -> Option<DataType> {
+    match value {
+        Value::Null => None,
+        Value::Integer(_) => Some(DataType::Integer),
+        Value::Float(_) => Some(DataType::Float),
+        Value::Text(_) => Some(DataType::Text),
+        Value::Boolean(_) => Some(DataType::Boolean),
+        Value::Vector(vector) => Some(DataType::Vector(vector.dimensions())),
+    }
+}
+
 fn parse_fast_vector_distance(
     expression: &Expr,
     columns: &[Column],
@@ -3131,6 +3615,7 @@ fn run_fast_vector_top_k(
     selection: Option<&Expr>,
     plan: FastVectorTopKPlan,
     result_columns: Vec<String>,
+    result_types: Vec<Option<DataType>>,
     rows_examined: usize,
 ) -> Result<QueryResult> {
     let source_count = indexed_rows.map_or(table.rows.len(), <[usize]>::len);
@@ -3189,6 +3674,7 @@ fn run_fast_vector_top_k(
         .collect();
     Ok(QueryResult {
         columns: result_columns,
+        column_types: result_types,
         rows,
         rows_examined,
     })

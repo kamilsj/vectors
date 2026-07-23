@@ -48,6 +48,13 @@ async fn executes_sql_and_returns_json_values() {
     let response: Value = test::call_and_read_body_json(&app, select).await;
     assert_eq!(response["results"][0]["rows"][0][0], 1);
     assert_eq!(response["results"][0]["rows"][0][1], json!([1.0, 0.0, 0.0]));
+    assert_eq!(response["results"][0]["schema"][0]["name"], "id");
+    assert_eq!(response["results"][0]["schema"][0]["data_type"], "INTEGER");
+    assert_eq!(response["results"][0]["schema"][1]["name"], "embedding");
+    assert_eq!(
+        response["results"][0]["schema"][1]["data_type"],
+        "VECTOR(3)"
+    );
 }
 
 #[actix_web::test]
@@ -81,6 +88,25 @@ async fn analyzes_schema_aware_sql_intent_without_execution() {
     assert_eq!(response["vector_search"]["metric"], "cosine_distance");
     assert_eq!(response["vector_search"]["optimized"], true);
     assert_eq!(response["limit"], 5);
+    assert_eq!(response["distinct"], false);
+    assert_eq!(response["aggregation"], false);
+    assert_eq!(response["group_by"], json!([]));
+    assert_eq!(response["having"], Value::Null);
+
+    let aggregate = test::TestRequest::post()
+        .uri("/v1/sql/intent")
+        .set_json(json!({
+            "sql": "SELECT category, COUNT(*) AS documents
+                    FROM documents GROUP BY category
+                    HAVING COUNT(*) > 0 ORDER BY documents DESC"
+        }))
+        .to_request();
+    let response: Value = test::call_and_read_body_json(&app, aggregate).await;
+    assert_eq!(response["aggregation"], true);
+    assert_eq!(response["group_by"], json!(["category"]));
+    assert_eq!(response["having"], "COUNT(*) > 0");
+    assert_eq!(response["columns"][1]["data_type"], "INTEGER");
+    assert_eq!(response["columns"][1]["role"], "aggregate");
 
     let mutation = test::TestRequest::post()
         .uri("/v1/sql/intent")

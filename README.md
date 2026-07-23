@@ -91,7 +91,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 - **SQL first.** Create schemas, filter metadata, aggregate rows, upsert data,
   and rank vectors with familiar SQL.
 - **Schema-aware intent.** Analyze a `SELECT` before execution, expand `*`, and
-  identify keys, content, attributes, embeddings, and similarity scores.
+  identify keys, content, attributes, embeddings, aggregates, and similarity
+  scores, including `DISTINCT`, grouping, and `HAVING` semantics.
+- **Self-describing results.** Every query response carries declared SQL types
+  even when the result is empty or contains only `NULL` values; expression type
+  errors are rejected before scanning rows.
 - **Hybrid by default.** Scalar hash indexes prune relational candidates before
   exact vector distance evaluation.
 - **Rust all the way down.** Memory-safe engine code, immutable vector values,
@@ -189,7 +193,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.4.0 | in-memory SQL vector database
+vectors 0.5.0 | in-memory SQL vector database
 Type .help for help. End SQL with ';'.
 vectors>
 ```
@@ -319,6 +323,28 @@ curl http://127.0.0.1:8080/v1/sql \
   -d '{"sql":"SELECT id, title FROM documents ORDER BY id"}'
 ```
 
+Each query result inside `results` keeps the simple `columns` and `rows` arrays
+and adds stable typed metadata for clients that must not infer a schema from
+returned values:
+
+```json
+{
+  "type": "query",
+  "columns": ["id", "distance"],
+  "schema": [
+    {"name": "id", "data_type": "INTEGER"},
+    {"name": "distance", "data_type": "DOUBLE"}
+  ],
+  "rows": [],
+  "row_count": 0,
+  "rows_examined": 0
+}
+```
+
+Types come from schema-aware AST validation, not from the first returned row.
+Invalid arithmetic, predicates, vector functions, dimensions, and sort keys
+therefore fail consistently even when the source table is empty.
+
 Understand a query without executing it:
 
 ```sh
@@ -332,8 +358,10 @@ curl http://127.0.0.1:8080/v1/sql/intent \
 The response expands `*` against the current schema and assigns each output a
 role such as `identifier`, `content`, `attribute`, or `embedding`. Vector-ranked
 queries also report the metric, vector column, dimensions, direction, and
-whether the specialized `VectorTopK` path is available. The analyzer accepts
-exactly one `SELECT`; it never executes mutations or invents missing schema.
+whether the specialized `VectorTopK` path is available. Aggregate queries
+report declared output types, aggregate roles, `DISTINCT`, `GROUP BY`, and
+`HAVING`. The analyzer accepts exactly one `SELECT`; it never executes mutations
+or invents missing schema.
 
 Run structured hybrid search without constructing SQL in the client:
 

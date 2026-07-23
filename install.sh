@@ -23,7 +23,7 @@ Install vectors for Linux x86-64.
 Usage: install.sh [options]
 
 Options:
-  --version TAG       Install a release tag such as v0.4.0
+  --version TAG       Install a release tag such as v0.5.0
   --install-dir PATH  Install binaries here (default: ~/.local/bin)
   --bind ADDRESS      Server address (default: 127.0.0.1:8080)
   --no-start          Install without starting vectors-server
