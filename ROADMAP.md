@@ -10,8 +10,10 @@ correctness or recoverability.
 - Track query planning and snapshot performance with reproducible benchmarks.
 - Add fuzz and property tests for expressions, vector kernels, and corrupted
   snapshot input.
-- Define a snapshot compatibility policy before changing format version 2.
+- Maintain snapshot compatibility and corruption coverage across format
+  versions 1 through 3.
 - Improve query diagnostics with stable plan and timing metadata.
+- Exercise WAL recovery with subprocess crash tests and storage fault injection.
 
 Completion means the test corpus covers failure atomicity and persistence
 boundaries, CI exercises supported platforms, and benchmark regressions can be
@@ -33,7 +35,6 @@ SQL must expose whether a plan is exact or approximate.
 
 ## Later: durable service operation
 
-- Add a write-ahead log and recovery tests for interrupted writes.
 - Compact checkpoints without blocking the query path for the full write.
 - Add joins and subqueries needed for richer hybrid retrieval.
 - Expose structured metrics, request tracing, cancellation, and resource limits.
@@ -41,6 +42,12 @@ SQL must expose whether a plan is exact or approximate.
 
 Durability work is complete when automated crash tests demonstrate the stated
 recovery guarantee. Replication will not substitute for local correctness.
+
+The first durability foundation shipped in 0.3: fsynced checksummed WAL records,
+typed-ingestion logging, exclusive directory locks, torn-tail recovery, and
+versioned checkpoint compaction. The remaining work focuses on fault injection,
+background checkpoint rotation, and operational metrics rather than changing
+the acknowledged-write contract.
 
 ## How priorities change
 

@@ -2,7 +2,7 @@
 
 `vectors` is an in-process SQL database with first-class fixed-width vectors.
 The architecture is intentionally compact: one parser, one catalog, one
-executor, and one versioned snapshot format. This document records the
+executor, and a directory-backed durability layer. This document records the
 boundaries that should remain stable as the engine grows.
 
 ## Request path
@@ -17,7 +17,8 @@ flowchart LR
     TopK --> Index["scalar hash-index pruning"]
     Index --> Kernels["parallel distance kernels"]
     Kernels --> Catalog
-    Catalog --> Snapshot["checksummed snapshot"]
+    Catalog --> WAL["checksummed + fsynced WAL"]
+    WAL --> Snapshot["versioned checkpoint"]
 ```
 
 The Actix server and interactive shell both call the same public `Database`
@@ -37,9 +38,10 @@ catalog rather than copying data.
 
 - Read statements acquire a read lock and may run concurrently.
 - Write statements acquire the write lock and increment the catalog revision.
-- A request containing multiple statements and at least one write executes
-  against a private catalog copy. The copy replaces the live catalog only when
-  every statement succeeds.
+- SQL requests containing writes execute against a private catalog copy. Typed
+  ingestion prepares either an append delta or an isolated replacement table.
+  Persistent databases synchronize one WAL record before publishing either
+  mutation. Validation and storage failures publish neither state.
 - Snapshot saves copy a coherent catalog while holding a read lock, then release
   the lock before disk I/O. A separate mutex serializes saves from cloned
   handles.
@@ -102,28 +104,47 @@ result against which a future ANN implementation must be tested.
 
 ## Persistence
 
+`Database::open_persistent` owns an exclusive lock on one data directory. The
+active catalog stays memory-resident so query execution does not perform random
+disk reads. Writes become sequential WAL records containing either the original
+atomic SQL request or a binary typed-ingestion batch. Record length, sequence,
+and checksum validation bound recovery and detect corruption. `sync_data` runs
+before the staged catalog is published, so a successful return means the WAL
+has been handed to the operating system for durable synchronization.
+
+Recovery loads `vectors.vdb`, skips WAL records already represented by its
+durable sequence, and replays newer records through the same public mutation
+paths. An incomplete final record is treated as a torn append and truncated.
+Checksum mismatches, sequence gaps, and replay failures are fatal.
+
 Snapshots contain a signature, format version, deterministic table data, index
-definitions, and a checksum. Version 2 is the current writer format; the reader
-accepts versions 1 and 2.
+definitions, durable WAL sequence, and a checksum. Version 3 is the current
+writer format; the reader accepts versions 1 through 3.
 
 Writes go to a sibling temporary file and are installed with filesystem
 replacement only after the stream is complete. Loading applies explicit bounds
 before allocation, validates schemas and vector dimensions, checks uniqueness,
 rebuilds indexes, verifies the checksum, and rejects trailing bytes.
 
-Snapshots are checkpoints, not a write-ahead log. Durability covers a completed
-save, not writes made after the last checkpoint.
+The WAL compacts after 64 MiB and during graceful server shutdown. Checkpointing
+currently holds the writer lock while the snapshot is synchronized. The durable
+sequence makes both crash orderings safe: recovery can use an older checkpoint
+with the full WAL, or a newer checkpoint with a not-yet-reset WAL without
+applying a transaction twice.
 
 ## Invariants for changes
 
 - The optimized and general query paths must return equivalent rows.
 - Failed multi-statement writes must leave the visible catalog unchanged.
+- A failed WAL append must leave the visible catalog unchanged.
+- Recovery may discard only an incomplete final record; internal corruption is
+  never silently skipped.
 - SQL and typed bulk insertion must share coercion, constraint, conflict,
   revision, and index-maintenance behavior.
 - Stored vectors contain only finite `f32` values of the declared dimension.
 - Snapshot readers bound allocations before reading attacker-controlled sizes.
-- Existing snapshot versions remain readable unless a migration and a format
-  policy are documented first.
+- Snapshot versions 1 and 2 remain readable; new formats require explicit
+  compatibility and corruption tests.
 - Public API handlers execute blocking database work outside Actix worker
   futures.
 - Benchmark claims include the query, data shape, build profile, environment,
@@ -131,7 +152,7 @@ save, not writes made after the last checkpoint.
 
 ## Extension points
 
-The next substantial boundaries are an ANN index behind the planner, a
-write-ahead log beneath catalog mutations, prepared statements above AST
-validation, and a denser vector storage layout below `Value`. See
+The next substantial boundaries are an ANN index behind the planner,
+non-blocking checkpoint rotation, prepared statements above AST validation, and
+a denser vector storage layout below `Value`. See
 [the roadmap](../ROADMAP.md) for ordering and acceptance criteria.

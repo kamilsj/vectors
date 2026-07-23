@@ -6,6 +6,27 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-23
+
+### Added
+
+- Directory-backed databases with checksummed write-ahead logging, synchronized
+  commits, crash recovery, exclusive process locks, and automatic checkpoint
+  compaction.
+- `Database::open_persistent`, `Database::checkpoint`, and
+  `Database::data_directory` for embedded durable storage.
+- `--data-dir` support in both binaries and `.checkpoint` in the SQL shell.
+- A reproducible durable-ingestion, recovery, and checkpoint benchmark.
+
+### Changed
+
+- Installers now start the server in durable WAL mode by default. Setting the
+  legacy `VECTORS_SNAPSHOT` variable retains interval-based snapshot behavior.
+- Snapshot format version 3 records the durable WAL sequence while remaining
+  backward-compatible with versions 1 and 2.
+- Every SQL write request and typed embedding batch is staged atomically and
+  logged before it becomes visible.
+
 ## 0.2.1 - 2026-07-21
 
 ### Added

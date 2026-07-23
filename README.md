@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  Rust 2021 · SQL parser · exact vector search · Actix Web · atomic snapshots
+  Rust 2021 · SQL parser · exact vector search · Actix Web · durable WAL
 </p>
 
 <p align="center">
@@ -42,13 +42,13 @@ LIMIT 5;
 
 > **Project status:** `vectors` is pre-1.0 and designed for prototypes, local
 > tools, tests, and small embedded workloads. It is not yet a replacement for a
-> distributed or write-ahead-logged production database.
+> distributed or replicated production database.
 
 ## Install and launch
 
 The installers verify the release archive checksum, install both binaries for
 the current user, add the install directory to future shell sessions, start the
-server with autosave enabled, and open the web console when a desktop is
+server with durable storage enabled, and open the web console when a desktop is
 available.
 
 Linux x86-64:
@@ -71,6 +71,8 @@ save the script locally and run `./install.sh --help` or
 `Get-Help .\install.ps1 -Full` before execution if you want to inspect or
 customize it. A scheduled GitHub Actions smoke test installs the latest public
 release, starts it, and checks the health endpoint on both operating systems.
+Upgrading from 0.2 reuses the existing `vectors.vdb` as the first durable
+checkpoint and begins logging subsequent writes; no export step is required.
 
 If port 8080 is already occupied, choose another address during installation:
 
@@ -102,8 +104,8 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   maps, making idempotent batch replay independent of existing table scans.
 - **One binary, three interfaces.** Embed the library, use the interactive
   shell, or run the Actix HTTP server with its built-in web console.
-- **Simple persistence.** Deterministic, checksummed snapshots are installed
-  atomically and can be checkpointed automatically.
+- **Durable by default.** A checksummed, fsynced write-ahead log protects every
+  acknowledged write; compact binary checkpoints keep recovery bounded.
 - **No frontend toolchain.** The console ships inside the server with no CDN,
   Node runtime, or asset build required.
 
@@ -133,9 +135,11 @@ Queries with additional sort keys, `DISTINCT`, or complex projections fall back
 to the general SQL executor without changing their semantics. Use `EXPLAIN` to
 see whether a statement selected `VectorTopK`.
 
-Snapshot I/O uses 1 MiB sequential buffers and encodes or decodes each vector in
-one contiguous operation. The format remains backward compatible and entirely
-safe Rust—no memory mapping or unsafe borrowed file pages.
+WAL writes are sequential and typed embedding batches store vectors as compact
+binary `f32` values rather than SQL text. Checkpoint I/O uses 1 MiB sequential
+buffers and encodes or decodes each vector in one contiguous operation. The
+format remains backward compatible and entirely safe Rust—no memory mapping or
+unsafe borrowed file pages.
 
 Run the reproducible local benchmark:
 
@@ -151,12 +155,17 @@ baseline, not a cross-database benchmark; hardware and workloads matter. The
 exact method, environment controls, and reporting rules are in [the benchmark
 guide](docs/BENCHMARKS.md).
 
+The durable-storage harness sustained about 351,000 rows/s for ten fsynced
+1,000-row × 64-dimension typed batches, then recovered its 2.73 MiB WAL in
+11.56 ms. These are embedded-path regression numbers from the same development
+machine; transaction size and storage hardware materially change the result.
+
 ## Try it in two minutes
 
 ### 1. Start the web console
 
 ```sh
-cargo run --release --bin vectors-server
+cargo run --release --bin vectors-server -- --data-dir ./vectors-data
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The console includes:
@@ -177,12 +186,13 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.2.1 | in-memory SQL vector database
+vectors 0.3.0 | in-memory SQL vector database
 Type .help for help. End SQL with ';'.
 vectors>
 ```
 
-The shell provides `.tables`, `.schema`, `.indexes`, `.read`, `.save`, `.open`,
+Pass `--data-dir ./vectors-data` to make shell writes durable. The shell provides
+`.tables`, `.schema`, `.indexes`, `.checkpoint`, `.read`, `.save`, `.open`,
 `.timer`, and multiline cancellation commands.
 
 ### 3. Or embed the engine
@@ -190,7 +200,7 @@ The shell provides `.tables`, `.schema`, `.indexes`, `.read`, `.save`, `.open`,
 ```rust
 use vectors::Database;
 
-let database = Database::new();
+let database = Database::open_persistent("./vectors-data")?;
 database.execute(
     "CREATE TABLE points (id INTEGER PRIMARY KEY, label TEXT, v VECTOR(2))"
 )?;
@@ -203,7 +213,7 @@ let result = database.execute(
      FROM points ORDER BY distance LIMIT 10"
 )?;
 
-database.save("vectors.vdb")?;
+database.checkpoint()?;
 # let _ = result;
 # Ok::<(), vectors::Error>(())
 ```
@@ -245,12 +255,15 @@ flowchart LR
     F --> G["Relational rows"]
     F --> H["VECTOR(n) values"]
     F --> I["Scalar hash indexes"]
-    F --> J["Atomic snapshots"]
+    F --> J["fsynced WAL"]
+    J --> L["Binary checkpoints"]
 ```
 
-The working set lives in memory. Cloned `Database` handles share one catalog:
-readers may execute concurrently while writes are serialized. A multi-statement
-request containing writes commits as one unit or leaves the catalog unchanged.
+The active working set lives in memory. Cloned `Database` handles share one
+catalog: readers may execute concurrently while writes are serialized. Durable
+writes are staged, appended to the WAL, synchronized, and only then published
+to readers. A multi-statement request commits as one unit or leaves both memory
+and durable state unchanged.
 
 ## SQL and vector features
 
@@ -328,18 +341,17 @@ index-maintenance semantics without reparsing generated SQL.
 Select a local port directly from the command line:
 
 ```sh
-vectors-server --port 8081
-vectors-server --bind 0.0.0.0:9000
+vectors-server --data-dir ./vectors-data --port 8081
+vectors-server --data-dir ./vectors-data --bind 0.0.0.0:9000
 ```
 
 `--port` listens on localhost. Use `--bind` when the host address also needs to
-change. Command-line options override `VECTORS_BIND`; without either setting,
-the server uses `127.0.0.1:8080`.
+change. Bind options override `VECTORS_BIND`, and `--data-dir` overrides
+`VECTORS_DATA_DIR`; without a bind setting, the server uses `127.0.0.1:8080`.
 
 ```sh
 VECTORS_BIND=127.0.0.1:9000 \
-VECTORS_SNAPSHOT=./vectors.vdb \
-VECTORS_AUTOSAVE_INTERVAL_SECS=30 \
+VECTORS_DATA_DIR=./vectors-data \
 VECTORS_API_TOKEN=replace-with-a-long-random-token \
 cargo run --release --bin vectors-server
 ```
@@ -347,8 +359,9 @@ cargo run --release --bin vectors-server
 | Variable | Meaning |
 | --- | --- |
 | `VECTORS_BIND` | Listen address when `--port` or `--bind` is not supplied; defaults to `127.0.0.1:8080` |
-| `VECTORS_SNAPSHOT` | Snapshot loaded at startup and saved on graceful shutdown |
-| `VECTORS_AUTOSAVE_INTERVAL_SECS` | Positive checkpoint interval; unchanged revisions are skipped |
+| `VECTORS_DATA_DIR` | Durable directory containing `vectors.wal`, `vectors.vdb`, and the process lock |
+| `VECTORS_SNAPSHOT` | Legacy snapshot-only mode; mutually exclusive with `VECTORS_DATA_DIR` |
+| `VECTORS_AUTOSAVE_INTERVAL_SECS` | Legacy snapshot checkpoint interval; requires `VECTORS_SNAPSHOT` |
 | `VECTORS_API_TOKEN` | Requires `Authorization: Bearer …` on every `/v1` endpoint |
 
 The console and health check remain public when authentication is enabled, but
@@ -358,25 +371,40 @@ TLS-enabled reverse proxy.
 
 ## Persistence model
 
-`Database::save` captures a coherent catalog copy, releases the database lock,
-and writes a deterministic snapshot through a temporary file. Concurrent saves
-from cloned handles are serialized while database writes continue during disk
-I/O. `Database::open` validates format version, checksum, allocation bounds,
-schema, dimensions, and uniqueness constraints before exposing data.
+`Database::open_persistent` opens or creates a data directory and obtains an
+exclusive process lock. Each successful SQL write request or typed embedding
+batch is validated against a private catalog, encoded as one WAL record,
+checksummed, appended sequentially, and synchronized to storage before the new
+catalog becomes visible. Failed validation or I/O leaves the live catalog
+unchanged.
 
-`Database::revision` is an in-process change token. `save_if_changed` and server
-autosave use it to skip redundant disk writes. Revisions restart when a snapshot
-is opened and are not part of the file format.
+On startup, `vectors` loads `vectors.vdb` into memory and replays newer WAL
+records. A torn final record is safely discarded; checksum errors, invalid
+sequences, and operations that cannot be replayed stop startup rather than
+silently exposing partial data. The WAL is compacted automatically after 64 MiB
+and on graceful server shutdown. `Database::checkpoint` and the shell's
+`.checkpoint` command trigger compaction explicitly.
 
-Snapshots are checkpoints, not a write-ahead log. A crash can lose writes made
-after the last completed checkpoint.
+Vectors remain dense contiguous `f32` values on disk and in memory. Checkpoints
+use bounded decoding and 1 MiB buffered I/O, validate dimensions and finite
+values before allocation, rebuild scalar indexes, and retain compatibility with
+snapshot versions 1 and 2.
+
+`Database::save` and `Database::open` remain available for portable standalone
+snapshots. Snapshot saves copy a coherent catalog and perform disk I/O without
+holding the catalog lock; they are backups or explicit exports, not a substitute
+for WAL durability.
+
+`Database::revision` remains an in-process change token. Durable record sequence
+numbers are separate and are persisted in snapshot format version 3.
 
 ## Current limitations
 
 - exact search only; no approximate-nearest-neighbor index yet;
 - no joins, subqueries, window functions, or aggregate `FILTER` clauses;
 - no explicit transaction spanning multiple HTTP requests;
-- no write-ahead log or replication;
+- checkpoint creation currently pauses writers while the checkpoint is written;
+- no replication;
 - no roles, per-user authorization, or built-in TLS.
 
 Keeping these boundaries visible is intentional: `vectors` should be easy to

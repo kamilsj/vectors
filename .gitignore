@@ -1,5 +1,8 @@
 /target/
 *.vdb
+*.wal
+vectors.lock
+/vectors-data/
 *.tmp
 *.bak
 .DS_Store

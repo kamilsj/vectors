@@ -1,9 +1,11 @@
 <#
 .SYNOPSIS
-Installs vectors for Windows x86-64 and starts the local web console.
+Installs vectors for Windows x86-64 and starts the local web console. The server
+uses VECTORS_DATA_DIR for durable storage by default; set VECTORS_SNAPSHOT to
+retain legacy interval-based snapshot mode.
 
 .PARAMETER Version
-Release tag such as v0.2.1. The latest release is used by default.
+Release tag such as v0.3.0. The latest release is used by default.
 
 .PARAMETER InstallDir
 Destination for vectors.exe and vectors-server.exe.
@@ -142,16 +144,10 @@ $DataDir = if ($env:VECTORS_DATA_DIR) {
 } else {
     Join-Path $StateDir "data"
 }
-$Snapshot = if ($env:VECTORS_SNAPSHOT) {
-    $env:VECTORS_SNAPSHOT
-} else {
-    Join-Path $DataDir "vectors.vdb"
-}
-$Autosave = if ($env:VECTORS_AUTOSAVE_INTERVAL_SECS) {
+$Snapshot = $env:VECTORS_SNAPSHOT
+$Autosave = if ($Snapshot -and $env:VECTORS_AUTOSAVE_INTERVAL_SECS) {
     $env:VECTORS_AUTOSAVE_INTERVAL_SECS
-} else {
-    "30"
-}
+} elseif ($Snapshot) { "30" } else { $null }
 $PidFile = Join-Path $StateDir "server.pid"
 $StdoutLog = Join-Path $StateDir "server.stdout.log"
 $StderrLog = Join-Path $StateDir "server.stderr.log"
@@ -169,16 +165,25 @@ if (Test-Path -LiteralPath $PidFile) {
 $RuntimeServer = Join-Path $StateDir "vectors-server.exe"
 Copy-Item -LiteralPath (Join-Path $InstallDir "vectors-server.exe") -Destination $RuntimeServer -Force
 $PreviousBind = $env:VECTORS_BIND
+$PreviousDataDir = $env:VECTORS_DATA_DIR
 $PreviousSnapshot = $env:VECTORS_SNAPSHOT
 $PreviousAutosave = $env:VECTORS_AUTOSAVE_INTERVAL_SECS
 try {
     $env:VECTORS_BIND = $BindAddress
-    $env:VECTORS_SNAPSHOT = $Snapshot
-    $env:VECTORS_AUTOSAVE_INTERVAL_SECS = $Autosave
+    if ($Snapshot) {
+        Remove-Item Env:VECTORS_DATA_DIR -ErrorAction SilentlyContinue
+        $env:VECTORS_SNAPSHOT = $Snapshot
+        $env:VECTORS_AUTOSAVE_INTERVAL_SECS = $Autosave
+    } else {
+        $env:VECTORS_DATA_DIR = $DataDir
+        Remove-Item Env:VECTORS_SNAPSHOT -ErrorAction SilentlyContinue
+        Remove-Item Env:VECTORS_AUTOSAVE_INTERVAL_SECS -ErrorAction SilentlyContinue
+    }
     $Server = Start-Process -FilePath $RuntimeServer -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $StdoutLog -RedirectStandardError $StderrLog
 } finally {
     $env:VECTORS_BIND = $PreviousBind
+    $env:VECTORS_DATA_DIR = $PreviousDataDir
     $env:VECTORS_SNAPSHOT = $PreviousSnapshot
     $env:VECTORS_AUTOSAVE_INTERVAL_SECS = $PreviousAutosave
 }
@@ -211,7 +216,11 @@ if (-not $Ready) {
 
 Write-Host "vectors-server started with PID $($Server.Id)."
 Write-Host "Web console: $ConsoleUrl"
-Write-Host "Snapshot: $Snapshot"
+if ($Snapshot) {
+    Write-Host "Snapshot: $Snapshot"
+} else {
+    Write-Host "Durable data: $DataDir"
+}
 Write-Host "Logs: $StdoutLog and $StderrLog"
 Write-Host "Stop: Stop-Process -Id (Get-Content '$PidFile')"
 if (-not $SkipOpen) {

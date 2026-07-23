@@ -9,40 +9,63 @@ use vectors::{api, Database};
 
 #[derive(Debug, PartialEq, Eq)]
 enum StartupAction {
-    Run { bind_override: Option<String> },
+    Run(StartupOptions),
     Help,
     Version,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StartupOptions {
+    bind_override: Option<String>,
+    data_dir_override: Option<PathBuf>,
 }
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    let bind_override = match parse_arguments(&arguments)? {
+    let options = match parse_arguments(&arguments)? {
         StartupAction::Version => {
             println!("vectors-server {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         StartupAction::Help => {
             println!(
-                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line bind options override VECTORS_BIND.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n  -h, --help            Show this help\n  -V, --version         Show version",
+                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line options override their VECTORS_* environment equivalents.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n      --data-dir PATH   Persist writes in PATH with a WAL and checkpoints\n  -h, --help            Show this help\n  -V, --version         Show version",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
         }
-        StartupAction::Run { bind_override } => bind_override,
+        StartupAction::Run(options) => options,
     };
-    let bind_address = bind_override
+    let bind_address = options
+        .bind_override
         .or_else(|| env::var("VECTORS_BIND").ok())
         .unwrap_or_else(|| "127.0.0.1:8080".into());
-    let snapshot = env::var_os("VECTORS_SNAPSHOT").map(PathBuf::from);
+    let data_dir = options
+        .data_dir_override
+        .or_else(|| non_empty_path("VECTORS_DATA_DIR"));
+    let snapshot = non_empty_path("VECTORS_SNAPSHOT");
+    if data_dir.is_some() && snapshot.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "VECTORS_DATA_DIR and VECTORS_SNAPSHOT are mutually exclusive",
+        ));
+    }
     let autosave_interval = autosave_interval(snapshot.as_deref())?;
     let api_token = env::var("VECTORS_API_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
-    let database = match snapshot.as_deref() {
-        Some(path) if path.exists() => Database::open(path).map_err(database_error)?,
-        _ => Database::new(),
+    let database = match (data_dir.as_deref(), snapshot.as_deref()) {
+        (Some(directory), _) => Database::open_persistent(directory).map_err(database_error)?,
+        (None, Some(path)) if path.exists() => Database::open(path).map_err(database_error)?,
+        (None, _) => Database::new(),
     };
+    if let Some(directory) = &data_dir {
+        eprintln!(
+            "durable storage enabled in {} (synchronized WAL and checkpoints)",
+            directory.display()
+        );
+    }
     let autosave = match (snapshot.as_ref(), autosave_interval) {
         (Some(path), Some(interval)) => {
             eprintln!(
@@ -79,46 +102,91 @@ async fn main() -> io::Result<()> {
         }
         return Err(error);
     }
-    if let Some(path) = snapshot {
+    if data_dir.is_some() {
+        database.checkpoint().map_err(database_error)?;
+    } else if let Some(path) = snapshot {
         database.save(path).map_err(database_error)?;
     }
     Ok(())
 }
 
+fn non_empty_path(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn parse_arguments(arguments: &[String]) -> io::Result<StartupAction> {
     match arguments {
-        [] => Ok(StartupAction::Run {
-            bind_override: None,
-        }),
-        [argument] if matches!(argument.as_str(), "--version" | "-V") => Ok(StartupAction::Version),
-        [argument] if matches!(argument.as_str(), "--help" | "-h") => Ok(StartupAction::Help),
-        [option, port] if matches!(option.as_str(), "--port" | "-p") => {
-            let port = port.parse::<u16>().map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "--port must be an integer from 1 through 65535",
-                )
-            })?;
-            if port == 0 {
+        [argument] if matches!(argument.as_str(), "--version" | "-V") => {
+            return Ok(StartupAction::Version);
+        }
+        [argument] if matches!(argument.as_str(), "--help" | "-h") => {
+            return Ok(StartupAction::Help);
+        }
+        _ => {}
+    }
+
+    let mut options = StartupOptions::default();
+    let mut index = 0;
+    while index < arguments.len() {
+        let option = &arguments[index];
+        let value = arguments.get(index + 1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{option} requires a value"),
+            )
+        })?;
+        match option.as_str() {
+            "--port" | "-p" => {
+                if options.bind_override.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--port and --bind may only be supplied once",
+                    ));
+                }
+                let port = value.parse::<u16>().map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--port must be an integer from 1 through 65535",
+                    )
+                })?;
+                if port == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--port must be an integer from 1 through 65535",
+                    ));
+                }
+                options.bind_override = Some(format!("127.0.0.1:{port}"));
+            }
+            "--bind" => {
+                if options.bind_override.is_some() || value.trim().is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--port and --bind may only be supplied once",
+                    ));
+                }
+                options.bind_override = Some(value.clone());
+            }
+            "--data-dir" => {
+                if options.data_dir_override.is_some() || value.trim().is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--data-dir may only be supplied once with a non-empty path",
+                    ));
+                }
+                options.data_dir_override = Some(PathBuf::from(value));
+            }
+            _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--port must be an integer from 1 through 65535",
+                    "invalid arguments; run 'vectors-server --help'",
                 ));
             }
-            Ok(StartupAction::Run {
-                bind_override: Some(format!("127.0.0.1:{port}")),
-            })
         }
-        [option, address] if option == "--bind" && !address.trim().is_empty() => {
-            Ok(StartupAction::Run {
-                bind_override: Some(address.clone()),
-            })
-        }
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid arguments; run 'vectors-server --help'",
-        )),
+        index += 2;
     }
+    Ok(StartupAction::Run(options))
 }
 
 fn suggested_port(bind_address: &str) -> u16 {
@@ -277,19 +345,28 @@ mod tests {
     #[test]
     fn parses_bind_options_and_suggests_another_port() {
         assert_eq!(
-            parse_arguments(&["--port".into(), "8081".into()]).unwrap(),
-            StartupAction::Run {
-                bind_override: Some("127.0.0.1:8081".into())
-            }
+            parse_arguments(&[
+                "--port".into(),
+                "8081".into(),
+                "--data-dir".into(),
+                "./data".into(),
+            ])
+            .unwrap(),
+            StartupAction::Run(StartupOptions {
+                bind_override: Some("127.0.0.1:8081".into()),
+                data_dir_override: Some(PathBuf::from("./data")),
+            })
         );
         assert_eq!(
             parse_arguments(&["--bind".into(), "0.0.0.0:9000".into()]).unwrap(),
-            StartupAction::Run {
-                bind_override: Some("0.0.0.0:9000".into())
-            }
+            StartupAction::Run(StartupOptions {
+                bind_override: Some("0.0.0.0:9000".into()),
+                data_dir_override: None,
+            })
         );
         assert!(parse_arguments(&["--port".into(), "0".into()]).is_err());
         assert!(parse_arguments(&["--port".into(), "busy".into()]).is_err());
+        assert!(parse_arguments(&["--data-dir".into()]).is_err());
         assert_eq!(suggested_port("127.0.0.1:8080"), 8081);
         assert_eq!(suggested_port("invalid"), 8081);
     }

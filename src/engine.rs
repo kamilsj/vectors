@@ -14,6 +14,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
+use crate::durable::{PersistentStorage, WalOperation};
 use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
 /// Logical types supported by the in-memory storage engine.
@@ -199,6 +200,7 @@ pub(crate) struct HashIndex {
 pub(crate) struct Catalog {
     pub(crate) tables: HashMap<String, Table>,
     pub(crate) revision: u64,
+    pub(crate) durable_sequence: u64,
 }
 
 const PARSE_CACHE_MAX_ENTRIES: usize = 64;
@@ -263,6 +265,7 @@ pub struct Database {
     catalog: Arc<RwLock<Catalog>>,
     snapshot_lock: Arc<Mutex<()>>,
     parse_cache: Arc<Mutex<ParseCache>>,
+    persistent: Option<Arc<PersistentStorage>>,
 }
 
 impl Database {
@@ -276,6 +279,33 @@ impl Database {
             catalog: Arc::new(RwLock::new(storage::load(path.as_ref())?)),
             snapshot_lock: Arc::new(Mutex::new(())),
             parse_cache: Arc::new(Mutex::new(ParseCache::default())),
+            persistent: None,
+        })
+    }
+
+    /// Open or create a durable database in `directory`.
+    ///
+    /// Queries execute against the memory-resident catalog. Successful writes
+    /// are synchronized to a checksummed write-ahead log before becoming
+    /// visible, and the log is periodically compacted into `vectors.vdb`.
+    /// Opening the same directory from another process fails while this handle
+    /// or any of its clones remains alive.
+    pub fn open_persistent(directory: impl AsRef<Path>) -> Result<Self> {
+        let (persistent, catalog, records) = PersistentStorage::open(directory.as_ref())?;
+        let database = Self {
+            catalog: Arc::new(RwLock::new(catalog)),
+            snapshot_lock: Arc::new(Mutex::new(())),
+            parse_cache: Arc::new(Mutex::new(ParseCache::default())),
+            persistent: None,
+        };
+        database.recover(records)?;
+        {
+            let mut catalog = database.catalog.write().map_err(|_| Error::LockPoisoned)?;
+            catalog.revision = 0;
+        }
+        Ok(Self {
+            persistent: Some(persistent),
+            ..database
         })
     }
 
@@ -302,6 +332,21 @@ impl Database {
         Ok(catalog.revision)
     }
 
+    /// Return the persistent data directory, or `None` for an in-memory or
+    /// snapshot-opened database.
+    pub fn data_directory(&self) -> Option<&Path> {
+        self.persistent.as_deref().map(PersistentStorage::directory)
+    }
+
+    /// Compact a persistent database's WAL into a synchronized checkpoint.
+    pub fn checkpoint(&self) -> Result<()> {
+        let persistent = self.persistent.as_ref().ok_or_else(|| {
+            Error::StorageIo("checkpoint requires a persistent data directory".into())
+        })?;
+        let catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        persistent.checkpoint(&catalog)
+    }
+
     fn save_snapshot(&self, path: &Path, last_revision: Option<u64>) -> Result<Option<u64>> {
         // Serialize checkpoints from cloned handles, then release the catalog
         // lock as soon as a coherent copy has been captured. Disk I/O must not
@@ -320,12 +365,12 @@ impl Database {
 
     /// Parse and execute one or more semicolon-separated SQL statements.
     ///
-    /// A multi-statement request containing a write is applied to a private
-    /// catalog snapshot first and committed under one write lock. If any
-    /// statement fails, none of the writes in that request become visible.
+    /// A request containing a write is applied to a private catalog snapshot
+    /// first and committed under one write lock. If any statement or durable
+    /// WAL append fails, none of the writes in that request become visible.
     pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
         let statements = self.parse_sql(sql)?;
-        if statements.len() <= 1
+        if (self.persistent.is_none() && statements.len() <= 1)
             || statements
                 .iter()
                 .all(|statement| matches!(statement, Statement::Query(_)))
@@ -341,18 +386,89 @@ impl Database {
             catalog: Arc::new(RwLock::new(catalog.clone())),
             snapshot_lock: self.snapshot_lock.clone(),
             parse_cache: self.parse_cache.clone(),
+            persistent: None,
         };
         let results = statements
             .into_iter()
             .map(|statement| staging.execute_statement(statement))
             .collect::<Result<Vec<_>>>()?;
-        let committed = staging
+        let mut committed = staging
             .catalog
             .read()
             .map_err(|_| Error::LockPoisoned)?
             .clone();
+        let changed = committed.revision != catalog.revision;
+        let checkpoint_needed = if changed {
+            if let Some(persistent) = &self.persistent {
+                let sequence = next_durable_sequence(catalog.durable_sequence)?;
+                let operation = PersistentStorage::prepare_sql(sql)?;
+                let checkpoint_needed = persistent.append(sequence, operation)?;
+                committed.durable_sequence = sequence;
+                checkpoint_needed
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         *catalog = committed;
+        drop(catalog);
+        if checkpoint_needed {
+            // The WAL commit is already durable and visible. Checkpointing is
+            // maintenance, so its failure cannot retroactively fail the write;
+            // callers can use `checkpoint` to observe and retry it explicitly.
+            let _ = self.checkpoint();
+        }
         Ok(results)
+    }
+
+    fn recover(&self, records: Vec<crate::durable::RecoveryRecord>) -> Result<()> {
+        let checkpoint_sequence = self
+            .catalog
+            .read()
+            .map_err(|_| Error::LockPoisoned)?
+            .durable_sequence;
+        let mut expected = checkpoint_sequence
+            .checked_add(1)
+            .ok_or_else(|| Error::CorruptWal("checkpoint sequence overflow".into()))?;
+        for record in records {
+            if record.sequence <= checkpoint_sequence {
+                continue;
+            }
+            if record.sequence != expected {
+                return Err(Error::CorruptWal(format!(
+                    "expected record sequence {expected}, found {}",
+                    record.sequence
+                )));
+            }
+            let before = self.revision()?;
+            let result = match record.operation {
+                WalOperation::Sql(sql) => self.execute(&sql).map(|_| ()),
+                WalOperation::InsertRows {
+                    table,
+                    rows,
+                    conflict,
+                } => self.insert_rows(&table, rows, conflict).map(|_| ()),
+            };
+            result.map_err(|error| {
+                Error::CorruptWal(format!(
+                    "record {} cannot be replayed: {error}",
+                    record.sequence
+                ))
+            })?;
+            if self.revision()? == before {
+                return Err(Error::CorruptWal(format!(
+                    "record {} did not change the catalog",
+                    record.sequence
+                )));
+            }
+            let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+            catalog.durable_sequence = record.sequence;
+            expected = expected
+                .checked_add(1)
+                .ok_or_else(|| Error::CorruptWal("record sequence overflow".into()))?;
+        }
+        Ok(())
     }
 
     fn parse_sql(&self, sql: &str) -> Result<Vec<Statement>> {
@@ -438,6 +554,56 @@ impl Database {
         rows: Vec<Vec<Value>>,
         conflict: InsertConflict,
     ) -> Result<usize> {
+        if self.persistent.is_none() {
+            return self.insert_rows_in_memory(table_name, rows, conflict);
+        }
+        let table_name = normalize_name(table_name);
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let table = catalog
+            .tables
+            .get(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        let conflict_plan = resolve_typed_conflict_plan(table, &conflict)?;
+        let pending = prepare_typed_rows(table, rows)?;
+        let wal_operation =
+            PersistentStorage::prepare_insert_rows(&table_name, &pending, &conflict)?;
+        let mutation = prepare_durable_insert(table, pending, conflict_plan)?;
+        let rows_affected = mutation.rows_affected();
+        let checkpoint_needed = if rows_affected > 0 {
+            let sequence = next_durable_sequence(catalog.durable_sequence)?;
+            let checkpoint_needed = self
+                .persistent
+                .as_ref()
+                .expect("persistent storage checked above")
+                .append(sequence, wal_operation)?;
+            mutation.apply(
+                catalog
+                    .tables
+                    .get_mut(&table_name)
+                    .expect("table exists while write lock is held"),
+            );
+            catalog.mark_changed();
+            catalog.durable_sequence = sequence;
+            checkpoint_needed
+        } else {
+            false
+        };
+        drop(catalog);
+        if checkpoint_needed {
+            // See the SQL path above: a compaction failure must not turn an
+            // already synchronized WAL commit into a reported transaction
+            // failure.
+            let _ = self.checkpoint();
+        }
+        Ok(rows_affected)
+    }
+
+    fn insert_rows_in_memory(
+        &self,
+        table_name: &str,
+        rows: Vec<Vec<Value>>,
+        conflict: InsertConflict,
+    ) -> Result<usize> {
         let table_name = normalize_name(table_name);
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
         let table = catalog
@@ -445,25 +611,7 @@ impl Database {
             .get_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
         let conflict_plan = resolve_typed_conflict_plan(table, &conflict)?;
-
-        let mut pending = Vec::with_capacity(rows.len());
-        for row in rows {
-            if row.len() != table.columns.len() {
-                return Err(Error::InvalidQuery(format!(
-                    "typed insert row has {} value(s), expected {}",
-                    row.len(),
-                    table.columns.len()
-                )));
-            }
-            let row = row
-                .into_iter()
-                .zip(&table.columns)
-                .map(|(value, column)| coerce(value, &column.data_type))
-                .collect::<Result<Vec<_>>>()?;
-            validate_row(&table.columns, &row)?;
-            pending.push(row);
-        }
-
+        let pending = prepare_typed_rows(table, rows)?;
         let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
         if rows_affected > 0 {
             catalog.mark_changed();
@@ -998,6 +1146,12 @@ impl Database {
             rows_affected,
         })
     }
+}
+
+fn next_durable_sequence(sequence: u64) -> Result<u64> {
+    sequence
+        .checked_add(1)
+        .ok_or_else(|| Error::StorageIo("durable sequence exhausted".into()))
 }
 
 fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<QueryResult> {
@@ -3534,6 +3688,85 @@ enum InsertConflictPlan {
         conflict_column: usize,
         update_columns: Vec<usize>,
     },
+}
+
+enum PreparedInsertMutation {
+    Append(Vec<Vec<Value>>),
+    Replace { table: Table, rows_affected: usize },
+}
+
+impl PreparedInsertMutation {
+    fn rows_affected(&self) -> usize {
+        match self {
+            Self::Append(rows) => rows.len(),
+            Self::Replace { rows_affected, .. } => *rows_affected,
+        }
+    }
+
+    fn apply(self, table: &mut Table) {
+        match self {
+            Self::Append(rows) => {
+                let first_new_row = table.rows.len();
+                table.rows.extend(rows);
+                extend_indexes(table, first_new_row);
+            }
+            Self::Replace {
+                table: replacement, ..
+            } => *table = replacement,
+        }
+    }
+}
+
+fn prepare_durable_insert(
+    table: &Table,
+    pending: Vec<Vec<Value>>,
+    conflict_plan: InsertConflictPlan,
+) -> Result<PreparedInsertMutation> {
+    match conflict_plan {
+        InsertConflictPlan::Fail => {
+            validate_unique(table, &pending)?;
+            Ok(PreparedInsertMutation::Append(pending))
+        }
+        InsertConflictPlan::DoNothing(conflict_columns) => {
+            let mut accepted = Vec::with_capacity(pending.len());
+            for row in pending {
+                if !row_conflicts(table, &accepted, &row, &conflict_columns) {
+                    accepted.push(row);
+                }
+            }
+            validate_unique(table, &accepted)?;
+            Ok(PreparedInsertMutation::Append(accepted))
+        }
+        plan => {
+            let mut replacement = table.clone();
+            let rows_affected = apply_insert_plan(&mut replacement, pending, plan)?;
+            Ok(PreparedInsertMutation::Replace {
+                table: replacement,
+                rows_affected,
+            })
+        }
+    }
+}
+
+fn prepare_typed_rows(table: &Table, rows: Vec<Vec<Value>>) -> Result<Vec<Vec<Value>>> {
+    let mut pending = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.len() != table.columns.len() {
+            return Err(Error::InvalidQuery(format!(
+                "typed insert row has {} value(s), expected {}",
+                row.len(),
+                table.columns.len()
+            )));
+        }
+        let row = row
+            .into_iter()
+            .zip(&table.columns)
+            .map(|(value, column)| coerce(value, &column.data_type))
+            .collect::<Result<Vec<_>>>()?;
+        validate_row(&table.columns, &row)?;
+        pending.push(row);
+    }
+    Ok(pending)
 }
 
 fn resolve_typed_conflict_plan(

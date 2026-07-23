@@ -1,4 +1,6 @@
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -14,6 +16,10 @@ fn snapshot_path(label: &str) -> PathBuf {
         "vectors-test-{}-{sequence}-{label}.vdb",
         std::process::id()
     ))
+}
+
+fn persistent_directory(label: &str) -> PathBuf {
+    snapshot_path(label).with_extension("data")
 }
 
 fn query(database: &Database, sql: &str) -> vectors::QueryResult {
@@ -45,6 +51,221 @@ fn seeded_database() -> Database {
         )
         .expect("seed statements should succeed");
     database
+}
+
+#[test]
+fn snapshot_reader_remains_compatible_with_versions_one_and_two() {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    for version in [1_u32, 2] {
+        let path = snapshot_path(&format!("format-{version}"));
+        let database = Database::new();
+        if version == 2 {
+            database
+                .execute(
+                    "CREATE TABLE entries (id INTEGER PRIMARY KEY, embedding VECTOR(2));
+                     CREATE INDEX entries_id_idx ON entries (id);
+                     INSERT INTO entries VALUES (1, ARRAY[0.25, 0.75]);",
+                )
+                .unwrap();
+        }
+        database.save(&path).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
+        let sequence_start = bytes.len() - 16;
+        bytes.drain(sequence_start..sequence_start + 8);
+        let checksum_start = bytes.len() - 8;
+        let checksum = bytes[..checksum_start].iter().fold(OFFSET, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+        });
+        bytes[checksum_start..].copy_from_slice(&checksum.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        let opened = Database::open(&path).unwrap();
+        if version == 1 {
+            assert!(opened.tables().unwrap().is_empty());
+        } else {
+            assert_eq!(
+                query(&opened, "SELECT id FROM entries WHERE id = 1").rows,
+                vec![vec![Value::Integer(1)]]
+            );
+            assert_eq!(opened.indexes("entries").unwrap().len(), 1);
+        }
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn persistent_wal_recovers_sql_and_typed_embeddings() {
+    let directory = persistent_directory("wal-recovery");
+    {
+        let database = Database::open_persistent(&directory).unwrap();
+        assert!(database.data_directory().is_some());
+        database
+            .execute(
+                "CREATE TABLE embeddings (
+                    id INTEGER PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    embedding VECTOR(3)
+                );
+                INSERT INTO embeddings VALUES (1, 'sql', ARRAY[1, 0, 0]);",
+            )
+            .unwrap();
+        database
+            .insert_rows(
+                "embeddings",
+                vec![vec![
+                    Value::Integer(2),
+                    Value::Text("typed".into()),
+                    Value::Vector(Vector::new(vec![0.0, 1.0, 0.0]).unwrap()),
+                ]],
+                InsertConflict::Fail,
+            )
+            .unwrap();
+        database
+            .insert_rows(
+                "embeddings",
+                vec![vec![
+                    Value::Integer(2),
+                    Value::Text("updated".into()),
+                    Value::Vector(Vector::new(vec![0.0, 0.0, 1.0]).unwrap()),
+                ]],
+                InsertConflict::DoUpdate {
+                    target: "id".into(),
+                    update_columns: vec!["label".into(), "embedding".into()],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            database
+                .insert_rows(
+                    "embeddings",
+                    vec![
+                        vec![
+                            Value::Integer(2),
+                            Value::Text("ignored".into()),
+                            Value::Vector(Vector::new(vec![1.0, 1.0, 0.0]).unwrap()),
+                        ],
+                        vec![
+                            Value::Integer(3),
+                            Value::Text("new".into()),
+                            Value::Vector(Vector::new(vec![1.0, 1.0, 0.0]).unwrap()),
+                        ],
+                    ],
+                    InsertConflict::DoNothing {
+                        target: Some("id".into()),
+                    },
+                )
+                .unwrap(),
+            1
+        );
+        assert!(fs::metadata(directory.join("vectors.wal")).unwrap().len() > 12);
+    }
+
+    {
+        let database = Database::open_persistent(&directory).unwrap();
+        let result = query(&database, "SELECT id, label FROM embeddings ORDER BY id");
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::Integer(1), Value::Text("sql".into())],
+                vec![Value::Integer(2), Value::Text("updated".into())],
+                vec![Value::Integer(3), Value::Text("new".into())],
+            ]
+        );
+        database.checkpoint().unwrap();
+        assert_eq!(
+            fs::metadata(directory.join("vectors.wal")).unwrap().len(),
+            12
+        );
+    }
+
+    let database = Database::open_persistent(&directory).unwrap();
+    assert_eq!(
+        query(&database, "SELECT COUNT(*) FROM embeddings").rows[0][0],
+        Value::Integer(3)
+    );
+    drop(database);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn persistent_writes_are_atomic_and_directories_are_exclusive() {
+    let directory = persistent_directory("wal-atomic");
+    let database = Database::open_persistent(&directory).unwrap();
+    database
+        .execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT)")
+        .unwrap();
+    database
+        .execute("INSERT INTO entries VALUES (1, 'kept')")
+        .unwrap();
+    assert_eq!(
+        Database::open_persistent(&directory).unwrap_err(),
+        Error::StorageBusy(fs::canonicalize(&directory).unwrap().display().to_string())
+    );
+    assert!(matches!(
+        database.execute("INSERT INTO entries VALUES (1, 'rejected')"),
+        Err(Error::UniqueViolation(_))
+    ));
+    drop(database);
+
+    let recovered = Database::open_persistent(&directory).unwrap();
+    assert_eq!(
+        query(&recovered, "SELECT value FROM entries").rows,
+        vec![vec![Value::Text("kept".into())]]
+    );
+    drop(recovered);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn recovery_discards_a_torn_wal_tail_but_rejects_corruption() {
+    let torn_directory = persistent_directory("wal-torn-tail");
+    let database = Database::open_persistent(&torn_directory).unwrap();
+    database
+        .execute("CREATE TABLE entries (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    drop(database);
+    let wal_path = torn_directory.join("vectors.wal");
+    let valid_length = fs::metadata(&wal_path).unwrap().len();
+    OpenOptions::new()
+        .append(true)
+        .open(&wal_path)
+        .unwrap()
+        .write_all(&[16, 0])
+        .unwrap();
+    let recovered = Database::open_persistent(&torn_directory).unwrap();
+    assert!(recovered.tables().unwrap().contains(&"entries".into()));
+    drop(recovered);
+    assert_eq!(fs::metadata(&wal_path).unwrap().len(), valid_length);
+    fs::remove_dir_all(torn_directory).unwrap();
+
+    let corrupt_directory = persistent_directory("wal-corrupt");
+    let database = Database::open_persistent(&corrupt_directory).unwrap();
+    database
+        .execute("CREATE TABLE entries (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    drop(database);
+    let wal_path = corrupt_directory.join("vectors.wal");
+    let mut wal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&wal_path)
+        .unwrap();
+    wal.seek(SeekFrom::Start(29)).unwrap();
+    let mut byte = [0_u8; 1];
+    wal.read_exact(&mut byte).unwrap();
+    byte[0] ^= 0x40;
+    wal.seek(SeekFrom::Start(29)).unwrap();
+    wal.write_all(&byte).unwrap();
+    wal.sync_all().unwrap();
+    drop(wal);
+    assert!(matches!(
+        Database::open_persistent(&corrupt_directory),
+        Err(Error::CorruptWal(message)) if message.contains("checksum")
+    ));
+    fs::remove_dir_all(corrupt_directory).unwrap();
 }
 
 #[test]

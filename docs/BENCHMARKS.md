@@ -110,3 +110,23 @@ local case from a 1.35 ms scan baseline to a 0.30 ms median (4.5x). Replaying
 the same batch with `DO NOTHING` took 0.21 ms instead of a 35.01 ms scan
 baseline—about 164x faster. The harness keeps databases alive until timing ends,
 verifies affected-row counts, and checks indexed lookup behavior separately.
+
+## Durable storage benchmark
+
+```sh
+cargo run --release --example benchmark_storage
+```
+
+This harness opens a fresh persistent directory, ingests typed vector batches,
+drops the live catalog without checkpointing, measures WAL recovery, validates
+the row count, and measures explicit checkpoint compaction. Every batch is one
+atomic WAL record and calls `sync_data` before `insert_rows` returns. Input
+generation happens inside the timed loop, so the ingestion number is a
+conservative embedded-path measurement rather than raw WAL bandwidth.
+
+The median of three processes on the reference machine on 2026-07-23 was 28.46
+ms for ten fsynced 1,000-row × 64-dimension batches (about 351,000 rows/s),
+11.56 ms to recover the 2.73 MiB WAL, and 17.46 ms to write a 2.69 MiB
+checkpoint. The batching contract matters: one-row transactions would require
+10,000 synchronization barriers and are intentionally not represented by this
+number.

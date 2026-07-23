@@ -23,7 +23,7 @@ Install vectors for Linux x86-64.
 Usage: install.sh [options]
 
 Options:
-  --version TAG       Install a release tag such as v0.2.1
+  --version TAG       Install a release tag such as v0.3.0
   --install-dir PATH  Install binaries here (default: ~/.local/bin)
   --bind ADDRESS      Server address (default: 127.0.0.1:8080)
   --no-start          Install without starting vectors-server
@@ -32,6 +32,8 @@ Options:
 
 Environment equivalents: VECTORS_VERSION, VECTORS_INSTALL_DIR,
 VECTORS_BIND, VECTORS_NO_START=1, and VECTORS_NO_OPEN=1.
+The started server uses VECTORS_DATA_DIR (platform default) for durable storage.
+Set VECTORS_SNAPSHOT to retain legacy interval-based snapshot mode.
 EOF
 }
 
@@ -155,8 +157,7 @@ fi
 
 data_dir="${VECTORS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/vectors}"
 state_dir="${VECTORS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/vectors}"
-snapshot="${VECTORS_SNAPSHOT:-$data_dir/vectors.vdb}"
-autosave="${VECTORS_AUTOSAVE_INTERVAL_SECS:-30}"
+snapshot="${VECTORS_SNAPSHOT:-}"
 pid_file="$state_dir/server.pid"
 log_file="$state_dir/server.log"
 mkdir -p "$data_dir" "$state_dir"
@@ -170,11 +171,19 @@ if [ -f "$pid_file" ]; then
     rm -f "$pid_file"
 fi
 
-nohup env \
-    VECTORS_BIND="$bind" \
-    VECTORS_SNAPSHOT="$snapshot" \
-    VECTORS_AUTOSAVE_INTERVAL_SECS="$autosave" \
-    "$install_dir/vectors-server" </dev/null >>"$log_file" 2>&1 &
+if [ -n "$snapshot" ]; then
+    autosave="${VECTORS_AUTOSAVE_INTERVAL_SECS:-30}"
+    nohup env -u VECTORS_DATA_DIR \
+        VECTORS_BIND="$bind" \
+        VECTORS_SNAPSHOT="$snapshot" \
+        VECTORS_AUTOSAVE_INTERVAL_SECS="$autosave" \
+        "$install_dir/vectors-server" </dev/null >>"$log_file" 2>&1 &
+else
+    nohup env -u VECTORS_SNAPSHOT -u VECTORS_AUTOSAVE_INTERVAL_SECS \
+        VECTORS_BIND="$bind" \
+        VECTORS_DATA_DIR="$data_dir" \
+        "$install_dir/vectors-server" </dev/null >>"$log_file" 2>&1 &
+fi
 server_pid=$!
 printf '%s\n' "$server_pid" > "$pid_file"
 
@@ -185,7 +194,11 @@ while [ "$attempt" -lt 20 ]; do
     if curl -fsS "$console_url/healthz" 2>/dev/null | grep -q '"status":"ok"'; then
         echo "vectors-server started with PID $server_pid."
         echo "Web console: $console_url"
-        echo "Snapshot: $snapshot"
+        if [ -n "$snapshot" ]; then
+            echo "Snapshot: $snapshot"
+        else
+            echo "Durable data: $data_dir"
+        fi
         echo "Log: $log_file"
         echo "Stop: kill \$(cat '$pid_file')"
         if [ "$open_console" -eq 1 ] && command -v xdg-open >/dev/null 2>&1 \

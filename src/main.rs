@@ -11,6 +11,7 @@ Shell commands:
   .tables               List tables
   .schema TABLE         Show a table's columns
   .indexes TABLE        Show a table's scalar indexes
+  .checkpoint           Compact the durable WAL into a checkpoint
   .save PATH            Save a database snapshot
   .open PATH            Replace the current database from a snapshot
   .read PATH            Execute SQL from a file
@@ -22,44 +23,66 @@ Terminate SQL statements with a semicolon.";
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
-    match arguments.as_slice() {
+    let data_dir = match arguments.as_slice() {
         [argument] if matches!(argument.as_str(), "--version" | "-V") => {
             println!("vectors {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         [argument] if matches!(argument.as_str(), "--help" | "-h") => {
             println!(
-                "vectors {}\n\nUsage: vectors\n\nStarts the interactive SQL shell.\n\nOptions:\n  -h, --help       Show this help\n  -V, --version    Show version",
+                "vectors {}\n\nUsage: vectors [options]\n\nStarts the interactive SQL shell.\n\nOptions:\n      --data-dir PATH   Open or create a durable database in PATH\n  -h, --help            Show this help\n  -V, --version         Show version",
                 env!("CARGO_PKG_VERSION")
             );
             return;
         }
-        [] => {}
+        [option, path] if option == "--data-dir" && !path.trim().is_empty() => Some(path),
+        [] => None,
         _ => {
             eprintln!("error: unexpected argument; run 'vectors --help'");
             std::process::exit(2);
         }
-    }
+    };
+    let database = match data_dir {
+        Some(path) => match Database::open_persistent(path) {
+            Ok(database) => database,
+            Err(error) => {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
+        },
+        None => Database::new(),
+    };
     let stdin = io::stdin();
     let stdout = io::stdout();
     let stderr = io::stderr();
-    if let Err(error) = run_shell(stdin.lock(), stdout.lock(), stderr.lock()) {
+    if let Err(error) =
+        run_shell_with_database(database, stdin.lock(), stdout.lock(), stderr.lock())
+    {
         eprintln!("error: {error}");
     }
 }
 
-fn run_shell(
+#[cfg(test)]
+fn run_shell(input: impl BufRead, output: impl Write, errors: impl Write) -> io::Result<()> {
+    run_shell_with_database(Database::new(), input, output, errors)
+}
+
+fn run_shell_with_database(
+    mut database: Database,
     mut input: impl BufRead,
     mut output: impl Write,
     mut errors: impl Write,
 ) -> io::Result<()> {
-    let mut database = Database::new();
     let mut statement = String::new();
     let mut timer_enabled = false;
 
+    let storage = database.data_directory().map_or_else(
+        || "in-memory".into(),
+        |path| format!("durable ({})", path.display()),
+    );
     writeln!(
         output,
-        "vectors {} | in-memory SQL vector database",
+        "vectors {} | {storage} SQL vector database",
         env!("CARGO_PKG_VERSION")
     )?;
     writeln!(output, "Type .help for help. End SQL with ';'.")?;
@@ -140,6 +163,7 @@ enum MetaCommand {
     Tables,
     Schema(String),
     Indexes(String),
+    Checkpoint,
     Save(String),
     Open(String),
     Read(String),
@@ -183,6 +207,10 @@ fn parse_meta_command(line: &str) -> Result<Option<MetaCommand>, String> {
         }
         ".schema" => MetaCommand::Schema(required_argument()?),
         ".indexes" => MetaCommand::Indexes(required_argument()?),
+        ".checkpoint" => {
+            no_argument()?;
+            MetaCommand::Checkpoint
+        }
         ".save" => MetaCommand::Save(required_argument()?),
         ".open" => MetaCommand::Open(required_argument()?),
         ".read" => MetaCommand::Read(required_argument()?),
@@ -275,6 +303,10 @@ fn handle_meta_command(
                     .collect::<Vec<_>>();
                 write_table(output, &["index".into(), "column".into()], &rows)?;
             }
+            Err(error) => writeln!(errors, "error: {error}")?,
+        },
+        MetaCommand::Checkpoint => match database.checkpoint() {
+            Ok(()) => writeln!(output, "checkpoint complete")?,
             Err(error) => writeln!(errors, "error: {error}")?,
         },
         MetaCommand::Save(path) => match database.save(&path) {

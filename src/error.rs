@@ -41,8 +41,12 @@ pub enum Error {
     LockPoisoned,
     #[error("storage I/O error: {0}")]
     StorageIo(String),
+    #[error("data directory '{0}' is already open by another process")]
+    StorageBusy(String),
     #[error("corrupt snapshot: {0}")]
     CorruptSnapshot(String),
+    #[error("corrupt write-ahead log: {0}")]
+    CorruptWal(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

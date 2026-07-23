@@ -14,7 +14,7 @@ use crate::engine::{
 use crate::{Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
 const MAGIC: &[u8; 8] = b"VECTORS\0";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const MAX_TABLES: usize = 100_000;
 const MAX_COLUMNS: usize = 100_000;
 const MAX_INDEXES: usize = 100_000;
@@ -147,6 +147,11 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
         tables.insert(name, table);
     }
 
+    let durable_sequence = if version >= 3 {
+        read_u64(&mut reader)?
+    } else {
+        0
+    };
     let calculated_checksum = reader.finish_hash();
     let stored_checksum = read_u64(&mut reader)?;
     if calculated_checksum != stored_checksum {
@@ -158,6 +163,7 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
         Ok(0) => Ok(Catalog {
             tables,
             revision: 0,
+            durable_sequence,
         }),
         Ok(_) => Err(corrupt("trailing data after catalog")),
         Err(error) => Err(io_error("read snapshot trailer", error)),
@@ -210,6 +216,7 @@ fn write_catalog(file: File, catalog: &Catalog) -> Result<()> {
             }
         }
     }
+    write_u64(&mut writer, catalog.durable_sequence)?;
     let checksum = writer.finish_hash();
     write_u64(&mut writer, checksum)?;
     writer
@@ -332,7 +339,7 @@ fn read_value(
 
 fn replace_file(temporary: &Path, target: &Path) -> Result<()> {
     match fs::rename(temporary, target) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return sync_parent(target),
         Err(first_error) if !target.exists() => {
             let _ = fs::remove_file(temporary);
             return Err(path_io("install snapshot", target, first_error));
@@ -352,7 +359,21 @@ fn replace_file(temporary: &Path, target: &Path) -> Result<()> {
         let _ = fs::remove_file(temporary);
         return Err(path_io("install replacement snapshot", target, error));
     }
+    sync_parent(target)?;
     let _ = fs::remove_file(backup);
+    sync_parent(target)
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| path_io("synchronize snapshot directory", parent, error))
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> Result<()> {
     Ok(())
 }
 
