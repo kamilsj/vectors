@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use vectors::{DataType, Database, Error, ExecutionResult, InsertConflict, Value, Vector};
+use vectors::{
+    DataType, Database, Error, ExecutionResult, InsertConflict, QueryColumnRole, Value, Vector,
+};
 
 static SNAPSHOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1235,6 +1237,53 @@ fn explain_reports_index_filter_aggregate_and_top_k_stages() {
     assert!(matches!(
         database.execute("EXPLAIN ANALYZE SELECT * FROM documents"),
         Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
+fn query_intent_expands_columns_and_recognizes_vector_ranking() {
+    let database = seeded_database();
+    let wildcard = database
+        .query_intent("SELECT * FROM documents WHERE active = TRUE LIMIT 3")
+        .unwrap();
+    assert_eq!(wildcard.table.as_deref(), Some("documents"));
+    assert_eq!(wildcard.columns.len(), 6);
+    assert_eq!(wildcard.columns[0].source_column.as_deref(), Some("id"));
+    assert_eq!(wildcard.columns[0].role, QueryColumnRole::Identifier);
+    assert_eq!(wildcard.columns[1].role, QueryColumnRole::Content);
+    assert_eq!(wildcard.columns[2].role, QueryColumnRole::Attribute);
+    assert_eq!(wildcard.columns[5].role, QueryColumnRole::Embedding);
+    assert_eq!(wildcard.filter.as_deref(), Some("active = true"));
+    assert_eq!(wildcard.limit, Some(3));
+    assert!(wildcard
+        .summary
+        .contains("Read 6 selected columns from 'documents'"));
+
+    let vector = database
+        .query_intent(
+            "SELECT id, title,
+                    cosine_distance(embedding, ARRAY[1, 0, 0]) AS distance
+             FROM documents
+             WHERE category = 'tech'
+             ORDER BY distance
+             LIMIT 2",
+        )
+        .unwrap();
+    let search = vector.vector_search.unwrap();
+    assert_eq!(search.metric, "cosine_distance");
+    assert_eq!(search.column, "embedding");
+    assert_eq!(search.dimensions, 3);
+    assert!(!search.descending);
+    assert!(search.optimized);
+    assert_eq!(vector.columns[2].role, QueryColumnRole::SimilarityScore);
+
+    assert!(matches!(
+        database.query_intent("DELETE FROM documents"),
+        Err(Error::InvalidQuery(_))
+    ));
+    assert!(matches!(
+        database.query_intent("SELECT * FROM missing"),
+        Err(Error::TableNotFound(_))
     ));
 }
 

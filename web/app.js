@@ -269,6 +269,60 @@ async function runSql() {
   }
 }
 
+async function analyzeSql() {
+  const sql = $("#sql-editor").value.trim();
+  if (!sql) {
+    toast("Write or load a SELECT statement first.", "error");
+    return;
+  }
+  const button = $("#analyze-sql");
+  button.disabled = true;
+  $("#editor-status").textContent = "Understanding…";
+  try {
+    const intent = await request("/v1/sql/intent", { method: "POST", body: JSON.stringify({ sql }) });
+    renderQueryIntent(intent);
+    $("#editor-status").textContent = "Intent ready";
+  } catch (error) {
+    $("#editor-status").textContent = "Error";
+    renderResultError(error);
+    showError(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderQueryIntent(intent) {
+  const target = clear($("#sql-results"));
+  target.className = "";
+  $("#results-title").textContent = "Query intent";
+  const metrics = clear($("#query-metrics"));
+  metrics.append(node("span", "metric-chip", intent.operation.toUpperCase()));
+  if (intent.table) metrics.append(node("span", "metric-chip", intent.table));
+  if (intent.vector_search?.optimized) metrics.append(node("span", "metric-chip", "VectorTopK"));
+
+  const summary = node("div", "intent-summary");
+  summary.append(node("span", "panel-kicker", "SCHEMA-AWARE INTERPRETATION"), node("h3", "", intent.summary));
+  const details = node("div", "intent-details");
+  if (intent.filter) details.append(node("span", "", `Filter · ${intent.filter}`));
+  if (intent.order_by.length) details.append(node("span", "", `Order · ${intent.order_by.join(", ")}`));
+  if (intent.limit !== null) details.append(node("span", "", `Limit · ${intent.limit}`));
+  if (intent.vector_search) {
+    details.append(node("span", "", `Embedding · ${intent.vector_search.column} (${intent.vector_search.dimensions}D)`));
+    details.append(node("span", "", `Metric · ${intent.vector_search.metric}`));
+  }
+  summary.append(details);
+  target.append(summary);
+  target.append(renderDataTable(
+    ["output", "source column", "type", "role"],
+    intent.columns.map((column) => [
+      column.output_name,
+      column.source_column || "—",
+      column.data_type || "computed",
+      column.role,
+    ]),
+  ));
+}
+
 function renderSqlResults(results, elapsed) {
   const target = clear($("#sql-results"));
   target.className = "";
@@ -495,6 +549,7 @@ function bindEvents() {
     await loadTables();
   });
   $("#run-sql").addEventListener("click", runSql);
+  $("#analyze-sql").addEventListener("click", analyzeSql);
   $("#example-select").addEventListener("change", (event) => setEditor(examples[event.target.value]));
   $("#format-sql").addEventListener("click", () => setEditor($("#sql-editor").value.trim().replace(/\n{3,}/g, "\n\n")));
   $("#sql-editor").addEventListener("input", updateLineNumbers);
@@ -528,7 +583,9 @@ async function initialize() {
   $("#token-input").value = state.token;
   setEditor(examples.quickstart);
   try {
-    await request("/healthz");
+    const health = await request("/healthz");
+    $("#app-version").textContent = health.version;
+    $("#storage-mode-label").textContent = health.storage === "durable" ? "WAL + checkpoint" : "in memory";
     await loadTables();
   } catch (error) {
     showError(error);

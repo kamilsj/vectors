@@ -90,6 +90,8 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 
 - **SQL first.** Create schemas, filter metadata, aggregate rows, upsert data,
   and rank vectors with familiar SQL.
+- **Schema-aware intent.** Analyze a `SELECT` before execution, expand `*`, and
+  identify keys, content, attributes, embeddings, and similarity scores.
 - **Hybrid by default.** Scalar hash indexes prune relational candidates before
   exact vector distance evaluation.
 - **Rust all the way down.** Memory-safe engine code, immutable vector values,
@@ -171,6 +173,7 @@ cargo run --release --bin vectors-server -- --data-dir ./vectors-data
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The console includes:
 
 - a multiline SQL editor with ready-to-run examples;
+- schema-aware **Understand query** analysis before execution;
 - live table, schema, index, row-count, and revision navigation;
 - a guided structured vector-search builder;
 - relational filters, selectable distance metrics, and ranked result tables;
@@ -186,7 +189,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.3.0 | in-memory SQL vector database
+vectors 0.4.0 | in-memory SQL vector database
 Type .help for help. End SQL with ';'.
 vectors>
 ```
@@ -299,8 +302,9 @@ The server binds to `127.0.0.1:8080` by default.
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | Web console |
-| `GET` | `/healthz` | Public health check |
+| `GET` | `/healthz` | Public health, version, and storage-mode metadata |
 | `POST` | `/v1/sql` | Execute one or more SQL statements |
+| `POST` | `/v1/sql/intent` | Validate and explain one read-only `SELECT` |
 | `GET` | `/v1/tables` | Table summaries and catalog revision |
 | `GET` | `/v1/tables/{table}/schema` | Typed column metadata |
 | `GET` | `/v1/tables/{table}/indexes` | Scalar index metadata |
@@ -314,6 +318,22 @@ curl http://127.0.0.1:8080/v1/sql \
   -H 'content-type: application/json' \
   -d '{"sql":"SELECT id, title FROM documents ORDER BY id"}'
 ```
+
+Understand a query without executing it:
+
+```sh
+curl http://127.0.0.1:8080/v1/sql/intent \
+  -H 'content-type: application/json' \
+  -d '{
+    "sql":"SELECT * FROM documents WHERE category = '\''tech'\'' LIMIT 5"
+  }'
+```
+
+The response expands `*` against the current schema and assigns each output a
+role such as `identifier`, `content`, `attribute`, or `embedding`. Vector-ranked
+queries also report the metric, vector column, dimensions, direction, and
+whether the specialized `VectorTopK` path is available. The analyzer accepts
+exactly one `SELECT`; it never executes mutations or invents missing schema.
 
 Run structured hybrid search without constructing SQL in the client:
 

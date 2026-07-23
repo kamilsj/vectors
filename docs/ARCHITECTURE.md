@@ -31,6 +31,15 @@ capped at 64 entries, 64 KiB per request string, and 1 MiB of SQL text in total.
 ASTs do not contain catalog data and are validated against the current schema
 every time they execute.
 
+`Database::query_intent` uses the same parser, schema lookup, projection
+expansion, expression validation, and `VectorTopK` recognizer without scanning
+rows or executing the statement. It accepts exactly one `SELECT`. Direct
+columns receive deterministic roles (identifier, content, attribute, or
+embedding); vector-distance outputs become similarity scores and other
+expressions remain computed values. This is catalog interpretation, not a
+natural-language model: ambiguous or absent tables and columns are rejected
+instead of guessed.
+
 ## Catalog and concurrency
 
 A `Database` owns an `Arc<RwLock<Catalog>>`. Cloning the handle shares that

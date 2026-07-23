@@ -125,6 +125,62 @@ impl QueryResult {
     }
 }
 
+/// Semantic role assigned to a selected output column by [`Database::query_intent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryColumnRole {
+    Identifier,
+    Content,
+    Attribute,
+    Embedding,
+    SimilarityScore,
+    Computed,
+}
+
+impl fmt::Display for QueryColumnRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Identifier => "identifier",
+            Self::Content => "content",
+            Self::Attribute => "attribute",
+            Self::Embedding => "embedding",
+            Self::SimilarityScore => "similarity_score",
+            Self::Computed => "computed",
+        })
+    }
+}
+
+/// Schema-aware description of one `SELECT` output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryIntentColumn {
+    pub output_name: String,
+    pub source_column: Option<String>,
+    pub data_type: Option<DataType>,
+    pub role: QueryColumnRole,
+}
+
+/// Vector-ranking behavior recognized in a `SELECT` order expression.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VectorQueryIntent {
+    pub metric: String,
+    pub column: String,
+    pub dimensions: usize,
+    pub descending: bool,
+    pub optimized: bool,
+}
+
+/// Validated, schema-aware intent extracted from one read-only SQL query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryIntent {
+    pub table: Option<String>,
+    pub columns: Vec<QueryIntentColumn>,
+    pub filter: Option<String>,
+    pub order_by: Vec<String>,
+    pub limit: Option<usize>,
+    pub offset: usize,
+    pub vector_search: Option<VectorQueryIntent>,
+    pub summary: String,
+}
+
 /// Read-only metadata for a scalar hash index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexInfo {
@@ -330,6 +386,27 @@ impl Database {
     pub fn revision(&self) -> Result<u64> {
         let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
         Ok(catalog.revision)
+    }
+
+    /// Analyze one read-only `SELECT` without executing it.
+    ///
+    /// Wildcards are expanded using the current schema. Returned column roles
+    /// distinguish identifiers, content, scalar attributes, embeddings,
+    /// similarity scores, and other computed expressions.
+    pub fn query_intent(&self, sql: &str) -> Result<QueryIntent> {
+        let mut statements = self.parse_sql(sql)?;
+        if statements.len() != 1 {
+            return Err(Error::InvalidQuery(
+                "query intent requires exactly one SELECT statement".into(),
+            ));
+        }
+        let Statement::Query(query) = statements.remove(0) else {
+            return Err(Error::InvalidQuery(
+                "query intent only accepts a read-only SELECT statement".into(),
+            ));
+        };
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        analyze_query_intent(&catalog, &query)
     }
 
     /// Return the persistent data directory, or `None` for an in-memory or
@@ -1313,6 +1390,262 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
             .collect(),
         rows_examined: 0,
     })
+}
+
+fn analyze_query_intent(catalog: &Catalog, query: &Query) -> Result<QueryIntent> {
+    if query.with.is_some()
+        || !query.limit_by.is_empty()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+    {
+        return Err(Error::Unsupported(
+            "CTEs, LIMIT BY, FETCH, row locks, and FOR clauses".into(),
+        ));
+    }
+    let select = match query.body.as_ref() {
+        SetExpr::Select(select) => select,
+        _ => {
+            return Err(Error::Unsupported(
+                "query intent for set operations and nested queries".into(),
+            ))
+        }
+    };
+    validate_select(select)?;
+    let (table_name, schema) = match select.from.as_slice() {
+        [] => (None, &[][..]),
+        [from] if from.joins.is_empty() => {
+            let name = table_factor_name(&from.relation)?;
+            let table = catalog
+                .tables
+                .get(&name)
+                .ok_or_else(|| Error::TableNotFound(name.clone()))?;
+            (Some(name), table.columns.as_slice())
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "query intent for joins and multiple FROM items".into(),
+            ))
+        }
+    };
+    let projection = build_projection(&select.projection, schema)?;
+    for item in &projection {
+        validate_expression_columns(&item.expression, schema)?;
+    }
+    if let Some(selection) = &select.selection {
+        validate_expression_columns(selection, schema)?;
+    }
+
+    let result_columns = projection
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>();
+    for order in &query.order_by {
+        let expression = resolve_order_expression(order, &projection, &result_columns);
+        validate_expression_columns(expression, schema)?;
+    }
+    let empty = EvalContext::empty();
+    let offset = query
+        .offset
+        .as_ref()
+        .map(|offset| usize_expression(&offset.value, &empty, "OFFSET"))
+        .transpose()?
+        .unwrap_or(0);
+    let limit = query
+        .limit
+        .as_ref()
+        .map(|limit| usize_expression(limit, &empty, "LIMIT"))
+        .transpose()?;
+
+    let group_by = match &select.group_by {
+        sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
+        sqlparser::ast::GroupByExpr::Expressions(expressions) => expressions.as_slice(),
+    };
+    let aggregate = !group_by.is_empty()
+        || projection
+            .iter()
+            .any(|item| expression_contains_aggregate(&item.expression))
+        || select
+            .having
+            .as_ref()
+            .is_some_and(expression_contains_aggregate);
+    let optimized = match (aggregate, limit) {
+        (false, Some(limit)) => FastVectorTopKPlan::build(
+            select,
+            query,
+            schema,
+            &projection,
+            &result_columns,
+            offset,
+            limit,
+        )?
+        .is_some(),
+        _ => false,
+    };
+    let vector_search = query
+        .order_by
+        .iter()
+        .find_map(|order| {
+            let expression = resolve_order_expression(order, &projection, &result_columns);
+            match vector_expression(expression, schema) {
+                Ok(Some((column, dimensions, metric))) => Some(Ok(VectorQueryIntent {
+                    metric: metric.intent_name().into(),
+                    column: schema[column].name.clone(),
+                    dimensions,
+                    descending: order.asc == Some(false),
+                    optimized,
+                })),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?;
+
+    let columns = projection
+        .iter()
+        .map(|item| {
+            if let Some(index) = simple_column_expression(&item.expression, schema) {
+                let column = &schema[index];
+                return Ok(QueryIntentColumn {
+                    output_name: item.label.clone(),
+                    source_column: Some(column.name.clone()),
+                    data_type: Some(column.data_type.clone()),
+                    role: column_role(column),
+                });
+            }
+            if vector_expression(&item.expression, schema)?.is_some() {
+                return Ok(QueryIntentColumn {
+                    output_name: item.label.clone(),
+                    source_column: None,
+                    data_type: Some(DataType::Float),
+                    role: QueryColumnRole::SimilarityScore,
+                });
+            }
+            Ok(QueryIntentColumn {
+                output_name: item.label.clone(),
+                source_column: None,
+                data_type: None,
+                role: QueryColumnRole::Computed,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let filter = select.selection.as_ref().map(ToString::to_string);
+    let order_by = query.order_by.iter().map(ToString::to_string).collect();
+    let summary = intent_summary(
+        table_name.as_deref(),
+        columns.len(),
+        filter.is_some(),
+        limit,
+        vector_search.as_ref(),
+    );
+    Ok(QueryIntent {
+        table: table_name,
+        columns,
+        filter,
+        order_by,
+        limit,
+        offset,
+        vector_search,
+        summary,
+    })
+}
+
+fn resolve_order_expression<'a>(
+    order: &'a OrderByExpr,
+    projection: &'a [Projection],
+    result_columns: &[String],
+) -> &'a Expr {
+    if let Expr::Identifier(identifier) = &order.expr {
+        let name = ident_name(identifier);
+        if let Some(index) = result_columns
+            .iter()
+            .position(|label| normalize_name(label) == name)
+        {
+            return &projection[index].expression;
+        }
+    }
+    &order.expr
+}
+
+fn vector_expression(
+    expression: &Expr,
+    columns: &[Column],
+) -> Result<Option<(usize, usize, FastVectorMetric)>> {
+    let Some((column, query, metric)) = parse_fast_vector_distance(expression, columns)? else {
+        return Ok(None);
+    };
+    let DataType::Vector(dimensions) = &columns[column].data_type else {
+        return Ok(None);
+    };
+    if query.dimensions() != *dimensions {
+        return Err(Error::DimensionMismatch {
+            left: *dimensions,
+            right: query.dimensions(),
+        });
+    }
+    Ok(Some((column, *dimensions, metric)))
+}
+
+fn column_role(column: &Column) -> QueryColumnRole {
+    match &column.data_type {
+        DataType::Vector(_) => QueryColumnRole::Embedding,
+        _ if column.unique => QueryColumnRole::Identifier,
+        DataType::Text if content_column_name(&column.name) => QueryColumnRole::Content,
+        _ => QueryColumnRole::Attribute,
+    }
+}
+
+fn content_column_name(name: &str) -> bool {
+    const CONTENT_NAMES: &[&str] = &[
+        "answer",
+        "body",
+        "chunk",
+        "content",
+        "description",
+        "document",
+        "label",
+        "name",
+        "question",
+        "summary",
+        "text",
+        "title",
+    ];
+    let normalized = normalize_name(name);
+    CONTENT_NAMES.contains(&normalized.as_str())
+        || normalized
+            .split('_')
+            .any(|part| CONTENT_NAMES.contains(&part))
+}
+
+fn intent_summary(
+    table: Option<&str>,
+    column_count: usize,
+    filtered: bool,
+    limit: Option<usize>,
+    vector_search: Option<&VectorQueryIntent>,
+) -> String {
+    let columns = if column_count == 1 {
+        "1 selected column".into()
+    } else {
+        format!("{column_count} selected columns")
+    };
+    let limit = limit.map_or_else(String::new, |limit| {
+        let rows = if limit == 1 { "row" } else { "rows" };
+        format!(", limited to {limit} {rows}")
+    });
+    let filter = if filtered {
+        " after applying a relational filter"
+    } else {
+        ""
+    };
+    match (table, vector_search) {
+        (Some(table), Some(vector)) => format!(
+            "Rank rows from '{table}' by {} on '{}'{filter}; return {columns}{limit}",
+            vector.metric, vector.column,
+        ),
+        (Some(table), None) => format!("Read {columns} from '{table}'{filter}{limit}"),
+        (None, _) => format!("Compute {columns}{limit}"),
+    }
 }
 
 fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
@@ -2449,6 +2782,15 @@ enum FastVectorMetric {
 }
 
 impl FastVectorMetric {
+    fn intent_name(self) -> &'static str {
+        match self {
+            Self::L2 => "l2_distance",
+            Self::SquaredL2 => "squared_l2_distance",
+            Self::Cosine => "cosine_distance",
+            Self::DotProduct | Self::NegativeDotProduct => "dot_product",
+        }
+    }
+
     fn score(self, vector: &Vector, query: &Vector) -> Result<f64> {
         let score = match self {
             Self::L2 => vector.l2_distance(query)?,

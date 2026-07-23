@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
 
 use crate::{
-    Column, DataType, Database, Error, ExecutionResult, InsertConflict, QueryResult, Value, Vector,
+    Column, DataType, Database, Error, ExecutionResult, InsertConflict, QueryIntent, QueryResult,
+    Value, Vector,
 };
 
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
@@ -49,6 +50,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::scope("/v1")
                 .route("/sql", web::post().to(execute_sql))
+                .route("/sql/intent", web::post().to(query_intent))
                 .route("/tables", web::get().to(tables))
                 .route("/tables/{table}/schema", web::get().to(table_schema))
                 .route("/tables/{table}/indexes", web::get().to(table_indexes))
@@ -133,10 +135,20 @@ async fn serve_inner(
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
+    version: &'static str,
+    storage: &'static str,
 }
 
-async fn health() -> web::Json<HealthResponse> {
-    web::Json(HealthResponse { status: "ok" })
+async fn health(database: web::Data<Database>) -> web::Json<HealthResponse> {
+    web::Json(HealthResponse {
+        status: "ok",
+        version: env!("CARGO_PKG_VERSION"),
+        storage: if database.data_directory().is_some() {
+            "durable"
+        } else {
+            "memory"
+        },
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +238,87 @@ async fn execute_sql(
         .await
         .map_err(ApiError::from_blocking)??;
     Ok(web::Json(SqlResponse::from(results)))
+}
+
+#[derive(Debug, Serialize)]
+struct QueryIntentResponse {
+    operation: &'static str,
+    table: Option<String>,
+    columns: Vec<QueryIntentColumnResponse>,
+    filter: Option<String>,
+    order_by: Vec<String>,
+    limit: Option<usize>,
+    offset: usize,
+    vector_search: Option<VectorQueryIntentResponse>,
+    summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct QueryIntentColumnResponse {
+    output_name: String,
+    source_column: Option<String>,
+    data_type: Option<String>,
+    role: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VectorQueryIntentResponse {
+    metric: String,
+    column: String,
+    dimensions: usize,
+    descending: bool,
+    optimized: bool,
+}
+
+async fn query_intent(
+    http_request: HttpRequest,
+    security: Option<web::Data<ApiSecurity>>,
+    database: web::Data<Database>,
+    request: web::Json<SqlRequest>,
+) -> Result<web::Json<QueryIntentResponse>, ApiError> {
+    authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
+    if request.sql.trim().is_empty() {
+        return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
+    }
+    let sql = request.into_inner().sql;
+    let database = database.get_ref().clone();
+    let intent = web::block(move || database.query_intent(&sql))
+        .await
+        .map_err(ApiError::from_blocking)??;
+    Ok(web::Json(QueryIntentResponse::from(intent)))
+}
+
+impl From<QueryIntent> for QueryIntentResponse {
+    fn from(intent: QueryIntent) -> Self {
+        Self {
+            operation: "select",
+            table: intent.table,
+            columns: intent
+                .columns
+                .into_iter()
+                .map(|column| QueryIntentColumnResponse {
+                    output_name: column.output_name,
+                    source_column: column.source_column,
+                    data_type: column.data_type.map(|data_type| data_type.to_string()),
+                    role: column.role.to_string(),
+                })
+                .collect(),
+            filter: intent.filter,
+            order_by: intent.order_by,
+            limit: intent.limit,
+            offset: intent.offset,
+            vector_search: intent
+                .vector_search
+                .map(|vector| VectorQueryIntentResponse {
+                    metric: vector.metric,
+                    column: vector.column,
+                    dimensions: vector.dimensions,
+                    descending: vector.descending,
+                    optimized: vector.optimized,
+                }),
+            summary: intent.summary,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -941,9 +1034,11 @@ impl From<Error> for ApiError {
             | Error::IndexAlreadyExists(_)
             | Error::UniqueViolation(_)
             | Error::NullViolation(_) => (StatusCode::CONFLICT, "constraint_violation"),
-            Error::LockPoisoned | Error::StorageIo(_) | Error::CorruptSnapshot(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-            }
+            Error::LockPoisoned
+            | Error::StorageIo(_)
+            | Error::StorageBusy(_)
+            | Error::CorruptSnapshot(_)
+            | Error::CorruptWal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             Error::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported_sql"),
             _ => (StatusCode::BAD_REQUEST, "invalid_request"),
         };

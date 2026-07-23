@@ -51,6 +51,48 @@ async fn executes_sql_and_returns_json_values() {
 }
 
 #[actix_web::test]
+async fn analyzes_schema_aware_sql_intent_without_execution() {
+    let database = api_database();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(database))
+            .configure(api::configure),
+    )
+    .await;
+
+    let analyze = test::TestRequest::post()
+        .uri("/v1/sql/intent")
+        .set_json(json!({
+            "sql": "SELECT *, cosine_distance(embedding, ARRAY[1, 0, 0]) AS distance
+                    FROM documents WHERE category = 'tech'
+                    ORDER BY distance LIMIT 5"
+        }))
+        .to_request();
+    let response: Value = test::call_and_read_body_json(&app, analyze).await;
+    assert_eq!(response["operation"], "select");
+    assert_eq!(response["table"], "documents");
+    assert_eq!(response["columns"].as_array().unwrap().len(), 5);
+    assert_eq!(response["columns"][0]["role"], "identifier");
+    assert_eq!(response["columns"][1]["role"], "content");
+    assert_eq!(response["columns"][2]["role"], "attribute");
+    assert_eq!(response["columns"][3]["role"], "embedding");
+    assert_eq!(response["columns"][4]["role"], "similarity_score");
+    assert_eq!(response["vector_search"]["column"], "embedding");
+    assert_eq!(response["vector_search"]["metric"], "cosine_distance");
+    assert_eq!(response["vector_search"]["optimized"], true);
+    assert_eq!(response["limit"], 5);
+
+    let mutation = test::TestRequest::post()
+        .uri("/v1/sql/intent")
+        .set_json(json!({ "sql": "DELETE FROM documents" }))
+        .to_request();
+    assert_eq!(
+        test::call_service(&app, mutation).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[actix_web::test]
 async fn bulk_ingests_embeddings_and_runs_filtered_search() {
     let database = api_database();
     let app = test::init_service(
@@ -213,6 +255,8 @@ async fn exposes_health_schema_and_index_metadata() {
     let health = test::TestRequest::get().uri("/healthz").to_request();
     let response: Value = test::call_and_read_body_json(&app, health).await;
     assert_eq!(response["status"], "ok");
+    assert_eq!(response["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(response["storage"], "memory");
 
     let console = test::TestRequest::get().uri("/").to_request();
     let response = test::call_service(&app, console).await;
@@ -225,6 +269,9 @@ async fn exposes_health_schema_and_index_metadata() {
     assert!(body
         .windows("SQL-first vector database".len())
         .any(|window| window == b"SQL-first vector database"));
+    assert!(body
+        .windows("Understand query".len())
+        .any(|window| window == b"Understand query"));
 
     let tables = test::TestRequest::get().uri("/v1/tables").to_request();
     let response: Value = test::call_and_read_body_json(&app, tables).await;

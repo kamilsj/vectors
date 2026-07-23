@@ -6,6 +6,27 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+## 0.4.0 - 2026-07-23
+
+### Added
+
+- `Database::query_intent` for validating and interpreting one read-only SQL
+  query against the live catalog without executing it.
+- Schema-aware output roles for identifier, content, attribute, embedding,
+  similarity-score, and computed columns, including expansion of `SELECT *`.
+- `POST /v1/sql/intent` with structured table, column, filter, ordering, limit,
+  vector metric, dimensions, and optimized-plan metadata.
+- An **Understand query** action in the web console that explains SQL intent and
+  displays the role of every returned column before execution.
+- Health metadata for the running version and storage mode; the web console now
+  displays the real server version and durability mode instead of hard-coded
+  placeholders.
+
+### Changed
+
+- Storage-lock and WAL-corruption failures now map to HTTP 500 rather than a
+  client input error.
+
 ## 0.3.0 - 2026-07-23
 
 ### Added

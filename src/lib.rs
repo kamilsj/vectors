@@ -12,8 +12,8 @@ mod storage;
 mod vector;
 
 pub use engine::{
-    Column, DataType, Database, ExecutionResult, IndexInfo, InsertConflict, QueryResult, TableInfo,
-    Value,
+    Column, DataType, Database, ExecutionResult, IndexInfo, InsertConflict, QueryColumnRole,
+    QueryIntent, QueryIntentColumn, QueryResult, TableInfo, Value, VectorQueryIntent,
 };
 pub use error::{Error, Result};
 pub use vector::{Vector, MAX_VECTOR_DIMENSIONS};

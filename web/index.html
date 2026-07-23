@@ -48,7 +48,7 @@
           <span><strong id="status-label">Connecting</strong><small>localhost</small></span>
           <span class="connection-arrow">›</span>
         </button>
-        <div class="version">vectors <span id="app-version">0.1.0</span></div>
+        <div class="version">vectors <span id="app-version">dev</span></div>
       </div>
     </aside>
 
@@ -71,7 +71,7 @@
           <article class="stat-card accent-a">
             <span class="stat-label">Tables</span>
             <strong id="stat-tables">—</strong>
-            <small>in memory</small>
+            <small id="storage-mode-label">storage loading</small>
           </article>
           <article class="stat-card accent-b">
             <span class="stat-label">Rows</span>
@@ -108,6 +108,7 @@
                   </select>
                 </label>
                 <button id="format-sql" class="button ghost compact" type="button">Clean up</button>
+                <button id="analyze-sql" class="button ghost compact" type="button">Understand query</button>
                 <button id="run-sql" class="button primary compact" type="button">
                   <span>Run query</span><span aria-hidden="true">▶</span>
                 </button>

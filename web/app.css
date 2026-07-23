@@ -329,6 +329,10 @@ select, input { min-height: 36px; padding: 0 10px; }
 .command-result { display: flex; align-items: center; gap: 10px; padding: 13px 17px; }
 .command-result b { color: var(--lime); font: 11px ui-monospace, monospace; }
 .command-result span { color: var(--muted); font-size: 11px; }
+.intent-summary { padding: 18px 17px; border-bottom: 1px solid var(--border); }
+.intent-summary h3 { margin: 6px 0 12px; font-size: 16px; line-height: 1.45; }
+.intent-details { display: flex; flex-wrap: wrap; gap: 7px; }
+.intent-details span { padding: 4px 7px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); font: 9px ui-monospace, monospace; }
 .data-table-wrap { overflow-x: auto; }
 .data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
 .data-table th { padding: 10px 13px; border-bottom: 1px solid var(--border); background: #11171a; color: var(--muted); font-size: 9px; letter-spacing: .5px; text-align: left; text-transform: uppercase; }
