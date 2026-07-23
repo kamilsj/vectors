@@ -2,11 +2,13 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use actix_web::error::{BlockingError, InternalError, JsonPayloadError};
-use actix_web::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use actix_web::http::StatusCode;
+use actix_web::http::header::{AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE};
+use actix_web::http::{KeepAlive, StatusCode};
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, ResponseError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
@@ -19,6 +21,132 @@ use crate::{
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BULK_ROWS: usize = 1_000;
 const MAX_SEARCH_LIMIT: usize = 1_000;
+
+/// Capacity and connection settings for the standalone HTTP server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerConfig {
+    pub workers: usize,
+    pub max_blocking_threads_per_worker: usize,
+    pub max_connections_per_worker: usize,
+    pub max_concurrent_database_tasks: usize,
+    pub keep_alive: Duration,
+    pub client_request_timeout: Duration,
+    pub shutdown_timeout: Duration,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        let parallelism = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        Self {
+            workers: parallelism,
+            max_blocking_threads_per_worker: 1,
+            max_connections_per_worker: 4_096,
+            max_concurrent_database_tasks: parallelism,
+            keep_alive: Duration::from_secs(30),
+            client_request_timeout: Duration::from_secs(5),
+            shutdown_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl ServerConfig {
+    fn validate(&self) -> io::Result<()> {
+        for (name, value) in [
+            ("workers", self.workers),
+            (
+                "max_blocking_threads_per_worker",
+                self.max_blocking_threads_per_worker,
+            ),
+            (
+                "max_connections_per_worker",
+                self.max_connections_per_worker,
+            ),
+            (
+                "max_concurrent_database_tasks",
+                self.max_concurrent_database_tasks,
+            ),
+        ] {
+            if value == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be greater than zero"),
+                ));
+            }
+        }
+        for (name, value) in [
+            ("keep_alive", self.keep_alive),
+            ("client_request_timeout", self.client_request_timeout),
+        ] {
+            if value.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be greater than zero"),
+                ));
+            }
+        }
+        if self.shutdown_timeout.as_secs() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "shutdown_timeout must be at least one second",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DatabaseTaskLimiter {
+    state: Arc<DatabaseTaskState>,
+}
+
+#[derive(Debug)]
+struct DatabaseTaskState {
+    in_flight: AtomicUsize,
+    rejected: AtomicU64,
+    limit: usize,
+}
+
+impl DatabaseTaskLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Arc::new(DatabaseTaskState {
+                in_flight: AtomicUsize::new(0),
+                rejected: AtomicU64::new(0),
+                limit,
+            }),
+        }
+    }
+
+    fn acquire(&self) -> Result<DatabaseTaskPermit, ApiError> {
+        let acquired = self
+            .state
+            .in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < self.state.limit).then_some(current + 1)
+            })
+            .is_ok();
+        if !acquired {
+            self.state.rejected.fetch_add(1, Ordering::Relaxed);
+            return Err(ApiError::overloaded());
+        }
+        Ok(DatabaseTaskPermit {
+            state: self.state.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct DatabaseTaskPermit {
+    state: Arc<DatabaseTaskState>,
+}
+
+impl Drop for DatabaseTaskPermit {
+    fn drop(&mut self) {
+        self.state.in_flight.fetch_sub(1, Ordering::Release);
+    }
+}
 
 /// Optional authentication settings for applications embedding the HTTP API.
 #[derive(Clone, Debug)]
@@ -47,6 +175,8 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route("/assets/app.css", web::get().to(console_styles))
         .route("/assets/app.js", web::get().to(console_script))
         .route("/healthz", web::get().to(health))
+        .route("/readyz", web::get().to(readiness))
+        .route("/metrics", web::get().to(metrics))
         .service(
             web::scope("/v1")
                 .route("/sql", web::post().to(execute_sql))
@@ -91,7 +221,16 @@ fn console_asset(body: &'static str, content_type: &'static str) -> HttpResponse
 
 /// Start an HTTP server backed by the supplied database handle.
 pub async fn serve(database: Database, bind_address: &str) -> io::Result<()> {
-    serve_inner(database, bind_address, None).await
+    serve_with_config(database, bind_address, ServerConfig::default()).await
+}
+
+/// Start an HTTP server with explicit production capacity settings.
+pub async fn serve_with_config(
+    database: Database,
+    bind_address: &str,
+    config: ServerConfig,
+) -> io::Result<()> {
+    serve_inner(database, bind_address, None, config).await
 }
 
 /// Start an HTTP server that requires a bearer token on every `/v1` route.
@@ -99,6 +238,22 @@ pub async fn serve_authenticated(
     database: Database,
     bind_address: &str,
     bearer_token: String,
+) -> io::Result<()> {
+    serve_authenticated_with_config(
+        database,
+        bind_address,
+        bearer_token,
+        ServerConfig::default(),
+    )
+    .await
+}
+
+/// Start a configured HTTP server with bearer authentication on `/v1` routes.
+pub async fn serve_authenticated_with_config(
+    database: Database,
+    bind_address: &str,
+    bearer_token: String,
+    config: ServerConfig,
 ) -> io::Result<()> {
     if bearer_token.is_empty() {
         return Err(io::Error::new(
@@ -110,6 +265,7 @@ pub async fn serve_authenticated(
         database,
         bind_address,
         Some(ApiSecurity::bearer_token(bearer_token)),
+        config,
     )
     .await
 }
@@ -118,15 +274,29 @@ async fn serve_inner(
     database: Database,
     bind_address: &str,
     security: Option<ApiSecurity>,
+    config: ServerConfig,
 ) -> io::Result<()> {
+    config.validate()?;
     let database = web::Data::new(database);
+    let limiter = web::Data::new(DatabaseTaskLimiter::new(
+        config.max_concurrent_database_tasks,
+    ));
     HttpServer::new(move || {
-        let mut app = App::new().app_data(database.clone());
+        let mut app = App::new()
+            .app_data(database.clone())
+            .app_data(limiter.clone());
         if let Some(security) = security.clone() {
             app = app.app_data(web::Data::new(security));
         }
         app.configure(configure)
     })
+    .workers(config.workers)
+    .worker_max_blocking_threads(config.max_blocking_threads_per_worker)
+    .max_connections(config.max_connections_per_worker)
+    .keep_alive(KeepAlive::Timeout(config.keep_alive))
+    .client_request_timeout(config.client_request_timeout)
+    .shutdown_timeout(config.shutdown_timeout.as_secs())
+    .tcp_nodelay(true)
     .bind(bind_address)?
     .run()
     .await
@@ -152,6 +322,88 @@ async fn health(database: web::Data<Database>) -> web::Json<HealthResponse> {
 }
 
 #[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    version: &'static str,
+    storage: &'static str,
+    revision: u64,
+    database_tasks_in_flight: usize,
+    database_task_limit: Option<usize>,
+}
+
+async fn readiness(
+    database: web::Data<Database>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
+) -> Result<web::Json<ReadinessResponse>, ApiError> {
+    let storage = if database.data_directory().is_some() {
+        "durable"
+    } else {
+        "memory"
+    };
+    let database = database.get_ref().clone();
+    let revision = web::block(move || database.revision())
+        .await
+        .map_err(ApiError::from_blocking)??;
+    let (database_tasks_in_flight, database_task_limit) = limiter
+        .as_ref()
+        .map(|limiter| {
+            (
+                limiter.state.in_flight.load(Ordering::Acquire),
+                Some(limiter.state.limit),
+            )
+        })
+        .unwrap_or((0, None));
+    Ok(web::Json(ReadinessResponse {
+        status: "ready",
+        version: env!("CARGO_PKG_VERSION"),
+        storage,
+        revision,
+        database_tasks_in_flight,
+        database_task_limit,
+    }))
+}
+
+async fn metrics(
+    database: web::Data<Database>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
+) -> Result<HttpResponse, ApiError> {
+    let database = database.get_ref().clone();
+    let revision = web::block(move || database.revision())
+        .await
+        .map_err(ApiError::from_blocking)??;
+    let (in_flight, limit, rejected) = limiter
+        .as_ref()
+        .map(|limiter| {
+            (
+                limiter.state.in_flight.load(Ordering::Acquire),
+                limiter.state.limit,
+                limiter.state.rejected.load(Ordering::Relaxed),
+            )
+        })
+        .unwrap_or((0, 0, 0));
+    let body = format!(
+        "# HELP vectors_up Whether this vectors process is running.\n\
+         # TYPE vectors_up gauge\n\
+         vectors_up 1\n\
+         # HELP vectors_catalog_revision Current committed catalog revision.\n\
+         # TYPE vectors_catalog_revision gauge\n\
+         vectors_catalog_revision {revision}\n\
+         # HELP vectors_database_tasks_in_flight Database tasks currently executing.\n\
+         # TYPE vectors_database_tasks_in_flight gauge\n\
+         vectors_database_tasks_in_flight {in_flight}\n\
+         # HELP vectors_database_task_limit Maximum concurrent database tasks.\n\
+         # TYPE vectors_database_task_limit gauge\n\
+         vectors_database_task_limit {limit}\n\
+         # HELP vectors_database_tasks_rejected_total Database tasks rejected by overload protection.\n\
+         # TYPE vectors_database_tasks_rejected_total counter\n\
+         vectors_database_tasks_rejected_total {rejected}\n"
+    );
+    Ok(HttpResponse::Ok()
+        .insert_header(("content-type", "text/plain; version=0.0.4; charset=utf-8"))
+        .body(body))
+}
+
+#[derive(Debug, Serialize)]
 struct TablesResponse {
     revision: u64,
     tables: Vec<TableSummaryResponse>,
@@ -168,9 +420,11 @@ struct TableSummaryResponse {
 async fn tables(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
 ) -> Result<web::Json<TablesResponse>, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
+    let _permit = acquire_database_task(limiter.as_ref())?;
     let database = database.get_ref().clone();
     let (revision, tables) = web::block(move || {
         let revision = database.revision()?;
@@ -233,6 +487,7 @@ pub struct ApiResultColumn {
 async fn execute_sql(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
     request: web::Json<SqlRequest>,
 ) -> Result<web::Json<SqlResponse>, ApiError> {
@@ -240,6 +495,7 @@ async fn execute_sql(
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
     }
+    let _permit = acquire_database_task(limiter.as_ref())?;
     let sql = request.into_inner().sql;
     let database = database.get_ref().clone();
     let results = web::block(move || database.execute(&sql))
@@ -285,6 +541,7 @@ struct VectorQueryIntentResponse {
 async fn query_intent(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
     request: web::Json<SqlRequest>,
 ) -> Result<web::Json<QueryIntentResponse>, ApiError> {
@@ -292,6 +549,7 @@ async fn query_intent(
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
     }
+    let _permit = acquire_database_task(limiter.as_ref())?;
     let sql = request.into_inner().sql;
     let database = database.get_ref().clone();
     let intent = web::block(move || database.query_intent(&sql))
@@ -354,10 +612,12 @@ struct ColumnResponse {
 async fn table_schema(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
     table: web::Path<String>,
 ) -> Result<web::Json<SchemaResponse>, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
+    let _permit = acquire_database_task(limiter.as_ref())?;
     let table = table.into_inner();
     let lookup = table.clone();
     let database = database.get_ref().clone();
@@ -393,10 +653,12 @@ struct IndexResponse {
 async fn table_indexes(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
     table: web::Path<String>,
 ) -> Result<web::Json<IndexesResponse>, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
+    let _permit = acquire_database_task(limiter.as_ref())?;
     let table = table.into_inner();
     let lookup = table.clone();
     let database = database.get_ref().clone();
@@ -447,6 +709,7 @@ pub enum InsertConflictPolicy {
 async fn insert_rows(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
     table: web::Path<String>,
     request: web::Json<InsertRowsRequest>,
@@ -465,6 +728,7 @@ async fn insert_rows(
             format!("a request may contain at most {MAX_BULK_ROWS} rows"),
         ));
     }
+    let _permit = acquire_database_task(limiter.as_ref())?;
 
     let request = request.into_inner();
     let database = database.get_ref().clone();
@@ -542,6 +806,7 @@ pub struct VectorSearchRequest {
 async fn vector_search(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
     database: web::Data<Database>,
     request: web::Json<VectorSearchRequest>,
 ) -> Result<web::Json<ApiExecutionResult>, ApiError> {
@@ -553,6 +818,7 @@ async fn vector_search(
             format!("limit must be between 1 and {MAX_SEARCH_LIMIT}"),
         ));
     }
+    let _permit = acquire_database_task(limiter.as_ref())?;
     let database_handle = database.get_ref().clone();
     let table = request.table.clone();
     let schema = web::block(move || database_handle.schema(&table))
@@ -922,6 +1188,12 @@ fn authorize(request: &HttpRequest, security: Option<&ApiSecurity>) -> Result<()
     }
 }
 
+fn acquire_database_task(
+    limiter: Option<&web::Data<DatabaseTaskLimiter>>,
+) -> Result<Option<DatabaseTaskPermit>, ApiError> {
+    limiter.map(|limiter| limiter.acquire()).transpose()
+}
+
 fn constant_time_eq(left: &str, right: &str) -> bool {
     if left.len() != right.len() {
         return false;
@@ -1046,6 +1318,14 @@ impl ApiError {
         }
     }
 
+    fn overloaded() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "overloaded",
+            message: "database task capacity is exhausted; retry later".into(),
+        }
+    }
+
     fn from_blocking(error: BlockingError) -> Self {
         Self::internal(format!("database worker failed: {error}"))
     }
@@ -1086,6 +1366,8 @@ impl ResponseError for ApiError {
         let mut response = HttpResponse::build(self.status);
         if self.status == StatusCode::UNAUTHORIZED {
             response.insert_header((WWW_AUTHENTICATE, "Bearer"));
+        } else if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            response.insert_header((RETRY_AFTER, "1"));
         }
         response.json(ApiErrorBody {
             error: ApiErrorDetails {
@@ -1104,4 +1386,46 @@ fn json_payload_error(error: JsonPayloadError, _: &actix_web::HttpRequest) -> ac
         },
     });
     InternalError::from_response(error, response).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_server_capacity_and_releases_database_permits() {
+        let config = ServerConfig::default();
+        assert!(config.validate().is_ok());
+        let mut invalid = config.clone();
+        invalid.max_concurrent_database_tasks = 0;
+        assert_eq!(
+            invalid.validate().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let mut invalid = config.clone();
+        invalid.keep_alive = Duration::ZERO;
+        assert_eq!(
+            invalid.validate().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let mut invalid = config;
+        invalid.shutdown_timeout = Duration::from_millis(999);
+        assert_eq!(
+            invalid.validate().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let limiter = DatabaseTaskLimiter::new(1);
+        let permit = limiter.acquire().unwrap();
+        let error = limiter.acquire().unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        let response = error.error_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+        assert_eq!(limiter.state.rejected.load(Ordering::Relaxed), 1);
+        drop(permit);
+        assert!(limiter.acquire().is_ok());
+    }
 }

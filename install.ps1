@@ -5,7 +5,7 @@ uses VECTORS_DATA_DIR for durable storage by default; set VECTORS_SNAPSHOT to
 retain legacy interval-based snapshot mode.
 
 .PARAMETER Version
-Release tag such as v0.5.0. The latest release is used by default.
+Release tag such as v0.6.0. The latest release is used by default.
 
 .PARAMETER InstallDir
 Destination for vectors.exe and vectors-server.exe.

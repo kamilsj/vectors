@@ -69,6 +69,34 @@ without changing the plan. The general comparison query adds an arithmetic
 projection to select the generic SQL executor while keeping the result set
 equivalent.
 
+## Indexed-filter optimization: 0.5.0 to 0.6.0
+
+Version 0.6.0 records whether a scalar hash index covers the complete predicate.
+When it does, both execution paths use the index result directly instead of
+evaluating the same equality expression once more for every candidate. Partial
+`AND`/`OR` coverage still evaluates the full predicate for every candidate.
+
+The following controlled A/B result was recorded on the reference machine on
+2026-07-24. Both revisions were built in release mode with the same locked
+dependencies and Rust toolchain. Each process created 20,000 deterministic rows
+with 64 dimensions, selected 10,000 candidates through a scalar hash index, and
+ran 100 cosine top-20 queries. The table reports the median of three process
+averages.
+
+| Revision/path | Process averages | Median |
+| --- | --- | ---: |
+| 0.5.0 cached `VectorTopK` | 0.697 ms, 0.631 ms, 0.734 ms | 0.697 ms |
+| 0.6.0 cached `VectorTopK` | 0.452 ms, 0.471 ms, 0.477 ms | 0.471 ms |
+| 0.5.0 general SQL | 24.508 ms, 23.392 ms, 24.987 ms | 24.508 ms |
+| 0.6.0 general SQL | 20.307 ms, 21.920 ms, 21.065 ms | 21.065 ms |
+
+The exact fast path improved by 32.4% and the general path by 14.0%. The harness
+compared all returned neighbors before timing. This is intentionally not a
+Meilisearch comparison: Meilisearch uses the approximate-nearest-neighbor
+[Arroy](https://github.com/meilisearch/arroy) index, while `vectors` 0.6.0
+performs exact search. A useful comparison must match dataset, hardware,
+filtering, concurrency, durability, recall, and end-to-end client overhead.
+
 ## Interpreting results
 
 - Use a release build. Debug timings are not meaningful here.

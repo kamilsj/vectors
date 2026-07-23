@@ -23,14 +23,21 @@ plan depend on severity, exploitability, and compatibility impact.
 
 ## Deployment boundaries
 
-`vectors` is pre-1.0. The HTTP server offers an optional bearer token, but does
-not provide TLS, roles, tenant isolation, or per-query resource quotas. Keep the
-default loopback bind or deploy behind a hardened reverse proxy. Treat SQL
-access as trusted database access, use a long random token, protect the data
-directory and snapshots with operating-system permissions, and do not expose
-the service directly to the public internet. Only one process may own a durable
-data directory at a time; do not bypass or delete `vectors.lock` while a server
-is running.
+`vectors` is pre-1.0. The HTTP server offers an optional bearer token and bounds
+concurrent database tasks, but does not provide TLS, roles, tenant isolation,
+query cancellation, or per-query CPU and memory quotas. Keep the default
+loopback bind or deploy behind a hardened reverse proxy. Treat SQL access as
+trusted database access, use a long random token, protect the data directory and
+snapshots with operating-system permissions, and do not expose the service
+directly to the public internet. Only one process may own a durable data
+directory at a time; do not bypass or delete `vectors.lock` while a server is
+running.
+
+The web console, `/healthz`, `/readyz`, and `/metrics` are intentionally public
+even when bearer authentication is enabled. Restrict these endpoints at the
+reverse proxy if catalog revision, storage mode, version, or capacity metadata
+must not be visible to the surrounding network. An overload response limits
+queue growth; it does not make an individual accepted SQL query safe to run.
 
 WAL records and checkpoints are not encrypted at rest. SQL text, relational
 values, and embeddings may be recoverable from those files, so use encrypted

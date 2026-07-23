@@ -1247,10 +1247,10 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
     };
     validate_select(select)?;
     let mut plan = Vec::new();
-    let (table, columns) = match select.from.as_slice() {
+    let (table, columns, index_covers_filter) = match select.from.as_slice() {
         [] => {
             plan.push("Source: single row".to_string());
-            (None, &[][..])
+            (None, &[][..], false)
         }
         [from] if from.joins.is_empty() => {
             let name = table_factor_name(&from.relation)?;
@@ -1262,10 +1262,11 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
                 .selection
                 .as_ref()
                 .and_then(|selection| indexed_candidate_rows(table, selection));
+            let index_covers_filter = indexed.as_ref().is_some_and(|candidates| candidates.exact);
             if let Some(indexes) = indexed {
                 plan.push(format!(
                     "Scan: scalar hash index on {name} ({} of {} row(s))",
-                    indexes.len(),
+                    indexes.rows.len(),
                     table.rows.len()
                 ));
             } else {
@@ -1274,13 +1275,19 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
                     table.rows.len()
                 ));
             }
-            (Some(table), table.columns.as_slice())
+            (Some(table), table.columns.as_slice(), index_covers_filter)
         }
         _ => return Err(Error::Unsupported("EXPLAIN for joins".into())),
     };
     if let Some(selection) = &select.selection {
         validate_expression_columns(selection, columns)?;
-        plan.push(format!("Filter: {selection}"));
+        if index_covers_filter {
+            plan.push(format!(
+                "Filter: {selection} (covered by scalar hash index)"
+            ));
+        } else {
+            plan.push(format!("Filter: {selection}"));
+        }
     }
 
     let projection = build_projection(&select.projection, columns)?;
@@ -1776,15 +1783,24 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             .as_ref()
             .and_then(|selection| indexed_candidate_rows(table, selection))
     });
+    let residual_selection = match &indexed_rows {
+        Some(candidates) if candidates.exact => None,
+        _ => select.selection.as_ref(),
+    };
     let rows_examined = table.map_or(1, |table| {
-        indexed_rows.as_ref().map_or(table.rows.len(), Vec::len)
+        indexed_rows
+            .as_ref()
+            .map_or(table.rows.len(), |candidates| candidates.rows.len())
     });
     let singleton = Vec::new();
     let source_rows: Box<dyn Iterator<Item = &[Value]> + '_> = match (table, &indexed_rows) {
         (None, _) => Box::new(std::iter::once(singleton.as_slice())),
-        (Some(table), Some(indexes)) => {
-            Box::new(indexes.iter().map(|index| table.rows[*index].as_slice()))
-        }
+        (Some(table), Some(candidates)) => Box::new(
+            candidates
+                .rows
+                .iter()
+                .map(|index| table.rows[*index].as_slice()),
+        ),
         (Some(table), None) => Box::new(table.rows.iter().map(Vec::as_slice)),
     };
 
@@ -1857,6 +1873,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             query,
             columns,
             source_rows,
+            residual_selection,
             &projection,
             result_columns,
             result_types,
@@ -1883,8 +1900,10 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         )? {
             return run_fast_vector_top_k(
                 table,
-                indexed_rows.as_deref(),
-                select.selection.as_ref(),
+                indexed_rows
+                    .as_ref()
+                    .map(|candidates| candidates.rows.as_slice()),
+                residual_selection,
                 plan,
                 result_columns,
                 result_types,
@@ -1896,7 +1915,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         CandidateSink::new(&query.order_by, offset, limit, select.distinct.is_some())?;
     for row in source_rows {
         let context = EvalContext::new(columns, row);
-        if let Some(selection) = &select.selection {
+        if let Some(selection) = residual_selection {
             if !evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
                 continue;
             }
@@ -2009,6 +2028,7 @@ fn run_aggregate_query<'a>(
     query: &Query,
     columns: &[Column],
     source_rows: Box<dyn Iterator<Item = &'a [Value]> + 'a>,
+    selection: Option<&Expr>,
     projection: &[Projection],
     result_columns: Vec<String>,
     result_types: Vec<Option<DataType>>,
@@ -2052,7 +2072,7 @@ fn run_aggregate_query<'a>(
     let mut group_positions = HashMap::<Vec<UniqueKey>, usize>::new();
     for row in source_rows {
         let context = EvalContext::new(columns, row);
-        if let Some(selection) = &select.selection {
+        if let Some(selection) = selection {
             if !evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
                 continue;
             }
@@ -2693,7 +2713,12 @@ fn validate_expression_columns(expression: &Expr, columns: &[Column]) -> Result<
     Ok(())
 }
 
-fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<Vec<usize>> {
+struct IndexedCandidates {
+    rows: Vec<usize>,
+    exact: bool,
+}
+
+fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<IndexedCandidates> {
     match expression {
         Expr::BinaryOp {
             left,
@@ -2703,8 +2728,14 @@ fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<Vec<usize>
             indexed_candidate_rows(table, left),
             indexed_candidate_rows(table, right),
         ) {
-            (Some(left), Some(right)) => Some(intersect_sorted(&left, &right)),
-            (Some(indexes), None) | (None, Some(indexes)) => Some(indexes),
+            (Some(left), Some(right)) => Some(IndexedCandidates {
+                rows: intersect_sorted(&left.rows, &right.rows),
+                exact: left.exact && right.exact,
+            }),
+            (Some(mut candidates), None) | (None, Some(mut candidates)) => {
+                candidates.exact = false;
+                Some(candidates)
+            }
             (None, None) => None,
         },
         Expr::BinaryOp {
@@ -2715,7 +2746,10 @@ fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<Vec<usize>
             indexed_candidate_rows(table, left),
             indexed_candidate_rows(table, right),
         ) {
-            (Some(left), Some(right)) => Some(union_sorted(&left, &right)),
+            (Some(left), Some(right)) => Some(IndexedCandidates {
+                rows: union_sorted(&left.rows, &right.rows),
+                exact: left.exact && right.exact,
+            }),
             _ => None,
         },
         Expr::BinaryOp {
@@ -2723,7 +2757,8 @@ fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<Vec<usize>
             op: BinaryOperator::Eq,
             right,
         } => equality_index_lookup(table, left, right)
-            .or_else(|| equality_index_lookup(table, right, left)),
+            .or_else(|| equality_index_lookup(table, right, left))
+            .map(|rows| IndexedCandidates { rows, exact: true }),
         Expr::Nested(expression) => indexed_candidate_rows(table, expression),
         _ => None,
     }

@@ -871,6 +871,67 @@ fn hash_indexes_prune_hybrid_searches_and_track_mutations() {
 }
 
 #[test]
+fn hash_index_boolean_plans_preserve_full_predicate_semantics() {
+    let database = seeded_database();
+    database
+        .execute(
+            "CREATE INDEX documents_category_idx ON documents (category);
+             CREATE INDEX documents_active_idx ON documents (active);",
+        )
+        .unwrap();
+
+    let conjunction = query(
+        &database,
+        "SELECT id FROM documents
+         WHERE category = 'tech' AND active = TRUE
+         ORDER BY id",
+    );
+    assert_eq!(conjunction.rows, [vec![Value::Integer(1)]]);
+    assert_eq!(conjunction.rows_examined, 1);
+
+    let disjunction = query(
+        &database,
+        "SELECT id FROM documents
+         WHERE category = 'tech' OR active = TRUE
+         ORDER BY id",
+    );
+    assert_eq!(
+        disjunction.rows,
+        [
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+            vec![Value::Integer(3)],
+        ]
+    );
+    assert_eq!(disjunction.rows_examined, 3);
+
+    let partially_indexed_and = query(
+        &database,
+        "SELECT id FROM documents
+         WHERE category = 'tech' AND rating > 8
+         ORDER BY id",
+    );
+    assert_eq!(partially_indexed_and.rows, [vec![Value::Integer(1)]]);
+    assert_eq!(partially_indexed_and.rows_examined, 2);
+
+    let partially_indexed_or = query(
+        &database,
+        "SELECT id FROM documents
+         WHERE category = 'tech' OR rating IS NULL
+         ORDER BY id",
+    );
+    assert_eq!(
+        partially_indexed_or.rows,
+        [
+            vec![Value::Integer(1)],
+            vec![Value::Integer(3)],
+            vec![Value::Integer(4)],
+        ]
+    );
+    assert_eq!(partially_indexed_or.rows_examined, 4);
+}
+
+#[test]
 fn indexes_persist_and_participate_in_batch_rollback() {
     let database = seeded_database();
     let error = database
@@ -1210,7 +1271,7 @@ fn explain_reports_index_filter_aggregate_and_top_k_stages() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(steps.contains("scalar hash index on documents (2 of 4 row(s))"));
-    assert!(steps.contains("Filter: category = 'tech'"));
+    assert!(steps.contains("Filter: category = 'tech' (covered by scalar hash index)"));
     assert!(steps.contains("TopK:"));
     assert!(steps.contains("retain 2 row(s)"));
     assert!(steps.contains("Limit: 2"));

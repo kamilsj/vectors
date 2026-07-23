@@ -55,6 +55,7 @@ async fn main() -> io::Result<()> {
     let api_token = env::var("VECTORS_API_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
+    let server_config = server_config_from_environment()?;
     let database = match (data_dir.as_deref(), snapshot.as_deref()) {
         (Some(directory), _) => Database::open_persistent(directory).map_err(database_error)?,
         (None, Some(path)) if path.exists() => Database::open(path).map_err(database_error)?,
@@ -83,9 +84,23 @@ async fn main() -> io::Result<()> {
     };
 
     eprintln!("vectors HTTP API starting on http://{bind_address}");
+    eprintln!(
+        "server capacity: {} workers, {} blocking thread(s) per worker, {} concurrent database task(s)",
+        server_config.workers,
+        server_config.max_blocking_threads_per_worker,
+        server_config.max_concurrent_database_tasks
+    );
     let result = match api_token {
-        Some(token) => api::serve_authenticated(database.clone(), &bind_address, token).await,
-        None => api::serve(database.clone(), &bind_address).await,
+        Some(token) => {
+            api::serve_authenticated_with_config(
+                database.clone(),
+                &bind_address,
+                token,
+                server_config,
+            )
+            .await
+        }
+        None => api::serve_with_config(database.clone(), &bind_address, server_config).await,
     };
     if let Some(autosave) = autosave {
         autosave.stop()?;
@@ -200,6 +215,76 @@ fn suggested_port(bind_address: &str) -> u16 {
 
 fn database_error(error: vectors::Error) -> io::Error {
     io::Error::other(error)
+}
+
+fn server_config_from_environment() -> io::Result<api::ServerConfig> {
+    let mut config = api::ServerConfig::default();
+    config.workers = environment_usize("VECTORS_HTTP_WORKERS", config.workers)?;
+    config.max_blocking_threads_per_worker = environment_usize(
+        "VECTORS_HTTP_MAX_BLOCKING_THREADS_PER_WORKER",
+        config.max_blocking_threads_per_worker,
+    )?;
+    config.max_connections_per_worker = environment_usize(
+        "VECTORS_HTTP_MAX_CONNECTIONS_PER_WORKER",
+        config.max_connections_per_worker,
+    )?;
+    config.max_concurrent_database_tasks = environment_usize(
+        "VECTORS_MAX_CONCURRENT_DATABASE_TASKS",
+        config.max_concurrent_database_tasks,
+    )?;
+    config.keep_alive = Duration::from_secs(environment_u64(
+        "VECTORS_HTTP_KEEP_ALIVE_SECS",
+        config.keep_alive.as_secs(),
+    )?);
+    config.client_request_timeout = Duration::from_secs(environment_u64(
+        "VECTORS_HTTP_CLIENT_TIMEOUT_SECS",
+        config.client_request_timeout.as_secs(),
+    )?);
+    config.shutdown_timeout = Duration::from_secs(environment_u64(
+        "VECTORS_HTTP_SHUTDOWN_TIMEOUT_SECS",
+        config.shutdown_timeout.as_secs(),
+    )?);
+    Ok(config)
+}
+
+fn environment_usize(name: &str, default: usize) -> io::Result<usize> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be a positive integer"),
+                )
+            }),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be valid UTF-8"),
+        )),
+    }
+}
+
+fn environment_u64(name: &str, default: u64) -> io::Result<u64> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be a positive integer"),
+                )
+            }),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be valid UTF-8"),
+        )),
+    }
 }
 
 fn autosave_interval(snapshot: Option<&Path>) -> io::Result<Option<Duration>> {

@@ -284,6 +284,21 @@ async fn exposes_health_schema_and_index_metadata() {
     assert_eq!(response["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(response["storage"], "memory");
 
+    let readiness = test::TestRequest::get().uri("/readyz").to_request();
+    let response: Value = test::call_and_read_body_json(&app, readiness).await;
+    assert_eq!(response["status"], "ready");
+    assert_eq!(response["revision"], 2);
+    assert_eq!(response["database_tasks_in_flight"], 0);
+
+    let metrics = test::TestRequest::get().uri("/metrics").to_request();
+    let response = test::call_service(&app, metrics).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = test::read_body(response).await;
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("vectors_up 1"));
+    assert!(body.contains("vectors_catalog_revision 2"));
+    assert!(body.contains("vectors_database_tasks_rejected_total 0"));
+
     let console = test::TestRequest::get().uri("/").to_request();
     let response = test::call_service(&app, console).await;
     assert_eq!(response.status(), StatusCode::OK);

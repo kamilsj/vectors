@@ -48,6 +48,15 @@ and never need to infer types from JSON values or `NULL`. The same inference pas
 validates arithmetic, predicates, scalar and vector functions, vector
 dimensions, and sort keys before any rows are scanned.
 
+The standalone HTTP server admits database work through one process-wide
+capacity guard before scheduling it on Actix blocking workers. Capacity is held
+for the complete database operation and released by an RAII permit on success
+or failure. Saturated requests fail immediately with HTTP 503 and a retry hint,
+rather than accumulating an unbounded work queue. Worker, connection, blocking
+thread, capacity, keep-alive, client-header-timeout, and graceful-shutdown
+settings are explicit. `/healthz`, `/readyz`, and `/metrics` remain outside the
+database admission path so an overloaded process is still observable.
+
 ## Catalog and concurrency
 
 A `Database` owns an `Arc<RwLock<Catalog>>`. Cloning the handle shares that
@@ -83,6 +92,13 @@ It has two relevant query paths:
    applies eligible scalar hash indexes, and keeps only the best candidates in
    bounded heaps. Large candidate sets use Rayon thread-local heaps followed by
    a deterministic merge.
+
+Index candidate planning carries an `exact` flag in addition to row positions.
+A direct indexed equality predicate is exact. `AND` and `OR` combinations are
+exact only when every required branch is index-covered; otherwise the index
+result is candidate pruning and the full predicate is evaluated.
+This distinction lets all query executors skip redundant row-level predicate
+evaluation without changing the semantics of partially indexed expressions.
 
 Queries with additional sort keys, `DISTINCT`, or unsupported expressions use
 the general executor. The fast path is an optimization, not a separate SQL
@@ -164,6 +180,8 @@ applying a transaction twice.
   compatibility and corruption tests.
 - Public API handlers execute blocking database work outside Actix worker
   futures.
+- HTTP database work is bounded by a process-wide admission limit and overload
+  remains observable through readiness and metrics endpoints.
 - Benchmark claims include the query, data shape, build profile, environment,
   and comparison scope.
 

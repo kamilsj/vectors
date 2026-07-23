@@ -19,6 +19,11 @@ Completion means the test corpus covers failure atomicity and persistence
 boundaries, CI exercises supported platforms, and benchmark regressions can be
 reproduced from a clean checkout.
 
+Version 0.6 completed exact scalar-index coverage tracking, bounded HTTP
+database-task admission, configurable server capacity, readiness metadata, and
+initial Prometheus metrics. The next reliability work expands failure injection
+and latency observability rather than weakening overload protection.
+
 ## Next: scale the working set
 
 - Introduce a dense vector storage layout that avoids per-row enum traversal.
@@ -37,7 +42,8 @@ SQL must expose whether a plan is exact or approximate.
 
 - Compact checkpoints without blocking the query path for the full write.
 - Add joins and subqueries needed for richer hybrid retrieval.
-- Expose structured metrics, request tracing, cancellation, and resource limits.
+- Expand metrics with latency and result-size histograms; add request tracing,
+  cancellation, and per-query CPU and memory limits.
 - Design replication only after the single-node durability contract is stable.
 
 Durability work is complete when automated crash tests demonstrate the stated

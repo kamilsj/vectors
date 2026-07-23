@@ -6,6 +6,30 @@ semantic versioning while the public API remains pre-1.0.
 
 ## Unreleased
 
+## 0.6.0 - 2026-07-24
+
+### Added
+
+- Configurable Actix worker, blocking-thread, connection, database-task,
+  keep-alive, client-header-timeout, and graceful-shutdown limits through the
+  Rust API and standalone-server environment variables.
+- A global database-task capacity guard that returns HTTP 503 with
+  `Retry-After: 1` instead of allowing an unbounded blocking-work queue.
+- Public `/readyz` readiness metadata and Prometheus-compatible `/metrics` for
+  catalog revision, database work in flight, configured capacity, and overload
+  rejections.
+
+### Changed
+
+- Exact scalar-index coverage is now tracked separately from partial candidate
+  pruning. Fully covered predicates skip redundant expression evaluation in the
+  general, aggregate, and optimized vector executors while residual predicates
+  retain the original validation and evaluation path.
+- The standalone server now uses explicit production-oriented Actix defaults
+  and enables `TCP_NODELAY` for request latency.
+- The reproducible 20,000-row, 64-dimension exact hybrid-search workload is
+  32.4% faster than 0.5.0 on the reference machine, with identical neighbors.
+
 ## 0.5.0 - 2026-07-24
 
 ### Added

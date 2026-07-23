@@ -40,8 +40,9 @@ ORDER BY distance
 LIMIT 5;
 ```
 
-> **Project status:** `vectors` is pre-1.0 and designed for prototypes, local
-> tools, tests, and small embedded workloads. It is not yet a replacement for a
+> **Project status:** `vectors` is pre-1.0. It is suitable for prototypes,
+> local tools, tests, small embedded workloads, and controlled single-node
+> deployments with workload testing. It is not yet a replacement for a
 > distributed or replicated production database.
 
 ## Install and launch
@@ -97,7 +98,8 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   even when the result is empty or contains only `NULL` values; expression type
   errors are rejected before scanning rows.
 - **Hybrid by default.** Scalar hash indexes prune relational candidates before
-  exact vector distance evaluation.
+  exact vector distance evaluation; predicates fully covered by an index are
+  not evaluated a second time row by row.
 - **Rust all the way down.** Memory-safe engine code, immutable vector values,
   cached norms, and SIMD-friendly distance loops.
 - **Low repeat-query overhead.** Cloned handles share a bounded SQL AST cache;
@@ -131,11 +133,12 @@ LIMIT 20;
 For safe projections, this becomes a specialized `VectorTopK` plan:
 
 1. scalar hash indexes prune relational candidates;
-2. the query vector is evaluated once rather than once per row;
-3. distance functions call the vector kernels directly, bypassing generic AST
+2. fully indexed filters skip redundant row-level expression evaluation;
+3. the query vector is evaluated once rather than once per row;
+4. distance functions call the vector kernels directly, bypassing generic AST
    evaluation;
-4. large scans are scored in parallel with thread-local bounded heaps;
-5. text, vectors, and other projected values are cloned only for final winners.
+5. large scans are scored in parallel with thread-local bounded heaps;
+6. text, vectors, and other projected values are cloned only for final winners.
 
 Queries with additional sort keys, `DISTINCT`, or complex projections fall back
 to the general SQL executor without changing their semantics. Use `EXPLAIN` to
@@ -153,13 +156,14 @@ Run the reproducible local benchmark:
 cargo run --release --example benchmark_vector_search
 ```
 
-On the development machine, the median 10,000-row × 64-dimension filtered
-cosine query took 0.49 ms through `VectorTopK` versus 12.90 ms through the
-generic plan (26.2× faster in-engine). Reusing its parsed AST was 1.20× faster
-than parsing otherwise identical SQL. Treat these numbers as a regression
-baseline, not a cross-database benchmark; hardware and workloads matter. The
-exact method, environment controls, and reporting rules are in [the benchmark
-guide](docs/BENCHMARKS.md).
+On the development machine, the median 20,000-row × 64-dimension filtered
+cosine query—10,000 exact candidates and a top-20 result—took 0.471 ms after
+the indexed-filter optimization, down from 0.697 ms in 0.5.0. All returned
+neighbors were compared for equality. Treat this 32.4% latency reduction as an
+in-project regression result, not a cross-database benchmark; hardware,
+exact-versus-approximate behavior, recall, and workloads matter. The exact
+method, raw process medians, environment controls, and reporting rules are in
+[the benchmark guide](docs/BENCHMARKS.md).
 
 The durable-storage harness sustained about 351,000 rows/s for ten fsynced
 1,000-row × 64-dimension typed batches, then recovered its 2.73 MiB WAL in
@@ -193,7 +197,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.5.0 | in-memory SQL vector database
+vectors 0.6.0 | in-memory SQL vector database
 Type .help for help. End SQL with ';'.
 vectors>
 ```
@@ -307,6 +311,8 @@ The server binds to `127.0.0.1:8080` by default.
 | --- | --- | --- |
 | `GET` | `/` | Web console |
 | `GET` | `/healthz` | Public health, version, and storage-mode metadata |
+| `GET` | `/readyz` | Public readiness, revision, and database-task capacity |
+| `GET` | `/metrics` | Public Prometheus-compatible operational metrics |
 | `POST` | `/v1/sql` | Execute one or more SQL statements |
 | `POST` | `/v1/sql/intent` | Validate and explain one read-only `SELECT` |
 | `GET` | `/v1/tables` | Table summaries and catalog revision |
@@ -382,7 +388,9 @@ curl http://127.0.0.1:8080/v1/vector/search \
 Requests are limited to 16 MiB, bulk ingestion to 1,000 rows per request, and
 search results to 1,000 rows. Typed ingestion performs JSON validation on a
 blocking worker and shares SQL `INSERT` constraint, conflict, revision, and
-index-maintenance semantics without reparsing generated SQL.
+index-maintenance semantics without reparsing generated SQL. Database handlers
+also share a process-wide capacity limit. When it is exhausted, new database
+requests receive HTTP 503 with error code `overloaded` and `Retry-After: 1`.
 
 ## Server configuration
 
@@ -401,6 +409,7 @@ change. Bind options override `VECTORS_BIND`, and `--data-dir` overrides
 VECTORS_BIND=127.0.0.1:9000 \
 VECTORS_DATA_DIR=./vectors-data \
 VECTORS_API_TOKEN=replace-with-a-long-random-token \
+VECTORS_MAX_CONCURRENT_DATABASE_TASKS=8 \
 cargo run --release --bin vectors-server
 ```
 
@@ -411,11 +420,27 @@ cargo run --release --bin vectors-server
 | `VECTORS_SNAPSHOT` | Legacy snapshot-only mode; mutually exclusive with `VECTORS_DATA_DIR` |
 | `VECTORS_AUTOSAVE_INTERVAL_SECS` | Legacy snapshot checkpoint interval; requires `VECTORS_SNAPSHOT` |
 | `VECTORS_API_TOKEN` | Requires `Authorization: Bearer …` on every `/v1` endpoint |
+| `VECTORS_HTTP_WORKERS` | Actix worker count; defaults to available CPU parallelism |
+| `VECTORS_HTTP_MAX_BLOCKING_THREADS_PER_WORKER` | Blocking threads per Actix worker; defaults to `1` |
+| `VECTORS_HTTP_MAX_CONNECTIONS_PER_WORKER` | Simultaneous connections per worker; defaults to `4096` |
+| `VECTORS_MAX_CONCURRENT_DATABASE_TASKS` | Process-wide database task capacity; defaults to available CPU parallelism |
+| `VECTORS_HTTP_KEEP_ALIVE_SECS` | HTTP keep-alive timeout; defaults to `30` |
+| `VECTORS_HTTP_CLIENT_TIMEOUT_SECS` | Timeout for receiving initial request headers; defaults to `5` |
+| `VECTORS_HTTP_SHUTDOWN_TIMEOUT_SECS` | Grace period for workers during shutdown; defaults to `30` |
 
-The console and health check remain public when authentication is enabled, but
-all database API calls require the token. There is no built-in TLS or per-user
-authorization; keep the default localhost bind or place the server behind a
-TLS-enabled reverse proxy.
+All numeric capacity and timeout variables must be positive. Start with the
+defaults, load-test the actual dimensions, filter selectivity, and concurrency,
+then adjust database-task capacity before increasing blocking threads. The
+catalog is shared, so extra workers improve admission and concurrent reads but
+do not remove write serialization.
+
+Use `/healthz` for process liveness, `/readyz` for readiness and current
+capacity, and `/metrics` for scraping. The console and those three operational
+endpoints remain public when authentication is enabled, but all `/v1` database
+API calls require the token. There is no built-in TLS or per-user authorization;
+keep the default localhost bind or place the server behind a TLS-enabled reverse
+proxy. The capacity guard bounds concurrent database work; it is not a per-query
+CPU, memory, or execution-time limit.
 
 ## Persistence model
 
