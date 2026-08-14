@@ -4,7 +4,85 @@ Notable project changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and releases use
 semantic versioning while the public API remains pre-1.0.
 
+Pull requests record user-visible changes under **Unreleased**. During a
+release, those entries move into a dated version section; the release workflow
+uses that section as the curated introduction to the GitHub release notes.
+
 ## Unreleased
+
+### Added
+
+- Optional wgpu exact-scan acceleration behind the `gpu` Cargo feature, with
+  Vulkan, DirectX 12, and Metal backends, lazy adapter initialization, and a
+  bounded generation-aware dense-column cache.
+- Public `ComputeConfig` and `ComputeDevice` settings for embedded users, plus
+  `--compute`, `VECTORS_COMPUTE_DEVICE`, `VECTORS_GPU_MIN_ELEMENTS`, and
+  `VECTORS_GPU_CACHE_BYTES` controls for the standalone server.
+- CPU, automatic, and required-GPU modes in the vector-search benchmark, with
+  neighbor primary-key comparison against the general SQL executor.
+- Public HTTP `RequestLimits` plus standalone-server controls for JSON body
+  bytes, typed bulk rows, and SQL response rows. Defaults are 32 MiB, 10,000
+  rows, and 10,000 rows respectively, with validated deployment ceilings.
+- A guided `.tutorial` in the interactive shell, a repeatable executable SQL
+  quickstart, and a full cross-platform tutorial covering commands, APIs,
+  persistence, vector operators, compute policy, and troubleshooting.
+- First-run web-console onboarding with guided setup/search steps, a searchable
+  mental model of the workflow, keyboard-accessible help, and an expandable
+  command reference.
+- Native release archives and installer coverage for Linux x86-64/ARM64,
+  macOS Intel/Apple silicon, and Windows x86-64, with network-free target and
+  installation-plan inspection modes.
+- A cross-platform installation guide covering fixed-version installs,
+  upgrades, verification, platform paths, safe removal, and troubleshooting.
+
+### Changed
+
+- Vector columns now maintain append-only contiguous `f32` slabs with cached
+  norms, compact null-presence metadata, and shared row views. Exact top-k scans
+  read this dense layout without traversing relational values for each
+  candidate.
+- Dense append and rebuild paths split vector payloads around an 8 MiB slab
+  target and use a sparse lookup entry per 4,096 rows. Snapshot loading rebuilds
+  dense columns incrementally in bounded row/vector batches.
+- Unfiltered CPU top-k scans walk dense slabs directly and parallelize across
+  fragmented slabs; Euclidean ordering stays in squared-distance space and
+  takes square roots only for rows that survive top-k.
+- SQL response budgets are pushed into execution so unordered scans stop at an
+  overflow sentinel and ordered top-k plans retain bounded heaps instead of
+  constructing an arbitrarily large final response before rejection.
+- Common append-only single-statement durable `INSERT` operations validate and
+  WAL-sync an append delta before applying it to the live table, avoiding a full
+  catalog clone; multi-statement writes retain staged atomic execution.
+- Checkpoint compaction now holds a shared catalog read guard through snapshot
+  synchronization and WAL reset, allowing concurrent reads and vector searches
+  to continue while writes wait for the coherent durable boundary.
+- Public snapshot replacement and managed checkpoint replacement share one
+  serialization guard, preventing an older user save from racing a WAL reset;
+  inserts also enforce the snapshot format's 10,000,000-row table ceiling
+  before a commit can make future compaction impossible.
+- Automatic compute selection retains the Rayon CPU path for small or
+  incompatible scans and falls back safely when no supported GPU is available;
+  required-GPU mode reports an explicit availability error.
+- GPU columns are split into device-sized shards when necessary, indexed inputs
+  and readback are bounded, and exact scores stream directly into the CPU top-k
+  heap without a request-sized score vector.
+- Tagged release binaries are built with GPU support while the library's
+  default feature set remains lean. CI compiles, lints, and tests all features.
+- Shell and server help now group commands, explain durable startup and compute
+  options, and provide copy-ready examples; installer startup messages lead
+  directly to the terminal or web tutorial.
+- Installers now verify checksums and binary versions, use transactional binary
+  replacement, preserve database files, remember managed bind/storage settings,
+  and restore the previous runtime and configuration when an upgrade cannot
+  start successfully.
+- Installer-managed servers use a private cooperative-shutdown request so
+  graceful Actix teardown completes the final WAL checkpoint or legacy snapshot
+  before an upgrade proceeds.
+- Release automation publishes installer checksums and build-provenance
+  attestations, then installs and health-checks every supported native target.
+- Pull requests must record release-note intent, and tagged releases validate
+  and publish the matching curated changelog section alongside categorized
+  GitHub-generated details.
 
 ## 0.6.0 - 2026-07-24
 

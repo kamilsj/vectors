@@ -110,8 +110,29 @@ fn persistent_wal_recovers_sql_and_typed_embeddings() {
                     id INTEGER PRIMARY KEY,
                     label TEXT NOT NULL,
                     embedding VECTOR(3)
-                );
-                INSERT INTO embeddings VALUES (1, 'sql', ARRAY[1, 0, 0]);",
+                )",
+            )
+            .unwrap();
+        database
+            .execute("INSERT INTO embeddings VALUES (1, 'sql', ARRAY[1, 0, 0])")
+            .unwrap();
+        assert_eq!(
+            database
+                .execute(
+                    "INSERT INTO embeddings VALUES (1, 'ignored', ARRAY[0, 0, 1])
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .unwrap()[0],
+            ExecutionResult::Command {
+                tag: "INSERT",
+                rows_affected: 0,
+            }
+        );
+        database
+            .execute(
+                "INSERT INTO embeddings VALUES (1, 'sql-updated', ARRAY[0, 1, 0])
+                 ON CONFLICT (id) DO UPDATE
+                 SET label = excluded.label, embedding = excluded.embedding",
             )
             .unwrap();
         database
@@ -171,7 +192,7 @@ fn persistent_wal_recovers_sql_and_typed_embeddings() {
         assert_eq!(
             result.rows,
             vec![
-                vec![Value::Integer(1), Value::Text("sql".into())],
+                vec![Value::Integer(1), Value::Text("sql-updated".into())],
                 vec![Value::Integer(2), Value::Text("updated".into())],
                 vec![Value::Integer(3), Value::Text("new".into())],
             ]
@@ -219,6 +240,99 @@ fn persistent_writes_are_atomic_and_directories_are_exclusive() {
     );
     drop(recovered);
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn bounded_execution_stops_oversized_results_and_preserves_batch_atomicity() {
+    let database = Database::new();
+    database
+        .execute("CREATE TABLE bounded (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    database
+        .execute("INSERT INTO bounded VALUES (1), (2), (3), (4), (5), (6)")
+        .unwrap();
+
+    assert_eq!(
+        database
+            .execute_with_row_limit("SELECT id FROM bounded LIMIT 5", 5)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        database
+            .execute_with_row_limit("SELECT id FROM bounded", 5)
+            .unwrap_err(),
+        Error::ResultLimitExceeded {
+            found_at_least: 6,
+            max: 5,
+        }
+    );
+    assert_eq!(
+        database
+            .execute_with_row_limit(
+                "SELECT id FROM bounded LIMIT 3; SELECT id FROM bounded LIMIT 3",
+                5,
+            )
+            .unwrap_err(),
+        Error::ResultLimitExceeded {
+            found_at_least: 6,
+            max: 5,
+        }
+    );
+    assert!(matches!(
+        database.execute_with_row_limit("EXPLAIN SELECT id FROM bounded", 0),
+        Err(Error::ResultLimitExceeded { max: 0, .. })
+    ));
+    assert!(matches!(
+        database.execute_with_row_limit(
+            "SELECT id, COUNT(*) FROM bounded GROUP BY id ORDER BY id",
+            5,
+        ),
+        Err(Error::ResultLimitExceeded {
+            found_at_least: 6,
+            max: 5,
+        })
+    ));
+    assert!(matches!(
+        database.execute_with_row_limit("SELECT id FROM bounded ORDER BY id OFFSET 2", 3),
+        Err(Error::ResultLimitExceeded {
+            found_at_least: 4,
+            max: 3,
+        })
+    ));
+    assert!(matches!(
+        database.execute_with_row_limit(
+            "INSERT INTO bounded VALUES (7); SELECT id FROM bounded ORDER BY id",
+            5,
+        ),
+        Err(Error::ResultLimitExceeded { .. })
+    ));
+    assert_eq!(
+        query(&database, "SELECT COUNT(*) FROM bounded").rows[0][0],
+        Value::Integer(6)
+    );
+
+    database
+        .execute("CREATE TABLE bounded_vectors (id INTEGER PRIMARY KEY, embedding VECTOR(1))")
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO bounded_vectors VALUES
+             (1, [1]), (2, [2]), (3, [3]), (4, [4]), (5, [5]), (6, [6])",
+        )
+        .unwrap();
+    assert!(matches!(
+        database.execute_with_row_limit(
+            "SELECT id FROM bounded_vectors
+             ORDER BY squared_l2_distance(embedding, [0])",
+            3,
+        ),
+        Err(Error::ResultLimitExceeded {
+            found_at_least: 4,
+            max: 3,
+        })
+    ));
 }
 
 #[test]
@@ -679,6 +793,51 @@ fn snapshots_bulk_decode_high_dimensional_vectors() {
 }
 
 #[test]
+fn snapshots_rebuild_dense_vectors_across_decode_batches() {
+    let dimensions = 2_048;
+    let database = Database::new();
+    database
+        .execute(&format!(
+            "CREATE TABLE batched_vectors (
+                id INTEGER PRIMARY KEY,
+                embedding VECTOR({dimensions})
+            )"
+        ))
+        .unwrap();
+    let embedding = Vector::new(vec![1.0; dimensions]).unwrap();
+    let rows = (0..1_025)
+        .map(|id| vec![Value::Integer(id), Value::Vector(embedding.clone())])
+        .collect();
+    database
+        .insert_rows("batched_vectors", rows, InsertConflict::Fail)
+        .unwrap();
+
+    let path = snapshot_path("batched-dense-rebuild");
+    database.save(&path).unwrap();
+    let restored = Database::open(&path).unwrap();
+    let query_vector = std::iter::repeat_n("0", dimensions)
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        query(
+            &restored,
+            &format!(
+                "SELECT id FROM batched_vectors
+                 ORDER BY squared_l2_distance(embedding, [{query_vector}])
+                 LIMIT 3"
+            ),
+        )
+        .rows,
+        vec![
+            vec![Value::Integer(0)],
+            vec![Value::Integer(1)],
+            vec![Value::Integer(2)],
+        ]
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn catalog_revisions_track_committed_changes_and_skip_redundant_saves() {
     let database = Database::new();
     let initial = database.revision().unwrap();
@@ -1068,6 +1227,33 @@ fn specialized_vector_top_k_matches_generic_sql_and_parallelizes_large_scans() {
             .collect::<Vec<_>>()
     );
 
+    let optimized_l2 = query(
+        &database,
+        "SELECT id, l2_distance(embedding, ARRAY[0, 0]) AS distance
+         FROM points
+         ORDER BY distance
+         LIMIT 12 OFFSET 7",
+    );
+    let generic_l2 = query(
+        &database,
+        "SELECT id, l2_distance(embedding, ARRAY[0, 0]) AS distance,
+                id + 0 AS force_generic_projection
+         FROM points
+         ORDER BY distance
+         LIMIT 12 OFFSET 7",
+    );
+    assert_eq!(
+        optimized_l2.rows,
+        generic_l2
+            .rows
+            .into_iter()
+            .map(|mut row| {
+                row.pop();
+                row
+            })
+            .collect::<Vec<_>>()
+    );
+
     let plan = query(
         &database,
         "EXPLAIN
@@ -1273,6 +1459,7 @@ fn explain_reports_index_filter_aggregate_and_top_k_stages() {
     assert!(steps.contains("scalar hash index on documents (2 of 4 row(s))"));
     assert!(steps.contains("Filter: category = 'tech' (covered by scalar hash index)"));
     assert!(steps.contains("TopK:"));
+    assert!(steps.contains("Compute: CPU exact scan (2 candidate(s) x 3 dimensions)"));
     assert!(steps.contains("retain 2 row(s)"));
     assert!(steps.contains("Limit: 2"));
 
@@ -1731,4 +1918,31 @@ fn typed_bulk_inserts_share_sql_constraints_and_upsert_semantics() {
         query(&database, "SELECT COUNT(*) FROM typed_entries").rows[0][0],
         Value::Integer(4)
     );
+}
+
+#[test]
+fn documented_quickstart_executes_and_is_safe_to_repeat() {
+    let database = Database::new();
+    let quickstart = include_str!("../examples/quickstart.sql");
+
+    database.execute(quickstart).unwrap();
+    database.execute(quickstart).unwrap();
+
+    let matches = query(
+        &database,
+        "SELECT id
+         FROM tutorial_documents
+         WHERE category = 'tech' AND published = TRUE
+         ORDER BY cosine_distance(embedding, ARRAY[1.0, 0.0, 0.0])
+         LIMIT 3",
+    );
+    assert_eq!(
+        matches.rows,
+        [vec![Value::Integer(1)], vec![Value::Integer(2)]]
+    );
+    assert_eq!(
+        query(&database, "SELECT COUNT(*) FROM tutorial_documents").rows[0][0],
+        Value::Integer(4)
+    );
+    assert_eq!(database.indexes("tutorial_documents").unwrap().len(), 1);
 }

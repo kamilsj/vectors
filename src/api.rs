@@ -1,11 +1,14 @@
 //! Actix Web interface for SQL execution and vector search.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use actix_web::dev::ServerHandle;
 use actix_web::error::{BlockingError, InternalError, JsonPayloadError};
 use actix_web::http::header::{AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE};
 use actix_web::http::{KeepAlive, StatusCode};
@@ -18,9 +21,92 @@ use crate::{
     Value, Vector,
 };
 
-const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
-const MAX_BULK_ROWS: usize = 1_000;
+const DEFAULT_MAX_JSON_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+const MAX_JSON_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const DEFAULT_MAX_BULK_ROWS: usize = 10_000;
+const MAX_BULK_ROWS: usize = 1_000_000;
+const DEFAULT_MAX_RESPONSE_ROWS: usize = 10_000;
+const MAX_RESPONSE_ROWS: usize = 1_000_000;
 const MAX_SEARCH_LIMIT: usize = 1_000;
+const SHUTDOWN_FILE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Bounds applied while decoding API requests and producing SQL responses.
+///
+/// The HTTP API buffers JSON before deserialization, so every deployment has
+/// finite limits even when clients omit `Content-Length`. Large imports should
+/// be split into batches and retried independently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestLimits {
+    max_json_payload_bytes: usize,
+    max_bulk_rows: usize,
+    max_response_rows: usize,
+}
+
+impl RequestLimits {
+    /// Construct validated HTTP limits.
+    pub fn new(
+        max_json_payload_bytes: usize,
+        max_bulk_rows: usize,
+        max_response_rows: usize,
+    ) -> io::Result<Self> {
+        let limits = Self {
+            max_json_payload_bytes,
+            max_bulk_rows,
+            max_response_rows,
+        };
+        limits.validate()?;
+        Ok(limits)
+    }
+
+    /// Maximum accepted JSON request body in bytes.
+    pub const fn max_json_payload_bytes(&self) -> usize {
+        self.max_json_payload_bytes
+    }
+
+    /// Maximum rows accepted by one typed bulk-ingestion request.
+    pub const fn max_bulk_rows(&self) -> usize {
+        self.max_bulk_rows
+    }
+
+    /// Maximum total query rows returned by one SQL request.
+    pub const fn max_response_rows(&self) -> usize {
+        self.max_response_rows
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        validate_bounded_limit(
+            "max_json_payload_bytes",
+            self.max_json_payload_bytes,
+            MAX_JSON_PAYLOAD_BYTES,
+        )?;
+        validate_bounded_limit("max_bulk_rows", self.max_bulk_rows, MAX_BULK_ROWS)?;
+        validate_bounded_limit(
+            "max_response_rows",
+            self.max_response_rows,
+            MAX_RESPONSE_ROWS,
+        )
+    }
+}
+
+impl Default for RequestLimits {
+    fn default() -> Self {
+        Self {
+            max_json_payload_bytes: DEFAULT_MAX_JSON_PAYLOAD_BYTES,
+            max_bulk_rows: DEFAULT_MAX_BULK_ROWS,
+            max_response_rows: DEFAULT_MAX_RESPONSE_ROWS,
+        }
+    }
+}
+
+fn validate_bounded_limit(name: &str, value: usize, maximum: usize) -> io::Result<()> {
+    if value == 0 || value > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be between 1 and {maximum}"),
+        ));
+    }
+    Ok(())
+}
 
 /// Capacity and connection settings for the standalone HTTP server.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +118,7 @@ pub struct ServerConfig {
     pub keep_alive: Duration,
     pub client_request_timeout: Duration,
     pub shutdown_timeout: Duration,
+    pub request_limits: RequestLimits,
 }
 
 impl Default for ServerConfig {
@@ -47,12 +134,14 @@ impl Default for ServerConfig {
             keep_alive: Duration::from_secs(30),
             client_request_timeout: Duration::from_secs(5),
             shutdown_timeout: Duration::from_secs(30),
+            request_limits: RequestLimits::default(),
         }
     }
 }
 
 impl ServerConfig {
     fn validate(&self) -> io::Result<()> {
+        self.request_limits.validate()?;
         for (name, value) in [
             ("workers", self.workers),
             (
@@ -165,12 +254,24 @@ impl ApiSecurity {
 
 /// Register all HTTP routes on an Actix application.
 pub fn configure(config: &mut web::ServiceConfig) {
+    configure_with_limits(config, RequestLimits::default());
+}
+
+/// Register all HTTP routes with explicit request and response limits.
+pub fn configure_with_limits(config: &mut web::ServiceConfig, limits: RequestLimits) {
+    // RequestLimits values can only be created after validation.
     config
         .app_data(
             web::JsonConfig::default()
-                .limit(MAX_JSON_BYTES)
+                .limit(limits.max_json_payload_bytes)
                 .error_handler(json_payload_error),
         )
+        .app_data(web::Data::new(limits))
+        .configure(configure_routes);
+}
+
+fn configure_routes(config: &mut web::ServiceConfig) {
+    config
         .route("/", web::get().to(console))
         .route("/assets/app.css", web::get().to(console_styles))
         .route("/assets/app.js", web::get().to(console_script))
@@ -230,7 +331,21 @@ pub async fn serve_with_config(
     bind_address: &str,
     config: ServerConfig,
 ) -> io::Result<()> {
-    serve_inner(database, bind_address, None, config).await
+    serve_inner(database, bind_address, None, config, None).await
+}
+
+/// Start a configured HTTP server with a private file-based shutdown signal.
+///
+/// `shutdown_file` must be an absolute path in a directory writable only by
+/// the service owner. Creating a regular file at that path asks Actix to stop
+/// gracefully. The request is removed before shutdown begins.
+pub async fn serve_with_config_and_shutdown_file(
+    database: Database,
+    bind_address: &str,
+    config: ServerConfig,
+    shutdown_file: PathBuf,
+) -> io::Result<()> {
+    serve_inner(database, bind_address, None, config, Some(shutdown_file)).await
 }
 
 /// Start an HTTP server that requires a bearer token on every `/v1` route.
@@ -266,6 +381,32 @@ pub async fn serve_authenticated_with_config(
         bind_address,
         Some(ApiSecurity::bearer_token(bearer_token)),
         config,
+        None,
+    )
+    .await
+}
+
+/// Start an authenticated, configured server with a private file-based
+/// shutdown signal.
+pub async fn serve_authenticated_with_config_and_shutdown_file(
+    database: Database,
+    bind_address: &str,
+    bearer_token: String,
+    config: ServerConfig,
+    shutdown_file: PathBuf,
+) -> io::Result<()> {
+    if bearer_token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bearer token cannot be empty",
+        ));
+    }
+    serve_inner(
+        database,
+        bind_address,
+        Some(ApiSecurity::bearer_token(bearer_token)),
+        config,
+        Some(shutdown_file),
     )
     .await
 }
@@ -275,20 +416,26 @@ async fn serve_inner(
     bind_address: &str,
     security: Option<ApiSecurity>,
     config: ServerConfig,
+    shutdown_file: Option<PathBuf>,
 ) -> io::Result<()> {
     config.validate()?;
+    if let Some(path) = shutdown_file.as_deref() {
+        prepare_shutdown_file(path)?;
+    }
     let database = web::Data::new(database);
     let limiter = web::Data::new(DatabaseTaskLimiter::new(
         config.max_concurrent_database_tasks,
     ));
-    HttpServer::new(move || {
+    let request_limits = config.request_limits.clone();
+    let server = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(database.clone())
             .app_data(limiter.clone());
         if let Some(security) = security.clone() {
             app = app.app_data(web::Data::new(security));
         }
-        app.configure(configure)
+        let request_limits = request_limits.clone();
+        app.configure(move |services| configure_with_limits(services, request_limits))
     })
     .workers(config.workers)
     .worker_max_blocking_threads(config.max_blocking_threads_per_worker)
@@ -298,8 +445,103 @@ async fn serve_inner(
     .shutdown_timeout(config.shutdown_timeout.as_secs())
     .tcp_nodelay(true)
     .bind(bind_address)?
-    .run()
-    .await
+    .run();
+
+    let shutdown_watcher = shutdown_file.as_ref().map(|path| {
+        let path = path.clone();
+        let handle = server.handle();
+        actix_web::rt::spawn(watch_shutdown_file(path, handle))
+    });
+    let result = server.await;
+    if let Some(watcher) = shutdown_watcher {
+        watcher.abort();
+    }
+    if let Some(path) = shutdown_file.as_deref() {
+        if let Err(error) = remove_shutdown_request(path) {
+            eprintln!(
+                "failed to clean up shutdown request {}: {error}",
+                path.display()
+            );
+        }
+    }
+    result
+}
+
+fn prepare_shutdown_file(path: &Path) -> io::Result<()> {
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "shutdown_file must be an absolute file path",
+        ));
+    }
+    remove_shutdown_request(path)
+}
+
+fn remove_shutdown_request(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "shutdown request {} must be a regular file, not a directory or symbolic link",
+                path.display()
+            ),
+        ));
+    }
+    fs::remove_file(path)
+}
+
+async fn watch_shutdown_file(path: PathBuf, handle: ServerHandle) {
+    let mut last_error = None;
+    loop {
+        actix_web::rt::time::sleep(SHUTDOWN_FILE_POLL_INTERVAL).await;
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                last_error = None;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if last_error.as_deref() != Some(message.as_str()) {
+                    eprintln!(
+                        "cannot inspect shutdown request {}: {error}",
+                        path.display()
+                    );
+                    last_error = Some(message);
+                }
+            }
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                let message = "request is not a regular file";
+                if last_error.as_deref() != Some(message) {
+                    eprintln!("ignoring shutdown request {}: {message}", path.display());
+                    last_error = Some(message.into());
+                }
+            }
+            Ok(_) => match fs::remove_file(&path) {
+                Ok(()) => {
+                    eprintln!("cooperative shutdown requested through {}", path.display());
+                    handle.stop(true).await;
+                    return;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    last_error = None;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if last_error.as_deref() != Some(message.as_str()) {
+                        eprintln!(
+                            "cannot consume shutdown request {}: {error}",
+                            path.display()
+                        );
+                        last_error = Some(message);
+                    }
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -307,9 +549,13 @@ struct HealthResponse {
     status: &'static str,
     version: &'static str,
     storage: &'static str,
+    max_json_payload_bytes: usize,
 }
 
-async fn health(database: web::Data<Database>) -> web::Json<HealthResponse> {
+async fn health(
+    database: web::Data<Database>,
+    limits: web::Data<RequestLimits>,
+) -> web::Json<HealthResponse> {
     web::Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -318,6 +564,7 @@ async fn health(database: web::Data<Database>) -> web::Json<HealthResponse> {
         } else {
             "memory"
         },
+        max_json_payload_bytes: limits.max_json_payload_bytes,
     })
 }
 
@@ -329,11 +576,15 @@ struct ReadinessResponse {
     revision: u64,
     database_tasks_in_flight: usize,
     database_task_limit: Option<usize>,
+    max_json_payload_bytes: usize,
+    max_bulk_rows: usize,
+    max_response_rows: usize,
 }
 
 async fn readiness(
     database: web::Data<Database>,
     limiter: Option<web::Data<DatabaseTaskLimiter>>,
+    limits: web::Data<RequestLimits>,
 ) -> Result<web::Json<ReadinessResponse>, ApiError> {
     let storage = if database.data_directory().is_some() {
         "durable"
@@ -360,12 +611,16 @@ async fn readiness(
         revision,
         database_tasks_in_flight,
         database_task_limit,
+        max_json_payload_bytes: limits.max_json_payload_bytes,
+        max_bulk_rows: limits.max_bulk_rows,
+        max_response_rows: limits.max_response_rows,
     }))
 }
 
 async fn metrics(
     database: web::Data<Database>,
     limiter: Option<web::Data<DatabaseTaskLimiter>>,
+    limits: web::Data<RequestLimits>,
 ) -> Result<HttpResponse, ApiError> {
     let database = database.get_ref().clone();
     let revision = web::block(move || database.revision())
@@ -396,7 +651,17 @@ async fn metrics(
          vectors_database_task_limit {limit}\n\
          # HELP vectors_database_tasks_rejected_total Database tasks rejected by overload protection.\n\
          # TYPE vectors_database_tasks_rejected_total counter\n\
-         vectors_database_tasks_rejected_total {rejected}\n"
+         vectors_database_tasks_rejected_total {rejected}\n\
+         # HELP vectors_http_max_json_payload_bytes Maximum JSON request body size in bytes.\n\
+         # TYPE vectors_http_max_json_payload_bytes gauge\n\
+         vectors_http_max_json_payload_bytes {}\n\
+         # HELP vectors_http_max_bulk_rows Maximum rows per typed ingestion request.\n\
+         # TYPE vectors_http_max_bulk_rows gauge\n\
+         vectors_http_max_bulk_rows {}\n\
+         # HELP vectors_http_max_response_rows Maximum query rows returned by one SQL request.\n\
+         # TYPE vectors_http_max_response_rows gauge\n\
+         vectors_http_max_response_rows {}\n",
+        limits.max_json_payload_bytes, limits.max_bulk_rows, limits.max_response_rows
     );
     Ok(HttpResponse::Ok()
         .insert_header(("content-type", "text/plain; version=0.0.4; charset=utf-8"))
@@ -488,6 +753,7 @@ async fn execute_sql(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
     limiter: Option<web::Data<DatabaseTaskLimiter>>,
+    limits: web::Data<RequestLimits>,
     database: web::Data<Database>,
     request: web::Json<SqlRequest>,
 ) -> Result<web::Json<SqlResponse>, ApiError> {
@@ -497,10 +763,12 @@ async fn execute_sql(
     }
     let _permit = acquire_database_task(limiter.as_ref())?;
     let sql = request.into_inner().sql;
+    let max_response_rows = limits.max_response_rows;
     let database = database.get_ref().clone();
-    let results = web::block(move || database.execute(&sql))
+    let results = web::block(move || database.execute_with_row_limit(&sql, max_response_rows))
         .await
         .map_err(ApiError::from_blocking)??;
+    enforce_response_row_limit(&results, max_response_rows)?;
     Ok(web::Json(SqlResponse::from(results)))
 }
 
@@ -710,6 +978,7 @@ async fn insert_rows(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
     limiter: Option<web::Data<DatabaseTaskLimiter>>,
+    limits: web::Data<RequestLimits>,
     database: web::Data<Database>,
     table: web::Path<String>,
     request: web::Json<InsertRowsRequest>,
@@ -722,10 +991,13 @@ async fn insert_rows(
             "at least one row is required",
         ));
     }
-    if request.rows.len() > MAX_BULK_ROWS {
+    if request.rows.len() > limits.max_bulk_rows {
         return Err(ApiError::bad_request(
             "too_many_rows",
-            format!("a request may contain at most {MAX_BULK_ROWS} rows"),
+            format!(
+                "a request may contain at most {} rows; split larger imports into batches",
+                limits.max_bulk_rows
+            ),
         ));
     }
     let _permit = acquire_database_task(limiter.as_ref())?;
@@ -1207,6 +1479,20 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
+fn enforce_response_row_limit(
+    results: &[ExecutionResult],
+    max_response_rows: usize,
+) -> Result<(), ApiError> {
+    let row_count = results.iter().fold(0_usize, |total, result| match result {
+        ExecutionResult::Query(result) => total.saturating_add(result.row_count()),
+        ExecutionResult::Command { .. } => total,
+    });
+    if row_count > max_response_rows {
+        return Err(ApiError::response_too_large(row_count, max_response_rows));
+    }
+    Ok(())
+}
+
 impl From<Vec<ExecutionResult>> for SqlResponse {
     fn from(results: Vec<ExecutionResult>) -> Self {
         Self {
@@ -1326,6 +1612,16 @@ impl ApiError {
         }
     }
 
+    fn response_too_large(row_count: usize, limit: usize) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "response_too_large",
+            message: format!(
+                "query produced {row_count} rows, exceeding the {limit}-row HTTP response limit; add LIMIT or split the query"
+            ),
+        }
+    }
+
     fn from_blocking(error: BlockingError) -> Self {
         Self::internal(format!("database worker failed: {error}"))
     }
@@ -1333,6 +1629,13 @@ impl ApiError {
 
 impl From<Error> for ApiError {
     fn from(error: Error) -> Self {
+        if let Error::ResultLimitExceeded {
+            found_at_least,
+            max,
+        } = &error
+        {
+            return Self::response_too_large(*found_at_least, *max);
+        }
         let (status, code) = match error {
             Error::TableNotFound(_) | Error::ColumnNotFound(_) | Error::IndexNotFound(_) => {
                 (StatusCode::NOT_FOUND, "not_found")
@@ -1341,6 +1644,10 @@ impl From<Error> for ApiError {
             | Error::IndexAlreadyExists(_)
             | Error::UniqueViolation(_)
             | Error::NullViolation(_) => (StatusCode::CONFLICT, "constraint_violation"),
+            Error::ResultLimitExceeded { .. } => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "response_too_large")
+            }
+            Error::TableRowLimit { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "table_too_large"),
             Error::LockPoisoned
             | Error::StorageIo(_)
             | Error::StorageBusy(_)
@@ -1379,23 +1686,51 @@ impl ResponseError for ApiError {
 }
 
 fn json_payload_error(error: JsonPayloadError, _: &actix_web::HttpRequest) -> actix_web::Error {
-    let response = HttpResponse::BadRequest().json(ApiErrorBody {
-        error: ApiErrorDetails {
-            code: "invalid_json",
-            message: error.to_string(),
-        },
+    let (status, code, message) = match &error {
+        JsonPayloadError::OverflowKnownLength { limit, .. }
+        | JsonPayloadError::Overflow { limit } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            format!(
+                "JSON request body exceeds the configured {limit}-byte limit; split the request into smaller batches"
+            ),
+        ),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            "invalid_json",
+            error.to_string(),
+        ),
+    };
+    let response = HttpResponse::build(status).json(ApiErrorBody {
+        error: ApiErrorDetails { code, message },
     });
     InternalError::from_response(error, response).into()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+
+    static SHUTDOWN_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn shutdown_test_path(label: &str) -> PathBuf {
+        let sequence = SHUTDOWN_PATH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "vectors-{label}-{}-{sequence}.request",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn validates_server_capacity_and_releases_database_permits() {
         let config = ServerConfig::default();
         assert!(config.validate().is_ok());
+        assert!(RequestLimits::new(0, 1, 1).is_err());
+        assert!(RequestLimits::new(MAX_JSON_PAYLOAD_BYTES + 1, 1, 1).is_err());
+        assert!(RequestLimits::new(1, MAX_BULK_ROWS + 1, 1).is_err());
+        assert!(RequestLimits::new(1, 1, MAX_RESPONSE_ROWS + 1).is_err());
         let mut invalid = config.clone();
         invalid.max_concurrent_database_tasks = 0;
         assert_eq!(
@@ -1427,5 +1762,52 @@ mod tests {
         assert_eq!(limiter.state.rejected.load(Ordering::Relaxed), 1);
         drop(permit);
         assert!(limiter.acquire().is_ok());
+    }
+
+    #[test]
+    fn shutdown_file_preparation_is_safe_and_clears_stale_requests() {
+        let path = shutdown_test_path("stale-shutdown");
+        fs::write(&path, b"").unwrap();
+        prepare_shutdown_file(&path).unwrap();
+        assert!(!path.exists());
+
+        let relative = PathBuf::from("vectors-relative-shutdown.request");
+        assert_eq!(
+            prepare_shutdown_file(&relative).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let directory = shutdown_test_path("shutdown-directory");
+        fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            prepare_shutdown_file(&directory).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[actix_web::test]
+    async fn shutdown_file_stops_a_running_server_and_is_consumed() {
+        let path = shutdown_test_path("cooperative-shutdown");
+        let config = ServerConfig {
+            workers: 1,
+            ..ServerConfig::default()
+        };
+        let server = actix_web::rt::spawn(serve_with_config_and_shutdown_file(
+            Database::new(),
+            "127.0.0.1:0",
+            config,
+            path.clone(),
+        ));
+
+        actix_web::rt::time::sleep(Duration::from_millis(150)).await;
+        fs::write(&path, b"").unwrap();
+        let result = actix_web::rt::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server did not honor the shutdown request")
+            .expect("server task panicked");
+
+        assert!(result.is_ok());
+        assert!(!path.exists());
     }
 }

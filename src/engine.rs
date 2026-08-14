@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use rayon::prelude::*;
@@ -14,6 +15,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
+use crate::compute::{ComputeConfig, ComputeRuntime};
 use crate::durable::{PersistentStorage, WalOperation};
 use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
@@ -238,6 +240,7 @@ pub(crate) struct Table {
     pub(crate) rows: Vec<Vec<Value>>,
     pub(crate) indexes: HashMap<String, HashIndex>,
     unique_keys: HashMap<usize, HashMap<UniqueKey, usize>>,
+    vector_columns: HashMap<usize, DenseVectorColumn>,
 }
 
 impl Table {
@@ -251,8 +254,167 @@ impl Table {
             rows,
             indexes,
             unique_keys: HashMap::new(),
+            vector_columns: HashMap::new(),
         }
     }
+}
+
+static NEXT_VECTOR_STORAGE_ID: AtomicU64 = AtomicU64::new(1);
+pub(crate) const MAX_TABLE_ROWS: usize = 10_000_000;
+const VECTOR_CHUNK_LOOKUP_ROWS: usize = 4_096;
+const VECTOR_SLAB_TARGET_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
+pub(crate) struct DenseVectorChunk {
+    pub(crate) first_row: usize,
+    pub(crate) row_count: usize,
+    pub(crate) values: Arc<Vec<f32>>,
+    pub(crate) norms: Arc<Vec<f64>>,
+    pub(crate) present: Arc<Vec<bool>>,
+}
+
+impl DenseVectorChunk {
+    #[inline]
+    fn get(&self, local_row: usize, dimensions: usize) -> Option<DenseVectorRef<'_>> {
+        if local_row >= self.row_count || !self.present[local_row] {
+            return None;
+        }
+        let offset = local_row * dimensions;
+        Some(DenseVectorRef {
+            values: &self.values[offset..offset + dimensions],
+            norm: self.norms[local_row],
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DenseVectorRef<'a> {
+    values: &'a [f32],
+    norm: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DenseVectorColumn {
+    pub(crate) storage_id: u64,
+    pub(crate) dimensions: usize,
+    pub(crate) row_count: usize,
+    pub(crate) chunks: Vec<DenseVectorChunk>,
+    /// Chunk containing the first row of each fixed-size row block. This keeps
+    /// lookup metadata sublinear in the table size while bounding each binary
+    /// search to chunks that overlap one block.
+    chunk_lookup: Vec<usize>,
+}
+
+impl DenseVectorColumn {
+    fn empty(dimensions: usize) -> Self {
+        Self {
+            storage_id: next_vector_storage_id(),
+            dimensions,
+            row_count: 0,
+            chunks: Vec::new(),
+            chunk_lookup: Vec::new(),
+        }
+    }
+
+    fn from_rows(column: usize, dimensions: usize, rows: &mut [Vec<Value>]) -> Self {
+        let mut dense = Self::empty(dimensions);
+        dense.append_rows(column, 0, rows);
+        dense
+    }
+
+    fn append_rows(&mut self, column: usize, first_row: usize, rows: &mut [Vec<Value>]) {
+        if rows.is_empty() {
+            return;
+        }
+        let bytes_per_row = self.dimensions.saturating_mul(std::mem::size_of::<f32>());
+        let rows_per_slab = (VECTOR_SLAB_TARGET_BYTES / bytes_per_row.max(1)).max(1);
+        if rows.len() > rows_per_slab {
+            for (slab, rows) in rows.chunks_mut(rows_per_slab).enumerate() {
+                self.append_rows(column, first_row + slab * rows_per_slab, rows);
+            }
+            return;
+        }
+        debug_assert_eq!(self.row_count, first_row);
+        let mut values = Vec::with_capacity(rows.len().saturating_mul(self.dimensions));
+        let mut norms = Vec::with_capacity(rows.len());
+        let mut present = Vec::with_capacity(rows.len());
+        for row in rows.iter() {
+            match &row[column] {
+                Value::Vector(vector) => {
+                    debug_assert_eq!(vector.dimensions(), self.dimensions);
+                    values.extend_from_slice(vector.as_slice());
+                    norms.push(vector.norm());
+                    present.push(true);
+                }
+                Value::Null => {
+                    values.resize(values.len() + self.dimensions, 0.0);
+                    norms.push(0.0);
+                    present.push(false);
+                }
+                value => {
+                    debug_assert!(
+                        false,
+                        "non-vector value {} in vector column",
+                        value.type_name()
+                    );
+                    values.resize(values.len() + self.dimensions, 0.0);
+                    norms.push(0.0);
+                    present.push(false);
+                }
+            }
+        }
+        let values = Arc::new(values);
+        let norms = Arc::new(norms);
+        for (local_row, row) in rows.iter_mut().enumerate() {
+            if present[local_row] {
+                row[column] = Value::Vector(Vector::from_shared(
+                    values.clone(),
+                    local_row * self.dimensions,
+                    self.dimensions,
+                    norms[local_row],
+                ));
+            }
+        }
+        let chunk_index = self.chunks.len();
+        let last_row = first_row + rows.len() - 1;
+        let last_block = last_row / VECTOR_CHUNK_LOOKUP_ROWS;
+        while self.chunk_lookup.len() <= last_block {
+            self.chunk_lookup.push(chunk_index);
+        }
+        self.chunks.push(DenseVectorChunk {
+            first_row,
+            row_count: rows.len(),
+            values,
+            norms,
+            present: Arc::new(present),
+        });
+        self.row_count += rows.len();
+        self.storage_id = next_vector_storage_id();
+    }
+
+    fn get(&self, row: usize) -> Option<DenseVectorRef<'_>> {
+        if row >= self.row_count {
+            return None;
+        }
+        let block = row / VECTOR_CHUNK_LOOKUP_ROWS;
+        let first_chunk = *self.chunk_lookup.get(block)?;
+        let end_chunk = self
+            .chunk_lookup
+            .get(block + 1)
+            .map_or(self.chunks.len(), |next| next.saturating_add(1))
+            .min(self.chunks.len());
+        let local_chunks = &self.chunks[first_chunk..end_chunk];
+        let local_chunk = local_chunks
+            .partition_point(|chunk| chunk.first_row <= row)
+            .checked_sub(1)?;
+        let chunk = &local_chunks[local_chunk];
+        let local_row = row.checked_sub(chunk.first_row)?;
+        chunk.get(local_row, self.dimensions)
+    }
+}
+
+fn next_vector_storage_id() -> u64 {
+    NEXT_VECTOR_STORAGE_ID.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 #[derive(Clone, Debug)]
@@ -325,12 +487,19 @@ impl Catalog {
 }
 
 /// A cloneable database handle. Clones share one thread-safe catalog.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct Database {
     catalog: Arc<RwLock<Catalog>>,
     snapshot_lock: Arc<Mutex<()>>,
     parse_cache: Arc<Mutex<ParseCache>>,
+    compute: Arc<ComputeRuntime>,
     persistent: Option<Arc<PersistentStorage>>,
+}
+
+impl Default for Database {
+    fn default() -> Self {
+        Self::new_with_compute(ComputeConfig::default())
+    }
 }
 
 impl Database {
@@ -338,12 +507,34 @@ impl Database {
         Self::default()
     }
 
+    /// Create an in-memory database with explicit vector compute settings.
+    pub fn new_with_compute(config: ComputeConfig) -> Self {
+        Self {
+            catalog: Arc::new(RwLock::new(Catalog::default())),
+            snapshot_lock: Arc::new(Mutex::new(())),
+            parse_cache: Arc::new(Mutex::new(ParseCache::default())),
+            compute: Arc::new(ComputeRuntime::new(config)),
+            persistent: None,
+        }
+    }
+
+    /// Return the vector compute settings shared by this handle and its clones.
+    pub fn compute_config(&self) -> &ComputeConfig {
+        self.compute.config()
+    }
+
     /// Open a database from a versioned binary snapshot.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_compute(path, ComputeConfig::default())
+    }
+
+    /// Open a snapshot with explicit vector compute settings.
+    pub fn open_with_compute(path: impl AsRef<Path>, config: ComputeConfig) -> Result<Self> {
         Ok(Self {
             catalog: Arc::new(RwLock::new(storage::load(path.as_ref())?)),
             snapshot_lock: Arc::new(Mutex::new(())),
             parse_cache: Arc::new(Mutex::new(ParseCache::default())),
+            compute: Arc::new(ComputeRuntime::new(config)),
             persistent: None,
         })
     }
@@ -356,11 +547,20 @@ impl Database {
     /// Opening the same directory from another process fails while this handle
     /// or any of its clones remains alive.
     pub fn open_persistent(directory: impl AsRef<Path>) -> Result<Self> {
+        Self::open_persistent_with_compute(directory, ComputeConfig::default())
+    }
+
+    /// Open durable storage with explicit vector compute settings.
+    pub fn open_persistent_with_compute(
+        directory: impl AsRef<Path>,
+        config: ComputeConfig,
+    ) -> Result<Self> {
         let (persistent, catalog, records) = PersistentStorage::open(directory.as_ref())?;
         let database = Self {
             catalog: Arc::new(RwLock::new(catalog)),
             snapshot_lock: Arc::new(Mutex::new(())),
             parse_cache: Arc::new(Mutex::new(ParseCache::default())),
+            compute: Arc::new(ComputeRuntime::new(config)),
             persistent: None,
         };
         database.recover(records)?;
@@ -429,7 +629,15 @@ impl Database {
         let persistent = self.persistent.as_ref().ok_or_else(|| {
             Error::StorageIo("checkpoint requires a persistent data directory".into())
         })?;
-        let catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        // Public snapshot saves and managed checkpoint replacement must never
+        // install older catalog generations out of order. The common guard
+        // serializes both file-replacement paths before either captures data.
+        let _snapshot_guard = self.snapshot_lock.lock().map_err(|_| Error::LockPoisoned)?;
+        // A checkpoint must exclude mutations until its snapshot and WAL reset
+        // are complete, but it does not mutate the catalog itself. Holding a
+        // shared guard preserves that ordering while allowing searches and
+        // metadata reads to continue during a large snapshot write.
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
         persistent.checkpoint(&catalog)
     }
 
@@ -455,16 +663,58 @@ impl Database {
     /// first and committed under one write lock. If any statement or durable
     /// WAL append fails, none of the writes in that request become visible.
     pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
-        let statements = self.parse_sql(sql)?;
+        self.execute_inner(sql, None)
+    }
+
+    /// Execute SQL while bounding every query result before it is materialized.
+    ///
+    /// The executor pushes the limit into query plans so an HTTP or embedded
+    /// caller can reject oversized output without first materializing the full
+    /// result. Aggregation, `DISTINCT`, ordering with a large `OFFSET`, and
+    /// filtering may still require working state beyond the returned rows.
+    pub fn execute_with_row_limit(
+        &self,
+        sql: &str,
+        max_rows: usize,
+    ) -> Result<Vec<ExecutionResult>> {
+        if max_rows == usize::MAX {
+            return Err(Error::InvalidQuery(
+                "result row limit must be smaller than usize::MAX".into(),
+            ));
+        }
+        self.execute_inner(sql, Some(max_rows))
+    }
+
+    fn execute_inner(
+        &self,
+        sql: &str,
+        result_row_limit: Option<usize>,
+    ) -> Result<Vec<ExecutionResult>> {
+        let mut statements = self.parse_sql(sql)?;
+        if self.persistent.is_some()
+            && statements.len() == 1
+            && matches!(statements.first(), Some(Statement::Insert { .. }))
+        {
+            let statement = statements.pop().expect("one statement checked above");
+            return Ok(vec![self.execute_persistent_insert(sql, statement)?]);
+        }
         if (self.persistent.is_none() && statements.len() <= 1)
             || statements
                 .iter()
                 .all(|statement| matches!(statement, Statement::Query(_)))
         {
-            return statements
-                .into_iter()
-                .map(|statement| self.execute_statement(statement))
-                .collect();
+            let mut remaining = result_row_limit;
+            let mut results = Vec::with_capacity(statements.len());
+            for statement in statements {
+                let result = self
+                    .execute_statement(statement, remaining)
+                    .map_err(|error| {
+                        adjust_result_limit_error(error, result_row_limit, remaining)
+                    })?;
+                consume_result_budget(&result, &mut remaining);
+                results.push(result);
+            }
+            return Ok(results);
         }
 
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
@@ -472,12 +722,18 @@ impl Database {
             catalog: Arc::new(RwLock::new(catalog.clone())),
             snapshot_lock: self.snapshot_lock.clone(),
             parse_cache: self.parse_cache.clone(),
+            compute: self.compute.clone(),
             persistent: None,
         };
-        let results = statements
-            .into_iter()
-            .map(|statement| staging.execute_statement(statement))
-            .collect::<Result<Vec<_>>>()?;
+        let mut remaining = result_row_limit;
+        let mut results = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let result = staging
+                .execute_statement(statement, remaining)
+                .map_err(|error| adjust_result_limit_error(error, result_row_limit, remaining))?;
+            consume_result_budget(&result, &mut remaining);
+            results.push(result);
+        }
         let mut committed = staging
             .catalog
             .read()
@@ -506,6 +762,65 @@ impl Database {
             let _ = self.checkpoint();
         }
         Ok(results)
+    }
+
+    fn execute_persistent_insert(
+        &self,
+        sql: &str,
+        statement: Statement,
+    ) -> Result<ExecutionResult> {
+        let Statement::Insert {
+            table_name,
+            columns,
+            source,
+            on,
+            returning,
+            ..
+        } = statement
+        else {
+            unreachable!("persistent INSERT fast path validates the statement kind")
+        };
+        if returning.is_some() {
+            return Err(Error::Unsupported("INSERT ... RETURNING".into()));
+        }
+        let table_name = object_name(&table_name);
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let mutation = {
+            let table = catalog
+                .tables
+                .get(&table_name)
+                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+            prepare_sql_insert(table, columns, source, on)?
+        };
+        let rows_affected = mutation.rows_affected();
+        let checkpoint_needed = if rows_affected == 0 {
+            false
+        } else {
+            let sequence = next_durable_sequence(catalog.durable_sequence)?;
+            let operation = PersistentStorage::prepare_sql(sql)?;
+            let checkpoint_needed = self
+                .persistent
+                .as_ref()
+                .expect("persistent storage checked above")
+                .append(sequence, operation)?;
+            mutation.apply(
+                catalog
+                    .tables
+                    .get_mut(&table_name)
+                    .expect("table exists while write lock is held"),
+            );
+            catalog.mark_changed();
+            catalog.durable_sequence = sequence;
+            checkpoint_needed
+        };
+        drop(catalog);
+        if checkpoint_needed {
+            let _ = self.checkpoint();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "INSERT",
+            rows_affected,
+        })
     }
 
     fn recover(&self, records: Vec<crate::durable::RecoveryRecord>) -> Result<()> {
@@ -705,7 +1020,11 @@ impl Database {
         Ok(rows_affected)
     }
 
-    fn execute_statement(&self, statement: Statement) -> Result<ExecutionResult> {
+    fn execute_statement(
+        &self,
+        statement: Statement,
+        result_row_limit: Option<usize>,
+    ) -> Result<ExecutionResult> {
         match statement {
             Statement::CreateTable {
                 name,
@@ -737,7 +1056,12 @@ impl Database {
             }
             Statement::Query(query) => {
                 let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
-                Ok(ExecutionResult::Query(run_query(&catalog, &query)?))
+                Ok(ExecutionResult::Query(run_query(
+                    &catalog,
+                    &query,
+                    &self.compute,
+                    result_row_limit,
+                )?))
             }
             Statement::Explain {
                 analyze,
@@ -757,8 +1081,10 @@ impl Database {
                     ));
                 };
                 let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
-                Ok(ExecutionResult::Query(explain_query(
-                    &catalog, query, verbose,
+                let result = explain_query(&catalog, query, verbose, &self.compute)?;
+                Ok(ExecutionResult::Query(enforce_query_row_limit(
+                    result,
+                    result_row_limit,
                 )?))
             }
             Statement::CreateIndex {
@@ -945,55 +1271,22 @@ impl Database {
         on_insert: Option<OnInsert>,
     ) -> Result<ExecutionResult> {
         let table_name = object_name(&table_name);
-        let source = source.ok_or_else(|| Error::InvalidQuery("INSERT has no source".into()))?;
-        let rows = match source.body.as_ref() {
-            SetExpr::Values(values) => &values.rows,
-            _ => return Err(Error::Unsupported("INSERT ... SELECT".into())),
-        };
-
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
-        let table = catalog
-            .tables
-            .get_mut(&table_name)
-            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
-        let conflict_plan = resolve_conflict_plan(table, on_insert)?;
-
-        let target_indexes = if insert_columns.is_empty() {
-            (0..table.columns.len()).collect::<Vec<_>>()
-        } else {
-            let mut seen = HashSet::new();
-            insert_columns
-                .iter()
-                .map(|name| {
-                    let name = ident_name(name);
-                    if !seen.insert(name.clone()) {
-                        return Err(Error::DuplicateColumn(name));
-                    }
-                    find_column(&table.columns, &name)
-                })
-                .collect::<Result<Vec<_>>>()?
+        let mutation = {
+            let table = catalog
+                .tables
+                .get(&table_name)
+                .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+            prepare_sql_insert(table, insert_columns, source, on_insert)?
         };
-
-        let empty = EvalContext::empty();
-        let mut pending = Vec::with_capacity(rows.len());
-        for expressions in rows {
-            if expressions.len() != target_indexes.len() {
-                return Err(Error::InvalidQuery(format!(
-                    "INSERT row has {} value(s), expected {}",
-                    expressions.len(),
-                    target_indexes.len()
-                )));
-            }
-            let mut row = vec![Value::Null; table.columns.len()];
-            for (expression, column_index) in expressions.iter().zip(&target_indexes) {
-                let value = evaluate(expression, &empty)?;
-                row[*column_index] = coerce(value, &table.columns[*column_index].data_type)?;
-            }
-            validate_row(&table.columns, &row)?;
-            pending.push(row);
-        }
-        let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
+        let rows_affected = mutation.rows_affected();
         if rows_affected > 0 {
+            mutation.apply(
+                catalog
+                    .tables
+                    .get_mut(&table_name)
+                    .expect("table exists while write lock is held"),
+            );
             catalog.mark_changed();
         }
         Ok(ExecutionResult::Command {
@@ -1240,17 +1533,22 @@ fn next_durable_sequence(sequence: u64) -> Result<u64> {
         .ok_or_else(|| Error::StorageIo("durable sequence exhausted".into()))
 }
 
-fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<QueryResult> {
+fn explain_query(
+    catalog: &Catalog,
+    query: &Query,
+    verbose: bool,
+    compute: &ComputeRuntime,
+) -> Result<QueryResult> {
     let select = match query.body.as_ref() {
         SetExpr::Select(select) => select,
         _ => return Err(Error::Unsupported("EXPLAIN for set operations".into())),
     };
     validate_select(select)?;
     let mut plan = Vec::new();
-    let (table, columns, index_covers_filter) = match select.from.as_slice() {
+    let (table, columns, index_covers_filter, candidate_count) = match select.from.as_slice() {
         [] => {
             plan.push("Source: single row".to_string());
-            (None, &[][..], false)
+            (None, &[][..], false, 1)
         }
         [from] if from.joins.is_empty() => {
             let name = table_factor_name(&from.relation)?;
@@ -1263,6 +1561,9 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
                 .as_ref()
                 .and_then(|selection| indexed_candidate_rows(table, selection));
             let index_covers_filter = indexed.as_ref().is_some_and(|candidates| candidates.exact);
+            let candidate_count = indexed
+                .as_ref()
+                .map_or(table.rows.len(), |indexes| indexes.rows.len());
             if let Some(indexes) = indexed {
                 plan.push(format!(
                     "Scan: scalar hash index on {name} ({} of {} row(s))",
@@ -1275,7 +1576,12 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
                     table.rows.len()
                 ));
             }
-            (Some(table), table.columns.as_slice(), index_covers_filter)
+            (
+                Some(table),
+                table.columns.as_slice(),
+                index_covers_filter,
+                candidate_count,
+            )
         }
         _ => return Err(Error::Unsupported("EXPLAIN for joins".into())),
     };
@@ -1377,6 +1683,30 @@ fn explain_query(catalog: &Catalog, query: &Query, verbose: bool) -> Result<Quer
                 plan.push(format!(
                     "VectorTopK: {order} (direct scoring on {}; deferred projection; retain {retained} row(s))",
                     columns[vector_plan.vector_column].name
+                ));
+                let gpu_compatible = select.selection.is_none() || index_covers_filter;
+                let element_count = candidate_count.saturating_mul(vector_plan.query.dimensions());
+                let compute_step = match compute.config().device {
+                    crate::ComputeDevice::Cpu => "CPU exact scan".to_string(),
+                    crate::ComputeDevice::Gpu if !cfg!(feature = "gpu") => {
+                        "GPU required, but this build has no GPU backend".to_string()
+                    }
+                    crate::ComputeDevice::Gpu if !gpu_compatible => {
+                        "CPU exact scan (residual SQL filter requires row evaluation)".to_string()
+                    }
+                    crate::ComputeDevice::Gpu => "GPU exact scan required".to_string(),
+                    crate::ComputeDevice::Auto
+                        if cfg!(feature = "gpu")
+                            && gpu_compatible
+                            && element_count >= compute.config().gpu_min_elements =>
+                    {
+                        "GPU exact scan eligible; automatic CPU fallback".to_string()
+                    }
+                    crate::ComputeDevice::Auto => "CPU exact scan".to_string(),
+                };
+                plan.push(format!(
+                    "Compute: {compute_step} ({candidate_count} candidate(s) x {} dimensions)",
+                    vector_plan.query.dimensions()
                 ));
             } else {
                 plan.push(format!("TopK: {order} (retain {retained} row(s))"));
@@ -1742,7 +2072,12 @@ fn intent_summary(intent: IntentSummary<'_>) -> String {
     }
 }
 
-fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
+fn run_query(
+    catalog: &Catalog,
+    query: &Query,
+    compute: &ComputeRuntime,
+    result_row_limit: Option<usize>,
+) -> Result<QueryResult> {
     if query.with.is_some()
         || !query.limit_by.is_empty()
         || query.fetch.is_some()
@@ -1843,9 +2178,14 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         Some(offset) => usize_expression(&offset.value, &empty, "OFFSET")?,
         None => 0,
     };
-    let limit = match &query.limit {
+    let sql_limit = match &query.limit {
         Some(expression) => Some(usize_expression(expression, &empty, "LIMIT")?),
         None => None,
+    };
+    let limit = match (sql_limit, result_row_limit) {
+        (Some(sql_limit), Some(max_rows)) => Some(sql_limit.min(max_rows + 1)),
+        (None, Some(max_rows)) => Some(max_rows + 1),
+        (sql_limit, None) => sql_limit,
     };
     let group_by = match &select.group_by {
         sqlparser::ast::GroupByExpr::All => return Err(Error::Unsupported("GROUP BY ALL".into())),
@@ -1868,7 +2208,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             .as_ref()
             .is_some_and(expression_contains_aggregate);
     if aggregate_mode {
-        return run_aggregate_query(
+        let result = run_aggregate_query(
             select,
             query,
             columns,
@@ -1881,7 +2221,8 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             offset,
             limit,
             rows_examined,
-        );
+        )?;
+        return enforce_query_row_limit(result, result_row_limit);
     }
     if select.having.is_some() {
         return Err(Error::InvalidQuery(
@@ -1898,7 +2239,7 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             offset,
             limit,
         )? {
-            return run_fast_vector_top_k(
+            let result = run_fast_vector_top_k(
                 table,
                 indexed_rows
                     .as_ref()
@@ -1908,7 +2249,9 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
                 result_columns,
                 result_types,
                 rows_examined,
-            );
+                compute,
+            )?;
+            return enforce_query_row_limit(result, result_row_limit);
         }
     }
     let mut candidates =
@@ -1930,9 +2273,12 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
             .map(|item| evaluate_order(item, &context, &result_columns, &values))
             .collect::<Result<Vec<_>>>()?;
         candidates.push(Candidate { values, order });
+        if candidates.is_full() {
+            break;
+        }
     }
 
-    finish_candidates(
+    let result = finish_candidates(
         candidates.into_candidates(),
         (result_columns, result_types),
         false,
@@ -1940,7 +2286,8 @@ fn run_query(catalog: &Catalog, query: &Query) -> Result<QueryResult> {
         offset,
         limit,
         rows_examined,
-    )
+    )?;
+    enforce_query_row_limit(result, result_row_limit)
 }
 
 fn finish_candidates(
@@ -1999,6 +2346,42 @@ fn finish_candidates(
         rows,
         rows_examined,
     })
+}
+
+fn enforce_query_row_limit(result: QueryResult, limit: Option<usize>) -> Result<QueryResult> {
+    if let Some(limit) = limit {
+        if result.rows.len() > limit {
+            return Err(Error::ResultLimitExceeded {
+                found_at_least: result.rows.len(),
+                max: limit,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn consume_result_budget(result: &ExecutionResult, remaining: &mut Option<usize>) {
+    if let (ExecutionResult::Query(result), Some(remaining)) = (result, remaining) {
+        *remaining = remaining.saturating_sub(result.row_count());
+    }
+}
+
+fn adjust_result_limit_error(
+    error: Error,
+    total_limit: Option<usize>,
+    remaining: Option<usize>,
+) -> Error {
+    match (error, total_limit, remaining) {
+        (Error::ResultLimitExceeded { found_at_least, .. }, Some(total_limit), Some(remaining)) => {
+            Error::ResultLimitExceeded {
+                found_at_least: total_limit
+                    .saturating_sub(remaining)
+                    .saturating_add(found_at_least),
+                max: total_limit,
+            }
+        }
+        (error, _, _) => error,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2932,10 +3315,10 @@ fn build_projection(items: &[SelectItem], columns: &[Column]) -> Result<Vec<Proj
     Ok(output)
 }
 
-const PARALLEL_VECTOR_SCAN_THRESHOLD: usize = 4_096;
+const PARALLEL_VECTOR_SCAN_MIN_ELEMENTS: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug)]
-enum FastVectorMetric {
+pub(crate) enum FastVectorMetric {
     L2,
     SquaredL2,
     Cosine,
@@ -2944,6 +3327,17 @@ enum FastVectorMetric {
 }
 
 impl FastVectorMetric {
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_code(self) -> u32 {
+        match self {
+            Self::L2 => 0,
+            Self::SquaredL2 => 1,
+            Self::Cosine => 2,
+            Self::DotProduct => 3,
+            Self::NegativeDotProduct => 4,
+        }
+    }
+
     fn intent_name(self) -> &'static str {
         match self {
             Self::L2 => "l2_distance",
@@ -2953,13 +3347,30 @@ impl FastVectorMetric {
         }
     }
 
-    fn score(self, vector: &Vector, query: &Vector) -> Result<f64> {
+    /// Euclidean distance and squared Euclidean distance induce the same
+    /// ordering for finite vectors. Keep the exhaustive scan in squared space
+    /// and take square roots only for the small set of rows that survive top-k.
+    fn ranking_metric(self) -> Self {
+        match self {
+            Self::L2 => Self::SquaredL2,
+            metric => metric,
+        }
+    }
+
+    fn materialize_ranked_score(self, score: Value) -> Value {
+        match (self, score) {
+            (Self::L2, Value::Float(score)) => Value::Float(f64::from((score as f32).sqrt())),
+            (_, score) => score,
+        }
+    }
+
+    fn score_dense(self, vector: DenseVectorRef<'_>, query: &Vector) -> Result<f64> {
         let score = match self {
-            Self::L2 => vector.l2_distance(query)?,
-            Self::SquaredL2 => vector.squared_l2_distance(query)?,
-            Self::Cosine => vector.cosine_distance(query)?,
-            Self::DotProduct => vector.dot_product(query)?,
-            Self::NegativeDotProduct => -vector.dot_product(query)?,
+            Self::L2 => query.squared_l2_distance_slice(vector.values)?.sqrt(),
+            Self::SquaredL2 => query.squared_l2_distance_slice(vector.values)?,
+            Self::Cosine => query.cosine_distance_slice(vector.values, vector.norm)?,
+            Self::DotProduct => query.dot_product_slice(vector.values)?,
+            Self::NegativeDotProduct => -query.dot_product_slice(vector.values)?,
         };
         Ok(f64::from(score))
     }
@@ -3094,36 +3505,67 @@ impl FastVectorTopKPlan {
         }))
     }
 
-    fn score_row<'a>(
+    fn score_row(
         &self,
-        columns: &[Column],
-        row: &'a [Value],
+        table: &Table,
+        row_index: usize,
         selection: Option<&Expr>,
-    ) -> Result<Option<FastVectorCandidate<'a>>> {
-        let context = EvalContext::new(columns, row);
+    ) -> Result<Option<FastVectorCandidate>> {
+        let row = &table.rows[row_index];
+        let context = EvalContext::new(&table.columns, row);
         if let Some(selection) = selection {
             if !evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
                 return Ok(None);
             }
         }
-        let score = match &row[self.vector_column] {
-            Value::Null => Value::Null,
-            Value::Vector(vector) => Value::Float(self.metric.score(vector, &self.query)?),
-            value => return Err(type_mismatch("VECTOR", value)),
-        };
-        Ok(Some(FastVectorCandidate {
-            row,
-            score,
-            order: self.order,
-        }))
+        let dense = table
+            .vector_columns
+            .get(&self.vector_column)
+            .ok_or_else(|| {
+                Error::InvalidQuery(
+                    "dense vector storage is unavailable for the query column".into(),
+                )
+            })?;
+        self.score_dense_candidate(table, row_index, dense.get(row_index))
+            .map(Some)
     }
 
-    fn materialize(&self, candidate: FastVectorCandidate<'_>) -> Vec<Value> {
+    fn score_dense_candidate(
+        &self,
+        table: &Table,
+        row_index: usize,
+        vector: Option<DenseVectorRef<'_>>,
+    ) -> Result<FastVectorCandidate> {
+        let row = &table.rows[row_index];
+        let score = match vector {
+            Some(vector) => Value::Float(
+                self.metric
+                    .ranking_metric()
+                    .score_dense(vector, &self.query)?,
+            ),
+            None if matches!(row[self.vector_column], Value::Null) => Value::Null,
+            None => {
+                return Err(Error::InvalidQuery(
+                    "dense vector storage is inconsistent with the row store".into(),
+                ))
+            }
+        };
+        Ok(FastVectorCandidate {
+            row_index,
+            score,
+            order: self.order,
+        })
+    }
+
+    fn materialize(&self, table: &Table, candidate: FastVectorCandidate) -> Vec<Value> {
+        let row = &table.rows[candidate.row_index];
         self.projections
             .iter()
             .map(|projection| match projection {
-                FastProjection::Column(index) => candidate.row[*index].clone(),
-                FastProjection::Score => candidate.score.clone(),
+                FastProjection::Column(index) => row[*index].clone(),
+                FastProjection::Score => self
+                    .metric
+                    .materialize_ranked_score(candidate.score.clone()),
             })
             .collect()
     }
@@ -3566,35 +4008,37 @@ fn parse_fast_vector_distance(
     Ok(None)
 }
 
-struct FastVectorCandidate<'a> {
-    row: &'a [Value],
+struct FastVectorCandidate {
+    row_index: usize,
     score: Value,
     order: FastSortOrder,
 }
 
-impl PartialEq for FastVectorCandidate<'_> {
+impl PartialEq for FastVectorCandidate {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl Eq for FastVectorCandidate<'_> {}
+impl Eq for FastVectorCandidate {}
 
-impl PartialOrd for FastVectorCandidate<'_> {
+impl PartialOrd for FastVectorCandidate {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for FastVectorCandidate<'_> {
+impl Ord for FastVectorCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.order.compare(&self.score, &other.score)
+        self.order
+            .compare(&self.score, &other.score)
+            .then_with(|| self.row_index.cmp(&other.row_index))
     }
 }
 
-fn push_fast_vector_candidate<'a>(
-    heap: &mut BinaryHeap<FastVectorCandidate<'a>>,
-    candidate: FastVectorCandidate<'a>,
+fn push_fast_vector_candidate(
+    heap: &mut BinaryHeap<FastVectorCandidate>,
+    candidate: FastVectorCandidate,
     capacity: usize,
 ) {
     if capacity == 0 {
@@ -3608,30 +4052,30 @@ fn push_fast_vector_candidate<'a>(
     }
 }
 
-fn score_and_push_fast_vector_candidate<'a>(
-    heap: &mut BinaryHeap<FastVectorCandidate<'a>>,
-    row: &'a [Value],
-    columns: &[Column],
+fn score_and_push_fast_vector_candidate(
+    heap: &mut BinaryHeap<FastVectorCandidate>,
+    table: &Table,
+    row_index: usize,
     selection: Option<&Expr>,
     plan: &FastVectorTopKPlan,
 ) -> Result<()> {
-    if let Some(candidate) = plan.score_row(columns, row, selection)? {
+    if let Some(candidate) = plan.score_row(table, row_index, selection)? {
         push_fast_vector_candidate(heap, candidate, plan.capacity);
     }
     Ok(())
 }
 
-fn parallel_fast_vector_heap<'a, I>(
+fn parallel_fast_vector_heap<I>(
     rows: I,
-    columns: &[Column],
+    table: &Table,
     selection: Option<&Expr>,
     plan: &FastVectorTopKPlan,
-) -> Result<BinaryHeap<FastVectorCandidate<'a>>>
+) -> Result<BinaryHeap<FastVectorCandidate>>
 where
-    I: ParallelIterator<Item = &'a [Value]>,
+    I: ParallelIterator<Item = usize>,
 {
-    rows.try_fold(BinaryHeap::new, |mut heap, row| {
-        if let Some(candidate) = plan.score_row(columns, row, selection)? {
+    rows.try_fold(BinaryHeap::new, |mut heap, row_index| {
+        if let Some(candidate) = plan.score_row(table, row_index, selection)? {
             push_fast_vector_candidate(&mut heap, candidate, plan.capacity);
         }
         Ok(heap)
@@ -3644,6 +4088,57 @@ where
     })
 }
 
+fn score_dense_chunk(
+    heap: &mut BinaryHeap<FastVectorCandidate>,
+    table: &Table,
+    chunk: &DenseVectorChunk,
+    plan: &FastVectorTopKPlan,
+) -> Result<()> {
+    for local_row in 0..chunk.row_count {
+        let row_index = chunk.first_row + local_row;
+        let candidate = plan.score_dense_candidate(
+            table,
+            row_index,
+            chunk.get(local_row, plan.query.dimensions()),
+        )?;
+        push_fast_vector_candidate(heap, candidate, plan.capacity);
+    }
+    Ok(())
+}
+
+fn sequential_dense_vector_heap(
+    dense: &DenseVectorColumn,
+    table: &Table,
+    plan: &FastVectorTopKPlan,
+) -> Result<BinaryHeap<FastVectorCandidate>> {
+    let mut heap = BinaryHeap::new();
+    for chunk in &dense.chunks {
+        score_dense_chunk(&mut heap, table, chunk, plan)?;
+    }
+    Ok(heap)
+}
+
+fn parallel_dense_vector_heap(
+    dense: &DenseVectorColumn,
+    table: &Table,
+    plan: &FastVectorTopKPlan,
+) -> Result<BinaryHeap<FastVectorCandidate>> {
+    dense
+        .chunks
+        .par_iter()
+        .try_fold(BinaryHeap::new, |mut heap, chunk| {
+            score_dense_chunk(&mut heap, table, chunk, plan)?;
+            Ok(heap)
+        })
+        .try_reduce(BinaryHeap::new, |mut left, right| {
+            for candidate in right {
+                push_fast_vector_candidate(&mut left, candidate, plan.capacity);
+            }
+            Ok(left)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_fast_vector_top_k(
     table: &Table,
     indexed_rows: Option<&[usize]>,
@@ -3652,21 +4147,61 @@ fn run_fast_vector_top_k(
     result_columns: Vec<String>,
     result_types: Vec<Option<DataType>>,
     rows_examined: usize,
+    compute: &ComputeRuntime,
 ) -> Result<QueryResult> {
     let source_count = indexed_rows.map_or(table.rows.len(), <[usize]>::len);
-    let mut heap = if source_count >= PARALLEL_VECTOR_SCAN_THRESHOLD {
+    let dense = table
+        .vector_columns
+        .get(&plan.vector_column)
+        .ok_or_else(|| {
+            Error::InvalidQuery("dense vector storage is unavailable for the query column".into())
+        })?;
+    if dense.row_count != table.rows.len() {
+        return Err(Error::InvalidQuery(
+            "dense vector storage row count does not match the row store".into(),
+        ));
+    }
+    let gpu_heap = if selection.is_none() {
+        let mut heap = BinaryHeap::new();
+        let completed = compute.scan_dense_column(
+            dense,
+            indexed_rows,
+            plan.metric.ranking_metric(),
+            &plan.query,
+            source_count,
+            |row_index, score| {
+                push_fast_vector_candidate(
+                    &mut heap,
+                    FastVectorCandidate {
+                        row_index,
+                        score: score.map_or(Value::Null, Value::Float),
+                        order: plan.order,
+                    },
+                    plan.capacity,
+                );
+            },
+        )?;
+        completed.then_some(heap)
+    } else {
+        None
+    };
+    let parallel = source_count.saturating_mul(plan.query.dimensions())
+        >= PARALLEL_VECTOR_SCAN_MIN_ELEMENTS
+        && source_count > 1;
+    let mut heap = if let Some(heap) = gpu_heap {
+        heap
+    } else if selection.is_none() && indexed_rows.is_none() && parallel && dense.chunks.len() > 1 {
+        parallel_dense_vector_heap(dense, table, &plan)?
+    } else if selection.is_none() && indexed_rows.is_none() && !parallel {
+        sequential_dense_vector_heap(dense, table, &plan)?
+    } else if parallel {
         match indexed_rows {
-            Some(indexes) => parallel_fast_vector_heap(
-                indexes
-                    .par_iter()
-                    .map(|index| table.rows[*index].as_slice()),
-                &table.columns,
-                selection,
-                &plan,
-            )?,
+            Some(indexes) => {
+                parallel_fast_vector_heap(indexes.par_iter().copied(), table, selection, &plan)?
+            }
             None => parallel_fast_vector_heap(
-                table.rows.par_iter().map(Vec::as_slice),
-                &table.columns,
+                (0..table.rows.len()).into_par_iter(),
+                table,
                 selection,
                 &plan,
             )?,
@@ -3677,22 +4212,14 @@ fn run_fast_vector_top_k(
             Some(indexes) => {
                 for index in indexes {
                     score_and_push_fast_vector_candidate(
-                        &mut heap,
-                        &table.rows[*index],
-                        &table.columns,
-                        selection,
-                        &plan,
+                        &mut heap, table, *index, selection, &plan,
                     )?;
                 }
             }
             None => {
-                for row in &table.rows {
+                for row_index in 0..table.rows.len() {
                     score_and_push_fast_vector_candidate(
-                        &mut heap,
-                        row,
-                        &table.columns,
-                        selection,
-                        &plan,
+                        &mut heap, table, row_index, selection, &plan,
                     )?;
                 }
             }
@@ -3705,7 +4232,7 @@ fn run_fast_vector_top_k(
         .into_iter()
         .skip(plan.offset)
         .take(plan.limit)
-        .map(|candidate| plan.materialize(candidate))
+        .map(|candidate| plan.materialize(table, candidate))
         .collect();
     Ok(QueryResult {
         columns: result_columns,
@@ -3727,7 +4254,10 @@ struct CandidateSink<'a> {
 }
 
 enum CandidateStorage<'a> {
-    All(Vec<Candidate>),
+    All {
+        candidates: Vec<Candidate>,
+        capacity: Option<usize>,
+    },
     TopK {
         heap: BinaryHeap<RankedCandidate<'a>>,
         capacity: usize,
@@ -3755,7 +4285,16 @@ impl<'a> CandidateSink<'a> {
                     .ok_or_else(|| Error::InvalidQuery("OFFSET plus LIMIT is too large".into()))?,
                 order_by,
             },
-            _ => CandidateStorage::All(Vec::new()),
+            _ => CandidateStorage::All {
+                candidates: Vec::new(),
+                capacity: limit
+                    .map(|limit| {
+                        offset.checked_add(limit).ok_or_else(|| {
+                            Error::InvalidQuery("OFFSET plus LIMIT is too large".into())
+                        })
+                    })
+                    .transpose()?,
+            },
         };
         Ok(Self {
             storage,
@@ -3775,7 +4314,14 @@ impl<'a> CandidateSink<'a> {
             }
         }
         match &mut self.storage {
-            CandidateStorage::All(candidates) => candidates.push(candidate),
+            CandidateStorage::All {
+                candidates,
+                capacity,
+            } => {
+                if capacity.is_none_or(|capacity| candidates.len() < capacity) {
+                    candidates.push(candidate);
+                }
+            }
             CandidateStorage::TopK {
                 heap,
                 capacity,
@@ -3800,9 +4346,19 @@ impl<'a> CandidateSink<'a> {
         }
     }
 
+    fn is_full(&self) -> bool {
+        matches!(
+            &self.storage,
+            CandidateStorage::All {
+                candidates,
+                capacity: Some(capacity),
+            } if candidates.len() >= *capacity
+        )
+    }
+
     fn into_candidates(self) -> Vec<Candidate> {
         match self.storage {
-            CandidateStorage::All(candidates) => candidates,
+            CandidateStorage::All { candidates, .. } => candidates,
             CandidateStorage::TopK { heap, .. } => heap
                 .into_iter()
                 .map(|candidate| candidate.candidate)
@@ -4588,6 +5144,7 @@ fn prepare_durable_insert(
     match conflict_plan {
         InsertConflictPlan::Fail => {
             validate_unique(table, &pending)?;
+            ensure_table_row_capacity(table.rows.len(), pending.len())?;
             Ok(PreparedInsertMutation::Append(pending))
         }
         InsertConflictPlan::DoNothing(conflict_columns) => {
@@ -4598,6 +5155,7 @@ fn prepare_durable_insert(
                 }
             }
             validate_unique(table, &accepted)?;
+            ensure_table_row_capacity(table.rows.len(), accepted.len())?;
             Ok(PreparedInsertMutation::Append(accepted))
         }
         plan => {
@@ -4609,6 +5167,54 @@ fn prepare_durable_insert(
             })
         }
     }
+}
+
+fn prepare_sql_insert(
+    table: &Table,
+    insert_columns: Vec<Ident>,
+    source: Option<Box<Query>>,
+    on_insert: Option<OnInsert>,
+) -> Result<PreparedInsertMutation> {
+    let source = source.ok_or_else(|| Error::InvalidQuery("INSERT has no source".into()))?;
+    let rows = match source.body.as_ref() {
+        SetExpr::Values(values) => &values.rows,
+        _ => return Err(Error::Unsupported("INSERT ... SELECT".into())),
+    };
+    let conflict_plan = resolve_conflict_plan(table, on_insert)?;
+    let target_indexes = if insert_columns.is_empty() {
+        (0..table.columns.len()).collect::<Vec<_>>()
+    } else {
+        let mut seen = HashSet::new();
+        insert_columns
+            .iter()
+            .map(|name| {
+                let name = ident_name(name);
+                if !seen.insert(name.clone()) {
+                    return Err(Error::DuplicateColumn(name));
+                }
+                find_column(&table.columns, &name)
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let empty = EvalContext::empty();
+    let mut pending = Vec::with_capacity(rows.len());
+    for expressions in rows {
+        if expressions.len() != target_indexes.len() {
+            return Err(Error::InvalidQuery(format!(
+                "INSERT row has {} value(s), expected {}",
+                expressions.len(),
+                target_indexes.len()
+            )));
+        }
+        let mut row = vec![Value::Null; table.columns.len()];
+        for (expression, column_index) in expressions.iter().zip(&target_indexes) {
+            let value = evaluate(expression, &empty)?;
+            row[*column_index] = coerce(value, &table.columns[*column_index].data_type)?;
+        }
+        validate_row(&table.columns, &row)?;
+        pending.push(row);
+    }
+    prepare_durable_insert(table, pending, conflict_plan)
 }
 
 fn prepare_typed_rows(table: &Table, rows: Vec<Vec<Value>>) -> Result<Vec<Vec<Value>>> {
@@ -4698,6 +5304,7 @@ fn apply_insert_plan(
     match conflict_plan {
         InsertConflictPlan::Fail => {
             validate_unique(table, &pending)?;
+            ensure_table_row_capacity(table.rows.len(), pending.len())?;
             let rows_affected = pending.len();
             let first_new_row = table.rows.len();
             table.rows.extend(pending);
@@ -4712,6 +5319,7 @@ fn apply_insert_plan(
                 }
             }
             validate_unique(table, &accepted)?;
+            ensure_table_row_capacity(table.rows.len(), accepted.len())?;
             let rows_affected = accepted.len();
             let first_new_row = table.rows.len();
             table.rows.extend(accepted);
@@ -4918,8 +5526,20 @@ fn apply_conflict_updates_with(
 
     let empty_table = Table::new(table.columns.clone(), Vec::new(), HashMap::new());
     validate_unique(&empty_table, &prospective)?;
+    ensure_table_row_capacity(0, prospective.len())?;
     table.rows = prospective;
     Ok(rows_affected)
+}
+
+fn ensure_table_row_capacity(current: usize, additional: usize) -> Result<()> {
+    let found = current.saturating_add(additional);
+    if found > MAX_TABLE_ROWS {
+        return Err(Error::TableRowLimit {
+            found,
+            max: MAX_TABLE_ROWS,
+        });
+    }
+    Ok(())
 }
 
 fn row_conflicts(
@@ -4980,7 +5600,7 @@ impl HashIndex {
 }
 
 fn extend_indexes(table: &mut Table, first_new_row: usize) {
-    let new_rows = &table.rows[first_new_row..];
+    let new_rows = &mut table.rows[first_new_row..];
     for index in table.indexes.values_mut() {
         index.extend(new_rows, first_new_row);
     }
@@ -4992,9 +5612,35 @@ fn extend_indexes(table: &mut Table, first_new_row: usize) {
             }
         }
     }
+    extend_vector_columns(table, first_new_row);
+}
+
+pub(crate) fn extend_vector_columns(table: &mut Table, first_new_row: usize) {
+    let new_rows = &mut table.rows[first_new_row..];
+    let vector_columns = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(column, definition)| match definition.data_type {
+            DataType::Vector(dimensions) => Some((column, dimensions)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (column, dimensions) in vector_columns {
+        table
+            .vector_columns
+            .entry(column)
+            .or_insert_with(|| DenseVectorColumn::empty(dimensions))
+            .append_rows(column, first_new_row, new_rows);
+    }
 }
 
 pub(crate) fn rebuild_indexes(table: &mut Table) {
+    rebuild_relational_indexes(table);
+    rebuild_vector_columns(table);
+}
+
+pub(crate) fn rebuild_relational_indexes(table: &mut Table) {
     let rows = &table.rows;
     for index in table.indexes.values_mut() {
         index.rebuild(rows);
@@ -5013,6 +5659,25 @@ pub(crate) fn rebuild_indexes(table: &mut Table) {
             }
         }
         table.unique_keys.insert(column_index, keys);
+    }
+}
+
+fn rebuild_vector_columns(table: &mut Table) {
+    let vector_columns = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(column, definition)| match definition.data_type {
+            DataType::Vector(dimensions) => Some((column, dimensions)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    table.vector_columns.clear();
+    for (column, dimensions) in vector_columns {
+        table.vector_columns.insert(
+            column,
+            DenseVectorColumn::from_rows(column, dimensions, &mut table.rows),
+        );
     }
 }
 
@@ -5148,5 +5813,252 @@ mod tests {
             cache.entries.front().map(|entry| entry.sql.as_str()),
             Some("SELECT 79")
         );
+    }
+
+    #[test]
+    fn dense_vector_columns_append_in_shared_chunks_and_rebuild_after_updates() {
+        let database = Database::new();
+        database
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR(3))")
+            .unwrap();
+        database
+            .insert_rows(
+                "items",
+                vec![
+                    vec![
+                        Value::Integer(1),
+                        Value::Vector(Vector::new(vec![1.0, 2.0, 3.0]).unwrap()),
+                    ],
+                    vec![Value::Integer(2), Value::Null],
+                ],
+                InsertConflict::Fail,
+            )
+            .unwrap();
+        let first_storage_id = {
+            let catalog = database.catalog.read().unwrap();
+            let table = &catalog.tables["items"];
+            let dense = &table.vector_columns[&1];
+            assert_eq!(dense.row_count, 2);
+            assert_eq!(dense.chunks.len(), 1);
+            assert_eq!(dense.get(0).unwrap().values, [1.0, 2.0, 3.0]);
+            assert!(dense.get(1).is_none());
+            dense.storage_id
+        };
+
+        database
+            .insert_rows(
+                "items",
+                vec![vec![
+                    Value::Integer(3),
+                    Value::Vector(Vector::new(vec![4.0, 5.0, 6.0]).unwrap()),
+                ]],
+                InsertConflict::Fail,
+            )
+            .unwrap();
+        {
+            let catalog = database.catalog.read().unwrap();
+            let dense = &catalog.tables["items"].vector_columns[&1];
+            assert_eq!(dense.chunks.len(), 2);
+            assert_ne!(dense.storage_id, first_storage_id);
+            assert_eq!(dense.get(2).unwrap().values, [4.0, 5.0, 6.0]);
+        }
+
+        database
+            .execute("UPDATE items SET embedding = [7, 8, 9] WHERE id = 2")
+            .unwrap();
+        let catalog = database.catalog.read().unwrap();
+        let table = &catalog.tables["items"];
+        let dense = &table.vector_columns[&1];
+        assert_eq!(dense.chunks.len(), 1);
+        assert_eq!(dense.get(1).unwrap().values, [7.0, 8.0, 9.0]);
+        assert_eq!(
+            table.rows[1][1],
+            Value::Vector(Vector::new(vec![7.0, 8.0, 9.0]).unwrap())
+        );
+    }
+
+    #[test]
+    fn dense_chunk_lookup_stays_correct_across_row_blocks() {
+        let mut rows = (0..9_000)
+            .map(|row| {
+                vec![Value::Vector(
+                    Vector::new(vec![row as f32]).expect("one-dimensional vector"),
+                )]
+            })
+            .collect::<Vec<_>>();
+        let mut dense = DenseVectorColumn::empty(1);
+        dense.append_rows(0, 0, &mut rows[..3_000]);
+        dense.append_rows(0, 3_000, &mut rows[3_000..6_123]);
+        dense.append_rows(0, 6_123, &mut rows[6_123..]);
+
+        assert_eq!(dense.chunks.len(), 3);
+        assert_eq!(dense.chunk_lookup.len(), 3);
+        for row in [0, 2_999, 3_000, 4_095, 4_096, 6_122, 6_123, 8_999] {
+            assert_eq!(dense.get(row).unwrap().values, [row as f32]);
+        }
+        assert!(dense.get(9_000).is_none());
+    }
+
+    #[test]
+    fn dense_rebuilds_split_large_columns_into_bounded_slabs() {
+        let dimensions = 4_096;
+        let vector = Vector::new(vec![0.25; dimensions]).unwrap();
+        let mut rows = (0..513)
+            .map(|_| vec![Value::Vector(vector.clone())])
+            .collect::<Vec<_>>();
+        let dense = DenseVectorColumn::from_rows(0, dimensions, &mut rows);
+
+        assert_eq!(dense.chunks.len(), 2);
+        assert_eq!(dense.chunks[0].row_count, 512);
+        assert_eq!(dense.chunks[1].row_count, 1);
+        assert_eq!(dense.get(512).unwrap().values.len(), dimensions);
+    }
+
+    #[test]
+    fn table_row_capacity_matches_the_snapshot_format() {
+        assert_eq!(ensure_table_row_capacity(MAX_TABLE_ROWS, 0), Ok(()));
+        assert_eq!(
+            ensure_table_row_capacity(MAX_TABLE_ROWS, 1),
+            Err(Error::TableRowLimit {
+                found: MAX_TABLE_ROWS + 1,
+                max: MAX_TABLE_ROWS,
+            })
+        );
+        assert_eq!(
+            ensure_table_row_capacity(usize::MAX, 1),
+            Err(Error::TableRowLimit {
+                found: usize::MAX,
+                max: MAX_TABLE_ROWS,
+            })
+        );
+    }
+
+    #[test]
+    fn checkpoint_uses_the_same_replacement_guard_as_public_saves() {
+        let directory = std::env::temp_dir().join(format!(
+            "vectors-checkpoint-guard-{}-{}",
+            std::process::id(),
+            next_vector_storage_id()
+        ));
+        let database = Database::open_persistent(&directory).unwrap();
+        let replacement_guard = database.snapshot_lock.lock().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let worker_barrier = barrier.clone();
+        let worker_database = database.clone();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            worker_barrier.wait();
+            let _ = sender.send(worker_database.checkpoint());
+        });
+
+        barrier.wait();
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(replacement_guard);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("checkpoint should resume after the replacement guard is released")
+            .unwrap();
+        worker.join().unwrap();
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn parallel_vector_top_k_breaks_equal_scores_by_source_row() {
+        let dimensions = 64;
+        let database = Database::new_with_compute(ComputeConfig {
+            device: crate::ComputeDevice::Cpu,
+            ..ComputeConfig::default()
+        });
+        database
+            .execute(&format!(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY, embedding VECTOR({dimensions}))"
+            ))
+            .unwrap();
+        let vector = Vector::new(vec![1.0; dimensions]).unwrap();
+        for batch_start in (0..5_000).step_by(100) {
+            let rows = (batch_start..batch_start + 100)
+                .map(|id| vec![Value::Integer(id), Value::Vector(vector.clone())])
+                .collect();
+            database
+                .insert_rows("items", rows, InsertConflict::Fail)
+                .unwrap();
+        }
+        let query = format!(
+            "SELECT id FROM items ORDER BY squared_l2_distance(embedding, [{}]) LIMIT 20",
+            vec!["1"; dimensions].join(",")
+        );
+        for _ in 0..3 {
+            let results = database.execute(&query).unwrap();
+            let ExecutionResult::Query(result) = &results[0] else {
+                panic!("expected a query result");
+            };
+            assert_eq!(
+                result.rows,
+                (0..20)
+                    .map(|id| vec![Value::Integer(id)])
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn required_gpu_reports_when_the_feature_is_not_built() {
+        let database = Database::new_with_compute(ComputeConfig {
+            device: crate::ComputeDevice::Gpu,
+            ..ComputeConfig::default()
+        });
+        database
+            .execute("CREATE TABLE items (id INTEGER, embedding VECTOR(2))")
+            .unwrap();
+        database
+            .execute("INSERT INTO items VALUES (1, [1, 2])")
+            .unwrap();
+        assert!(matches!(
+            database
+                .execute("SELECT id FROM items ORDER BY l2_distance(embedding, [0, 0]) LIMIT 1"),
+            Err(Error::GpuUnavailable(_))
+        ));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    #[ignore = "requires a hardware GPU supported by wgpu"]
+    fn required_gpu_executes_an_exact_scan() {
+        let database = Database::new_with_compute(ComputeConfig {
+            device: crate::ComputeDevice::Gpu,
+            gpu_min_elements: 1,
+            gpu_cache_bytes: 16 * 1024 * 1024,
+        });
+        database
+            .execute(
+                "CREATE TABLE items (id INTEGER, category TEXT, embedding VECTOR(3));
+                 CREATE INDEX items_category_idx ON items (category)",
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO items VALUES
+                 (1, 'keep', [1, 0, 0]),
+                 (2, 'keep', [0, 1, 0]),
+                 (3, 'keep', NULL),
+                 (4, 'skip', [0.9, 0.1, 0])",
+            )
+            .unwrap();
+        let results = database
+            .execute(
+                "SELECT id, l2_distance(embedding, [0.9, 0.1, 0]) AS distance \
+                 FROM items WHERE category = 'keep' ORDER BY distance LIMIT 2",
+            )
+            .unwrap();
+        let ExecutionResult::Query(result) = &results[0] else {
+            panic!("expected a query result");
+        };
+        assert_eq!(result.rows[0][0], Value::Integer(1));
+        assert_eq!(result.rows[1][0], Value::Integer(2));
     }
 }

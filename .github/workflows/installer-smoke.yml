@@ -19,15 +19,25 @@ permissions:
 jobs:
   install:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
-    name: Install and start (${{ matrix.os }})
+    name: Install and start (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - name: Linux x86-64
+            os: ubuntu-22.04
+          - name: Linux ARM64
+            os: ubuntu-22.04-arm
+          - name: macOS Intel
+            os: macos-15-intel
+          - name: macOS Apple silicon
+            os: macos-15
+          - name: Windows x86-64
+            os: windows-2025
     steps:
-      - name: Linux installer and startup
-        if: runner.os == 'Linux'
+      - name: POSIX installer and startup
+        if: runner.os != 'Windows'
         shell: bash
         env:
           VECTORS_VERSION: ${{ inputs.version }}
@@ -40,12 +50,28 @@ jobs:
           set -euo pipefail
           cleanup() {
             if [[ -f "$VECTORS_STATE_DIR/server.pid" ]]; then
-              kill "$(cat "$VECTORS_STATE_DIR/server.pid")" 2>/dev/null || true
+              server_pid="$(head -n 1 "$VECTORS_STATE_DIR/server.pid")"
+              if kill -0 "$server_pid" 2>/dev/null; then
+                request="$(mktemp "$VECTORS_STATE_DIR/.shutdown-request.XXXXXX")"
+                chmod 600 "$request"
+                mv -f "$request" "$VECTORS_STATE_DIR/shutdown.request"
+                for _ in {1..40}; do
+                  kill -0 "$server_pid" 2>/dev/null || return
+                  sleep 1
+                done
+                kill "$server_pid" 2>/dev/null || true
+              fi
             fi
           }
           trap cleanup EXIT
+          if [[ -n "${VECTORS_VERSION:-}" ]]; then
+            release_tag="${VECTORS_VERSION#v}"
+            installer_path="download/v${release_tag}"
+          else
+            installer_path="latest/download"
+          fi
           curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
+            "https://github.com/kamilsj/vectors/releases/$installer_path/install.sh" \
             -o "$RUNNER_TEMP/install.sh"
           chmod +x "$RUNNER_TEMP/install.sh"
           "$RUNNER_TEMP/install.sh" --no-open
@@ -65,8 +91,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $installer = Join-Path $env:RUNNER_TEMP "install.ps1"
+          if ([string]::IsNullOrWhiteSpace($env:VECTORS_VERSION)) {
+            $installerPath = "latest/download"
+          } else {
+            $releaseTag = $env:VECTORS_VERSION
+            if (-not $releaseTag.StartsWith("v")) {
+              $releaseTag = "v$releaseTag"
+            }
+            $installerPath = "download/$releaseTag"
+          }
           Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://github.com/kamilsj/vectors/releases/latest/download/install.ps1" `
+            -Uri "https://github.com/kamilsj/vectors/releases/$installerPath/install.ps1" `
             -OutFile $installer
           try {
             & $installer -NoOpen
@@ -80,6 +115,11 @@ jobs:
             $pidFile = Join-Path $env:VECTORS_STATE_DIR "server.pid"
             if (Test-Path -LiteralPath $pidFile) {
               $serverId = Get-Content -LiteralPath $pidFile | Select-Object -First 1
-              Stop-Process -Id $serverId -Force -ErrorAction SilentlyContinue
+              $shutdownFile = Join-Path $env:VECTORS_STATE_DIR "shutdown.request"
+              [IO.File]::WriteAllBytes($shutdownFile, [byte[]]@())
+              $server = Get-Process -Id $serverId -ErrorAction SilentlyContinue
+              if ($server -and -not $server.WaitForExit(30000)) {
+                Stop-Process -Id $serverId -Force -ErrorAction SilentlyContinue
+              }
             }
           }

@@ -15,8 +15,11 @@ flowchart LR
     Planner --> TopK["VectorTopK fast path"]
     General --> Catalog["shared in-memory catalog"]
     TopK --> Index["scalar hash-index pruning"]
-    Index --> Kernels["parallel distance kernels"]
-    Kernels --> Catalog
+    Index --> Dense["dense vector column"]
+    Dense --> CPU["Rayon CPU kernels"]
+    Dense --> GPU["optional wgpu compute"]
+    CPU --> Catalog
+    GPU --> Catalog
     Catalog --> WAL["checksummed + fsynced WAL"]
     WAL --> Snapshot["versioned checkpoint"]
 ```
@@ -48,6 +51,15 @@ and never need to infer types from JSON values or `NULL`. The same inference pas
 validates arithmetic, predicates, scalar and vector functions, vector
 dimensions, and sort keys before any rows are scanned.
 
+HTTP JSON bodies, typed-ingestion row counts, and SQL response rows have
+explicit configurable bounds. The SQL endpoint passes one shared response-row
+budget into execution. Unordered scans can stop at the overflow sentinel and
+ordered top-k plans keep bounded heaps, so an oversized response is rejected
+without constructing an unbounded final result set. This is not a general
+query-memory limit: predicates, aggregates, `DISTINCT`, ordering with a large
+`OFFSET`, and grouping may retain additional working state required by SQL
+semantics. Structured vector search retains its separate 1,000-row limit.
+
 The standalone HTTP server admits database work through one process-wide
 capacity guard before scheduling it on Actix blocking workers. Capacity is held
 for the complete database operation and released by an RAII permit on success
@@ -64,20 +76,45 @@ catalog rather than copying data.
 
 - Read statements acquire a read lock and may run concurrently.
 - Write statements acquire the write lock and increment the catalog revision.
-- SQL requests containing writes execute against a private catalog copy. Typed
-  ingestion prepares either an append delta or an isolated replacement table.
-  Persistent databases synchronize one WAL record before publishing either
-  mutation. Validation and storage failures publish neither state.
+- A common single-statement persistent `INSERT` is validated into an append
+  delta while the writer lock is held. Its WAL record is synchronized before
+  applying the delta, avoiding a full catalog clone. Typed ingestion uses the
+  same boundary for append-compatible conflict policies.
+- Multi-statement write requests and mutations that replace existing rows use a
+  private staged catalog. Persistent databases synchronize one WAL record before
+  publishing either mutation form. Validation and storage failures publish
+  neither state.
 - Snapshot saves copy a coherent catalog while holding a read lock, then release
   the lock before disk I/O. A separate mutex serializes saves from cloned
   handles.
+- Durable checkpoint compaction holds a shared catalog read guard through
+  snapshot synchronization and WAL reset. Other readers continue concurrently;
+  writers wait until both files represent one coherent durable boundary.
 - Cloned handles share the bounded parse cache. Cache failure or lock poisoning
   falls back to parsing and cannot make SQL execution unavailable.
 
-The catalog currently stores rows as `Vec<Vec<Value>>`. That layout favors a
-small implementation and flexible SQL values, but is not the final layout for
-large analytical workloads. Any future columnar or slab layout must preserve
-the `Value`-level API or introduce an explicit compatibility boundary.
+Tables retain `Vec<Vec<Value>>` as the relational and public-value boundary.
+Each `VECTOR(n)` column additionally owns a dense scan representation. That
+separation keeps generic SQL simple while the hot vector loop avoids per-row
+enum matching, pointer chasing, and repeated norm calculation.
+
+An accepted append batch creates immutable vector slabs: contiguous `f32`
+elements, cached `f64` norms, and compact presence bits for nullable rows. A
+large batch is split around an 8 MiB vector-payload target. Stored row values
+become shared views into a slab rather than duplicate allocations, and existing
+slabs are not repacked during append-only ingestion.
+
+Dense lookup metadata stores one starting chunk index per 4,096-row block rather
+than one entry per row. Candidate lookup selects that sparse block and performs
+a bounded partition search across the chunks that can overlap it. This keeps
+metadata sublinear in table size while supporting streams of small append
+batches. Updates, deletes, and conflict replacements conservatively rebuild the
+affected table's dense columns, just as they rebuild scalar indexes.
+
+Snapshot loading reconstructs dense columns incrementally as rows are decoded.
+Each reconstruction batch is capped at 65,536 rows and targets at most 8 MiB of
+vector payload, avoiding a second table-sized collection of standalone vectors
+before dense storage is built.
 
 ## SQL planning
 
@@ -89,9 +126,32 @@ It has two relevant query paths:
    README.
 2. `VectorTopK` recognizes a single vector-distance sort with a `LIMIT` and a
    projection that is safe to defer. It evaluates the query vector once,
-   applies eligible scalar hash indexes, and keeps only the best candidates in
-   bounded heaps. Large candidate sets use Rayon thread-local heaps followed by
-   a deterministic merge.
+   applies eligible scalar hash indexes, and reads candidate vectors and norms
+   from the dense column. Unfiltered CPU scans walk slabs directly; fragmented
+   columns can be split across Rayon workers without a per-row chunk lookup.
+   The implementation keeps only the best candidates in bounded heaps and
+   merges worker-local heaps deterministically. Euclidean top-k ranks squared
+   distances and computes square roots only for returned score projections.
+
+With the optional `gpu` Cargo feature, a compute policy may send eligible large
+scans through wgpu. `auto` requires at least `gpu_min_elements` candidate vector
+elements, initializes a high-performance adapter lazily, and returns to the CPU
+path if no adapter is available or a device/cache limit is exceeded. `gpu`
+reports those conditions as errors. GPU scoring is currently eligible only
+when no residual predicate requires row-level expression evaluation; a filter
+fully covered by a scalar index is eligible because its candidate list is
+already exact.
+
+Dense GPU columns are cached by storage generation in an LRU bounded by
+`gpu_cache_bytes`. Upload walks the append chunks once per generation and splits
+columns into device-sized shards when one storage binding cannot address the
+whole column; any mutation gets a new generation and therefore cannot reuse
+stale device data. Candidate indexes and the query vector are uploaded per scan.
+Indexed candidate uploads and score readback use bounded windows (readback is
+capped at 32 MiB per dispatch). Scores stream directly into the CPU's bounded
+top-k heap instead of forming a request-sized score vector. “Exact” here means
+exhaustive rather than ANN; CPU and GPU floating-point accumulation need not be
+bit-identical.
 
 Index candidate planning carries an `exact` flag in addition to row positions.
 A direct indexed equality predicate is exact. `AND` and `OR` combinations are
@@ -106,14 +166,17 @@ dialect. Tests compare both paths to prevent semantic drift.
 
 ## Vector representation
 
-`Vector` owns contiguous `f32` elements and caches its L2 norm. Construction
-rejects empty vectors, excessive dimensions, and non-finite values. Binary
-operations require equal dimensions.
+`Vector` exposes contiguous `f32` elements and caches its L2 norm. Standalone
+vectors own their buffer; table vectors may be immutable views into a shared
+dense chunk. Construction rejects empty vectors, excessive dimensions, and
+non-finite values. Binary operations require equal dimensions.
 
 Distance kernels use ordinary safe Rust loops arranged for compiler
-vectorization. The crate forbids `unsafe` code. This is a deliberate baseline:
-architecture-specific kernels are welcome only with portable fallbacks,
-correctness tests, and measured improvements on more than one target.
+vectorization. The optional GPU path uses a WGSL compute shader through wgpu;
+the crate itself still forbids `unsafe` code. Accelerator selection always has
+a portable CPU fallback in `auto` mode. Architecture-specific kernels are
+welcome only with portable fallbacks, correctness tests, and measured
+improvements on more than one target.
 
 ## Scalar indexes
 
@@ -142,8 +205,9 @@ active catalog stays memory-resident so query execution does not perform random
 disk reads. Writes become sequential WAL records containing either the original
 atomic SQL request or a binary typed-ingestion batch. Record length, sequence,
 and checksum validation bound recovery and detect corruption. `sync_data` runs
-before the staged catalog is published, so a successful return means the WAL
-has been handed to the operating system for durable synchronization.
+before a validated direct append delta or staged catalog is published, so a
+successful return means the WAL has been handed to the operating system for
+durable synchronization.
 
 Recovery loads `vectors.vdb`, skips WAL records already represented by its
 durable sequence, and replays newer records through the same public mutation
@@ -157,13 +221,15 @@ writer format; the reader accepts versions 1 through 3.
 Writes go to a sibling temporary file and are installed with filesystem
 replacement only after the stream is complete. Loading applies explicit bounds
 before allocation, validates schemas and vector dimensions, checks uniqueness,
-rebuilds indexes, verifies the checksum, and rejects trailing bytes.
+rebuilds dense vector columns incrementally in bounded batches, rebuilds scalar
+indexes, verifies the checksum, and rejects trailing bytes.
 
 The WAL compacts after 64 MiB and during graceful server shutdown. Checkpointing
-currently holds the writer lock while the snapshot is synchronized. The durable
-sequence makes both crash orderings safe: recovery can use an older checkpoint
-with the full WAL, or a newer checkpoint with a not-yet-reset WAL without
-applying a transaction twice.
+holds a shared catalog read guard while the snapshot is synchronized and the WAL
+is reset. Concurrent reads and vector searches continue, while writes wait so
+the files retain one coherent durable sequence. That sequence makes both crash
+orderings safe: recovery can use an older checkpoint with the full WAL, or a
+newer checkpoint with a not-yet-reset WAL without applying a transaction twice.
 
 ## Invariants for changes
 
@@ -175,6 +241,10 @@ applying a transaction twice.
 - SQL and typed bulk insertion must share coercion, constraint, conflict,
   revision, and index-maintenance behavior.
 - Stored vectors contain only finite `f32` values of the declared dimension.
+- Dense vector row counts, chunks, norms, and presence metadata remain aligned
+  with the relational rows after every mutation and recovery.
+- A GPU cache entry is reusable only for the same dense storage generation;
+  `auto` failures fall back without changing query semantics.
 - Snapshot readers bound allocations before reading attacker-controlled sizes.
 - Snapshot versions 1 and 2 remain readable; new formats require explicit
   compatibility and corruption tests.
@@ -182,12 +252,15 @@ applying a transaction twice.
   futures.
 - HTTP database work is bounded by a process-wide admission limit and overload
   remains observable through readiness and metrics endpoints.
+- HTTP JSON, bulk-row, and response-row limits are validated against hard
+  ceilings; SQL response limits are enforced during result materialization.
 - Benchmark claims include the query, data shape, build profile, environment,
   and comparison scope.
 
 ## Extension points
 
 The next substantial boundaries are an ANN index behind the planner,
-non-blocking checkpoint rotation, prepared statements above AST validation, and
-a denser vector storage layout below `Value`. See
-[the roadmap](../ROADMAP.md) for ordering and acceptance criteria.
+non-blocking checkpoint rotation, prepared statements above AST validation,
+and bounded external-memory ingestion that does not require cloning an entire
+prospective catalog. See [the roadmap](../ROADMAP.md) for ordering and
+acceptance criteria.

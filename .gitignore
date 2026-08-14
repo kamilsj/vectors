@@ -8,3 +8,4 @@ vectors.lock
 .DS_Store
 .idea/
 .git.dropbox-backup/
+/.installer-fixture/

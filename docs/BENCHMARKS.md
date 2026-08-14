@@ -8,14 +8,23 @@ this project; it is not presented as a comparison with another database.
 
 ```sh
 cargo run --release --example benchmark_vector_search
+cargo run --release --features gpu --example benchmark_vector_search -- --compute auto
+cargo run --release --features gpu --example benchmark_vector_search -- --compute gpu
 ```
+
+The first command deliberately defaults to `cpu`, which keeps historical CPU
+regression runs comparable. `--compute auto` lets the engine choose a GPU above
+its crossover and fall back safely; `--compute gpu` requires GPU execution and
+fails if the scan, cache, adapter, or build is incompatible. The same policy can
+be supplied through `VECTORS_COMPUTE_DEVICE` when `--compute` is omitted.
 
 The benchmark:
 
 1. creates a table with relational metadata and fixed-width vectors;
 2. inserts deterministic data through SQL;
 3. builds a scalar hash index for the filter;
-4. verifies that `VectorTopK` and the general executor return the same rows;
+4. verifies that `VectorTopK` and the general executor return the same neighbor
+   primary keys, independent of tie ordering and floating-point formatting;
 5. times cached and uncached parsing of the same `VectorTopK` query;
 6. times the general executor; and
 7. saves and reloads a snapshot.
@@ -32,6 +41,9 @@ Environment variables make the data shape repeatable:
 | `VECTORS_BENCH_DIMENSIONS` | `64` | `64` | Dimensions per vector |
 | `VECTORS_BENCH_ITERATIONS` | `8` | `10` | Timed repetitions |
 | `VECTORS_BENCH_EXISTING_ROWS` | — | `20000` | Existing rows for the indexed-append case |
+| `VECTORS_COMPUTE_DEVICE` | `cpu` | — | Search policy when `--compute` is omitted: `cpu`, `auto`, or `gpu` |
+| `VECTORS_GPU_MIN_ELEMENTS` | `8388608` | — | Candidate count × dimensions before `auto` tries a GPU |
+| `VECTORS_GPU_CACHE_BYTES` | `536870912` | — | Bound for cached dense GPU columns |
 
 PowerShell example:
 
@@ -42,11 +54,50 @@ $env:VECTORS_BENCH_ITERATIONS = "20"
 cargo run --release --example benchmark_vector_search
 ```
 
+GPU example with a larger exact scan:
+
+```powershell
+$env:VECTORS_BENCH_ROWS = "1000000"
+$env:VECTORS_BENCH_DIMENSIONS = "384"
+$env:VECTORS_BENCH_ITERATIONS = "20"
+cargo run --release --features gpu --example benchmark_vector_search -- --compute gpu
+```
+
+The correctness query runs before timing, so GPU initialization and the first
+dense-column upload are warm in the reported query averages. That is a
+steady-state scan measurement, not cold-start latency. Initialization, upload,
+host readback, scalar-index filtering, and CPU top-k selection remain real costs
+at their respective boundaries; publish separate cold and warm numbers if both
+matter to the workload.
+
+## CPU and GPU comparisons
+
+The optional wgpu backend performs exhaustive scoring. It is not an ANN index
+and does not change recall intentionally. GPU arithmetic uses `f32`, while the
+CPU path may accumulate intermediate values with different precision. The
+harness therefore compares the sorted primary-key sets returned by the
+optimized and general executors rather than requiring byte-identical distance
+values or an arbitrary order among SQL ties.
+
+For a useful device comparison, run separate processes with `--compute cpu`
+and `--compute gpu` using identical rows, dimensions, filter selectivity,
+metric, iteration count, release profile, and locked dependency graph. Report
+the adapter and driver alongside the CPU, operating system, and Rust version.
+Also state whether the column was warm in the GPU cache. `auto` is appropriate
+for deployment experiments, but it is not proof that a particular query ran on
+an accelerator because fallback is part of that policy.
+
+No GPU latency or throughput number is published here yet. A result belongs in
+this document only after repeat runs on named hardware establish a crossover
+and the neighbor-ID correctness check passes.
+
 ## Reference result
 
 This result is the median of three local benchmark processes recorded on
 2026-07-21, with 20 timed iterations per process. It should not be used to claim
-a ranking against other databases.
+a ranking against other databases. It predates the dense-column and optional
+GPU work and remains a historical regression reference, not a current-device
+claim.
 
 | Item | Value |
 | --- | --- |

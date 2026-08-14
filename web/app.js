@@ -2,6 +2,7 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+const QUICK_START_STORAGE_KEY = "vectors.quickStart.dismissed.v1";
 
 const state = {
   token: sessionStorage.getItem("vectors.apiToken") || "",
@@ -65,6 +66,40 @@ function node(tag, className, text) {
 function clear(element) {
   element.replaceChildren();
   return element;
+}
+
+function setSidebarOpen(open) {
+  document.body.classList.toggle("sidebar-open", open);
+  $("#mobile-menu").setAttribute("aria-expanded", String(open));
+}
+
+function revealQuickStart() {
+  let dismissed = false;
+  try {
+    dismissed = localStorage.getItem(QUICK_START_STORAGE_KEY) === "true";
+  } catch {
+    // The guide remains available when browser storage is disabled.
+  }
+  $("#quick-start").hidden = dismissed;
+}
+
+function dismissQuickStart() {
+  $("#quick-start").hidden = true;
+  try {
+    localStorage.setItem(QUICK_START_STORAGE_KEY, "true");
+  } catch {
+    // Dismissing still works for this page even without persistent storage.
+  }
+}
+
+function openGuide(focusTarget = null) {
+  switchView("guide");
+  if (!focusTarget) return;
+  window.requestAnimationFrame(() => {
+    const target = $(focusTarget);
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
 }
 
 async function request(path, options = {}) {
@@ -223,10 +258,15 @@ function quoteIdentifier(value) {
 function switchView(view) {
   state.view = view;
   $$(".view").forEach((element) => element.classList.toggle("active", element.id === `view-${view}`));
-  $$(".nav-item").forEach((element) => element.classList.toggle("active", element.dataset.view === view));
+  $$(".nav-item").forEach((element) => {
+    const active = element.dataset.view === view;
+    element.classList.toggle("active", active);
+    if (active) element.setAttribute("aria-current", "page");
+    else element.removeAttribute("aria-current");
+  });
   const titles = { console: "SQL console", search: "Vector search", guide: "Start here" };
   $("#view-title").textContent = titles[view];
-  document.body.classList.remove("sidebar-open");
+  setSidebarOpen(false);
 }
 
 function setEditor(sql) {
@@ -540,10 +580,12 @@ function renderSearchResult(result, elapsed) {
 function bindEvents() {
   $$(".nav-item").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   $("#refresh-tables").addEventListener("click", () => loadTables());
-  $("#mobile-menu").addEventListener("click", () => document.body.classList.toggle("sidebar-open"));
+  $("#mobile-menu").addEventListener("click", () => setSidebarOpen(!document.body.classList.contains("sidebar-open")));
   $("#connection-button").addEventListener("click", () => $("#token-dialog").showModal());
   $("#open-token").addEventListener("click", () => $("#token-dialog").showModal());
-  $("#top-guide").addEventListener("click", () => switchView("guide"));
+  $("#top-guide").addEventListener("click", () => openGuide());
+  $("#quick-start-guide").addEventListener("click", () => openGuide("#tutorial-title"));
+  $("#dismiss-quick-start").addEventListener("click", dismissQuickStart);
   $("#save-token").addEventListener("click", async () => {
     state.token = $("#token-input").value.trim();
     sessionStorage.setItem("vectors.apiToken", state.token);
@@ -585,12 +627,28 @@ function bindEvents() {
     switchView("console");
     $("#sql-editor").focus();
   }));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("sidebar-open")) {
+      setSidebarOpen(false);
+      $("#mobile-menu").focus();
+      return;
+    }
+    const target = event.target;
+    const isEditing = target instanceof HTMLElement
+      && (target.matches("input, textarea, select") || target.isContentEditable);
+    if (event.key === "?" && !event.altKey && !event.ctrlKey && !event.metaKey && !isEditing && !$("dialog[open]")) {
+      event.preventDefault();
+      openGuide("#command-reference-title");
+    }
+  });
 }
 
 async function initialize() {
   bindEvents();
   $("#token-input").value = state.token;
   setEditor(examples.quickstart);
+  switchView("console");
+  revealQuickStart();
   try {
     const health = await request("/healthz");
     $("#app-version").textContent = health.version;

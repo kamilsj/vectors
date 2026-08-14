@@ -37,8 +37,14 @@ pub enum Error {
     UniqueViolation(String),
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    #[error("query returns at least {found_at_least} rows; maximum is {max}")]
+    ResultLimitExceeded { found_at_least: usize, max: usize },
+    #[error("table would contain {found} rows; maximum is {max}")]
+    TableRowLimit { found: usize, max: usize },
     #[error("database lock was poisoned")]
     LockPoisoned,
+    #[error("GPU compute is unavailable: {0}")]
+    GpuUnavailable(String),
     #[error("storage I/O error: {0}")]
     StorageIo(String),
     #[error("data directory '{0}' is already open by another process")]

@@ -3,23 +3,105 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
 
-use vectors::{Database, ExecutionResult, Value};
+use vectors::{ComputeConfig, ComputeDevice, Database, ExecutionResult, Value};
 
 const HELP: &str = "\
-Shell commands:
-  .help                 Show this help
-  .tables               List tables
-  .schema TABLE         Show a table's columns
-  .indexes TABLE        Show a table's scalar indexes
-  .checkpoint           Compact the durable WAL into a checkpoint
-  .save PATH            Save a database snapshot
-  .open PATH            Replace the current database from a snapshot
-  .read PATH            Execute SQL from a file
-  .timer on|off         Show statement execution time
-  .cancel               Discard the current multiline statement
-  .quit                 Exit the shell
+vectors shell commands
 
-Terminate SQL statements with a semicolon.";
+Learn
+  .help                 Show every shell command
+  .tutorial             Print a copy-ready SQL walkthrough
+
+Explore
+  .tables               List tables
+  .schema TABLE         Show columns, types, nullability, and uniqueness
+  .indexes TABLE        Show scalar hash indexes
+
+Store and automate
+  .checkpoint           Compact a durable database's WAL
+  .save PATH            Write a portable snapshot
+  .open PATH            Open a snapshot as an in-memory session
+  .read PATH            Execute every SQL statement in a file
+
+Session
+  .timer on|off         Measure SQL execution time
+  .cancel               Discard the pending multiline statement
+  .quit | .exit         Exit the shell
+
+SQL can span multiple lines and must end with a semicolon. Shell commands do
+not use semicolons. Quote paths containing spaces, for example:
+  .read \"my queries/quickstart.sql\"
+
+After .open, new writes are in memory. Restart with --data-dir PATH when those
+writes must be protected by the write-ahead log.";
+
+const TUTORIAL: &str = "\
+vectors quickstart: relational filters + exact vector search
+
+Paste each numbered SQL block at the vectors> prompt.
+
+1. Create a table. VECTOR(3) fixes the embedding width in the schema.
+
+   CREATE TABLE IF NOT EXISTS tutorial_documents (
+       id INTEGER PRIMARY KEY,
+       title TEXT NOT NULL,
+       category TEXT,
+       embedding VECTOR(3)
+   );
+
+2. Insert relational values and vectors together.
+
+   INSERT INTO tutorial_documents VALUES
+       (1, 'Rust ownership', 'tech', ARRAY[1.0, 0.0, 0.0]),
+       (2, 'Vector search',  'tech', ARRAY[0.9, 0.1, 0.0]),
+       (3, 'Bread recipe',   'food', ARRAY[0.0, 1.0, 0.0])
+   ON CONFLICT (id) DO UPDATE SET
+       title = excluded.title,
+       category = excluded.category,
+       embedding = excluded.embedding;
+
+3. Index the metadata used by the hybrid filter.
+
+   CREATE INDEX IF NOT EXISTS tutorial_category_idx
+   ON tutorial_documents USING HASH (category);
+
+4. Ask SQL for the nearest matching rows.
+
+   SELECT id, title,
+          cosine_distance(embedding, ARRAY[1.0, 0.0, 0.0]) AS distance
+   FROM tutorial_documents
+   WHERE category = 'tech'
+   ORDER BY distance
+   LIMIT 2;
+
+   Operator shortcuts: <=> is cosine distance, <-> is Euclidean distance,
+   and <#> is negative dot product. For example:
+
+   SELECT id, title, embedding <=> ARRAY[1.0, 0.0, 0.0] AS distance
+   FROM tutorial_documents
+   ORDER BY distance
+   LIMIT 2;
+
+5. Inspect the selected execution path.
+
+   EXPLAIN SELECT id, title,
+                  cosine_distance(embedding, ARRAY[1.0, 0.0, 0.0]) AS distance
+   FROM tutorial_documents
+   WHERE category = 'tech'
+   ORDER BY distance
+   LIMIT 2;
+
+Try next:
+  .tables
+  .schema tutorial_documents
+  .indexes tutorial_documents
+  .timer on
+
+Start with durable storage next time:
+  vectors --data-dir ./vectors-data
+
+Remove the sample when finished:
+  DROP TABLE tutorial_documents;";
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
@@ -30,7 +112,7 @@ fn main() {
         }
         [argument] if matches!(argument.as_str(), "--help" | "-h") => {
             println!(
-                "vectors {}\n\nUsage: vectors [options]\n\nStarts the interactive SQL shell.\n\nOptions:\n      --data-dir PATH   Open or create a durable database in PATH\n  -h, --help            Show this help\n  -V, --version         Show version",
+                "vectors {}\n\nUsage: vectors [options]\n\nStarts the interactive SQL shell. SQL statements end with ';'.\n\nOptions:\n      --data-dir PATH   Open or create a durable database in PATH\n  -h, --help            Show this help\n  -V, --version         Show version\n\nInside the shell:\n  .tutorial             Print a copy-ready vector-search walkthrough\n  .help                 List all shell commands\n\nExamples:\n  vectors\n  vectors --data-dir ./vectors-data",
                 env!("CARGO_PKG_VERSION")
             );
             return;
@@ -42,15 +124,19 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let compute = compute_config_from_environment().unwrap_or_else(|error| {
+        eprintln!("error: {error}");
+        std::process::exit(2);
+    });
     let database = match data_dir {
-        Some(path) => match Database::open_persistent(path) {
+        Some(path) => match Database::open_persistent_with_compute(path, compute.clone()) {
             Ok(database) => database,
             Err(error) => {
                 eprintln!("error: {error}");
                 std::process::exit(1);
             }
         },
-        None => Database::new(),
+        None => Database::new_with_compute(compute),
     };
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -85,7 +171,10 @@ fn run_shell_with_database(
         "vectors {} | {storage} SQL vector database",
         env!("CARGO_PKG_VERSION")
     )?;
-    writeln!(output, "Type .help for help. End SQL with ';'.")?;
+    writeln!(
+        output,
+        "Type .tutorial to begin, .help for commands. End SQL with ';'."
+    )?;
 
     loop {
         let prompt = if statement.trim().is_empty() {
@@ -109,7 +198,10 @@ fn run_shell_with_database(
             Ok(Some(command)) => {
                 let allowed_while_pending = matches!(
                     command,
-                    MetaCommand::Help | MetaCommand::Cancel | MetaCommand::Quit
+                    MetaCommand::Help
+                        | MetaCommand::Tutorial
+                        | MetaCommand::Cancel
+                        | MetaCommand::Quit
                 );
                 if !statement.trim().is_empty() && !allowed_while_pending {
                     writeln!(
@@ -160,6 +252,7 @@ fn run_shell_with_database(
 #[derive(Debug, PartialEq, Eq)]
 enum MetaCommand {
     Help,
+    Tutorial,
     Tables,
     Schema(String),
     Indexes(String),
@@ -200,6 +293,10 @@ fn parse_meta_command(line: &str) -> Result<Option<MetaCommand>, String> {
         ".help" => {
             no_argument()?;
             MetaCommand::Help
+        }
+        ".tutorial" => {
+            no_argument()?;
+            MetaCommand::Tutorial
         }
         ".tables" => {
             no_argument()?;
@@ -254,6 +351,7 @@ fn handle_meta_command(
 ) -> io::Result<bool> {
     match command {
         MetaCommand::Help => writeln!(output, "{HELP}")?,
+        MetaCommand::Tutorial => writeln!(output, "{TUTORIAL}")?,
         MetaCommand::Tables => match database.tables() {
             Ok(tables) if tables.is_empty() => writeln!(output, "(no tables)")?,
             Ok(tables) => {
@@ -313,13 +411,15 @@ fn handle_meta_command(
             Ok(()) => writeln!(output, "saved {path}")?,
             Err(error) => writeln!(errors, "error: {error}")?,
         },
-        MetaCommand::Open(path) => match Database::open(&path) {
-            Ok(opened) => {
-                *database = opened;
-                writeln!(output, "opened {path}")?;
+        MetaCommand::Open(path) => {
+            match Database::open_with_compute(&path, database.compute_config().clone()) {
+                Ok(opened) => {
+                    *database = opened;
+                    writeln!(output, "opened {path}")?;
+                }
+                Err(error) => writeln!(errors, "error: {error}")?,
             }
-            Err(error) => writeln!(errors, "error: {error}")?,
-        },
+        }
         MetaCommand::Read(path) => match fs::read_to_string(&path) {
             Ok(sql) => execute_sql(database, &sql, *timer_enabled, output, errors)?,
             Err(error) => writeln!(errors, "error: cannot read {path}: {error}")?,
@@ -343,6 +443,50 @@ fn handle_meta_command(
 
 fn yes_no(value: bool) -> String {
     if value { "yes" } else { "no" }.into()
+}
+
+fn compute_config_from_environment() -> io::Result<ComputeConfig> {
+    let mut config = ComputeConfig::default();
+    config.device = match env::var("VECTORS_COMPUTE_DEVICE") {
+        Ok(value) => ComputeDevice::parse(&value).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "VECTORS_COMPUTE_DEVICE must be auto, cpu, or gpu",
+            )
+        })?,
+        Err(env::VarError::NotPresent) => config.device,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "VECTORS_COMPUTE_DEVICE must be valid UTF-8",
+            ))
+        }
+    };
+    config.gpu_min_elements =
+        positive_environment_usize("VECTORS_GPU_MIN_ELEMENTS", config.gpu_min_elements)?;
+    config.gpu_cache_bytes =
+        positive_environment_usize("VECTORS_GPU_CACHE_BYTES", config.gpu_cache_bytes)?;
+    Ok(config)
+}
+
+fn positive_environment_usize(name: &str, default: usize) -> io::Result<usize> {
+    match env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{name} must be a positive integer"),
+                )
+            }),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} must be valid UTF-8"),
+        )),
+    }
 }
 
 fn execute_sql(
@@ -544,15 +688,47 @@ mod tests {
     #[test]
     fn parses_shell_commands_and_quoted_paths() {
         assert_eq!(parse_meta_command("select 1"), Ok(None));
+        assert_eq!(parse_meta_command(".help"), Ok(Some(MetaCommand::Help)));
         assert_eq!(parse_meta_command(".tables"), Ok(Some(MetaCommand::Tables)));
+        assert_eq!(
+            parse_meta_command(".TUTORIAL"),
+            Ok(Some(MetaCommand::Tutorial))
+        );
         assert_eq!(
             parse_meta_command(".save \"my database.vdb\""),
             Ok(Some(MetaCommand::Save("my database.vdb".into())))
         );
         assert_eq!(
+            parse_meta_command(".schema entries"),
+            Ok(Some(MetaCommand::Schema("entries".into())))
+        );
+        assert_eq!(
+            parse_meta_command(".indexes entries"),
+            Ok(Some(MetaCommand::Indexes("entries".into())))
+        );
+        assert_eq!(
+            parse_meta_command(".checkpoint"),
+            Ok(Some(MetaCommand::Checkpoint))
+        );
+        assert_eq!(
+            parse_meta_command(".open snapshot.vdb"),
+            Ok(Some(MetaCommand::Open("snapshot.vdb".into())))
+        );
+        assert_eq!(
+            parse_meta_command(".read setup.sql"),
+            Ok(Some(MetaCommand::Read("setup.sql".into())))
+        );
+        assert_eq!(
             parse_meta_command(".timer ON"),
             Ok(Some(MetaCommand::Timer(true)))
         );
+        assert_eq!(
+            parse_meta_command(".timer off"),
+            Ok(Some(MetaCommand::Timer(false)))
+        );
+        assert_eq!(parse_meta_command(".cancel"), Ok(Some(MetaCommand::Cancel)));
+        assert_eq!(parse_meta_command(".quit"), Ok(Some(MetaCommand::Quit)));
+        assert_eq!(parse_meta_command(".exit"), Ok(Some(MetaCommand::Quit)));
         assert!(parse_meta_command(".schema").is_err());
         assert!(parse_meta_command(".unknown").is_err());
     }
@@ -571,6 +747,7 @@ mod tests {
     fn shell_lists_metadata_and_aligns_query_results() {
         let input = Cursor::new(
             ".help\n\
+             .tutorial\n\
              CREATE TABLE entries (\n\
                  id INTEGER PRIMARY KEY,\n\
                  title TEXT\n\
@@ -593,6 +770,8 @@ mod tests {
         )));
         assert!(output.contains("     ...> "));
         assert!(output.contains(".indexes TABLE"));
+        assert!(output.contains("vectors quickstart: relational filters + exact vector search"));
+        assert!(output.contains("CREATE INDEX IF NOT EXISTS tutorial_category_idx"));
         assert!(output.contains("table  \n-------\nentries"));
         assert!(output.contains("column | type    | nullable | unique"));
         assert!(output.contains("id | title       \n---+-------------"));

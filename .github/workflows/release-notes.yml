@@ -1,0 +1,58 @@
+name: Release notes
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-notes-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changelog:
+    name: Changelog intent
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Require an Unreleased entry or explicit opt-out
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SKIP_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
+        run: |
+          set -euo pipefail
+
+          if [ "$SKIP_CHANGELOG" = "true" ]; then
+            echo "The skip-changelog label records an explicit opt-out."
+            exit 0
+          fi
+
+          extract_entries() {
+            awk '
+              /^## Unreleased[[:space:]]*$/ { unreleased = 1; next }
+              unreleased && /^## / { exit }
+              unreleased && /^### (Added|Changed|Deprecated|Removed|Fixed|Security)[[:space:]]*$/ {
+                category = $0
+                next
+              }
+              unreleased && category != "" && /^- / { print category "\t" $0 }
+            '
+          }
+
+          git show "$BASE_SHA:CHANGELOG.md" | extract_entries | sort -u > "$RUNNER_TEMP/base-release-notes"
+          extract_entries < CHANGELOG.md | sort -u > "$RUNNER_TEMP/head-release-notes"
+          new_entries=$(comm -13 "$RUNNER_TEMP/base-release-notes" "$RUNNER_TEMP/head-release-notes")
+
+          if [ -z "$new_entries" ]; then
+            echo "Add a bullet under a valid CHANGELOG.md Unreleased category." >&2
+            echo "For a change with no user-visible effect, explain why in the PR and ask a maintainer to apply skip-changelog." >&2
+            exit 1
+          fi
+
+          printf 'New release-note entries:\n%s\n' "$new_entries"

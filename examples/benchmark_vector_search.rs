@@ -1,20 +1,33 @@
 //! Small reproducible benchmark for snapshot loading and SQL vector top-k.
 //!
 //! Run with `cargo run --release --example benchmark_vector_search`.
+//! Add `--features gpu -- --compute auto` to exercise automatic GPU selection.
 
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::hint::black_box;
+use std::io;
 use std::time::{Duration, Instant};
 
-use vectors::{Database, ExecutionResult, QueryResult};
+use vectors::{ComputeConfig, ComputeDevice, Database, ExecutionResult, QueryResult, Value};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let row_count = environment_usize("VECTORS_BENCH_ROWS", 20_000);
     let dimensions = environment_usize("VECTORS_BENCH_DIMENSIONS", 64);
     let iterations = environment_usize("VECTORS_BENCH_ITERATIONS", 8);
-    let database = Database::new();
+    let mut compute = ComputeConfig::default();
+    compute.device = compute_device()?;
+    compute.gpu_min_elements =
+        environment_usize("VECTORS_GPU_MIN_ELEMENTS", compute.gpu_min_elements);
+    compute.gpu_cache_bytes = environment_usize("VECTORS_GPU_CACHE_BYTES", compute.gpu_cache_bytes);
+    println!(
+        "compute policy:           {} (GPU crossover: {} elements, cache: {:.0} MiB)",
+        compute.device,
+        compute.gpu_min_elements,
+        compute.gpu_cache_bytes as f64 / 1_048_576.0
+    );
+    let database = Database::new_with_compute(compute);
     database.execute(&format!(
         "CREATE TABLE benchmark (
             id INTEGER PRIMARY KEY,
@@ -80,25 +93,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          LIMIT 20"
     );
 
-    let optimized_rows = query(&database, &optimized)?;
-    let generic_rows = query(&database, &generic)?;
-    let mut optimized_comparison = optimized_rows.rows;
-    let mut generic_comparison = generic_rows
-        .rows
-        .into_iter()
-        .map(|mut row| {
-            row.pop();
-            row
-        })
-        .collect::<Vec<_>>();
-    // SQL does not define ordering within equal distance values. Sort the two
-    // result sets by their unique id before comparing correctness.
-    optimized_comparison.sort_by(|left, right| left[0].to_string().cmp(&right[0].to_string()));
-    generic_comparison.sort_by(|left, right| left[0].to_string().cmp(&right[0].to_string()));
+    let optimized_ids = neighbor_ids(query(&database, &optimized)?)?;
+    let generic_ids = neighbor_ids(query(&database, &generic)?)?;
+    // GPU and CPU accumulators need not produce byte-identical floating-point
+    // scores. The primary key is the stable correctness boundary, and sorting
+    // also avoids assigning meaning to SQL rows tied on distance.
     assert_eq!(
-        optimized_comparison, generic_comparison,
+        optimized_ids, generic_ids,
         "optimized and generic plans returned different neighbors"
     );
+    println!("verified neighbors:       {} ids", optimized_ids.len());
 
     let optimized_time = benchmark(iterations, || database.execute(&optimized));
     let uncached_queries = (0..iterations)
@@ -160,6 +164,58 @@ fn environment_usize(name: &str, default: usize) -> usize {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(default)
+}
+
+fn compute_device() -> Result<ComputeDevice, Box<dyn std::error::Error>> {
+    let mut requested = env::var("VECTORS_COMPUTE_DEVICE").ok();
+    let mut arguments = env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--compute" => {
+                requested = Some(arguments.next().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "--compute requires a value")
+                })?);
+            }
+            "-h" | "--help" => {
+                println!(
+                    "Usage: benchmark_vector_search [--compute cpu|auto|gpu]\n\n\
+                     VECTORS_COMPUTE_DEVICE provides the same setting when the option is omitted."
+                );
+                std::process::exit(0);
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown argument '{argument}'"),
+                )
+                .into());
+            }
+        }
+    }
+    let requested = requested.unwrap_or_else(|| "cpu".into());
+    ComputeDevice::parse(&requested).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid compute device '{requested}'; use cpu, auto, or gpu"),
+        )
+        .into()
+    })
+}
+
+fn neighbor_ids(result: QueryResult) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    let mut ids = result
+        .rows
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Integer(id)) => Ok(*id),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "benchmark query did not return an integer id",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 fn query(database: &Database, sql: &str) -> vectors::Result<QueryResult> {

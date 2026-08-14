@@ -9,7 +9,7 @@
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
+    <aside id="app-sidebar" class="sidebar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
           <span></span><span></span><span></span><span></span>
@@ -54,7 +54,7 @@
 
     <main class="workspace">
       <header class="topbar">
-        <button id="mobile-menu" class="mobile-menu" type="button" aria-label="Toggle navigation">☰</button>
+        <button id="mobile-menu" class="mobile-menu" type="button" aria-label="Toggle navigation" aria-controls="app-sidebar" aria-expanded="false">☰</button>
         <div>
           <span class="eyebrow">LOCAL WORKSPACE</span>
           <h1 id="view-title">SQL console</h1>
@@ -62,11 +62,29 @@
         <div class="topbar-actions">
           <span class="shortcut-hint"><kbd>Ctrl</kbd><kbd>Enter</kbd> to run</span>
           <button id="open-token" class="button ghost" type="button">API token</button>
-          <button id="top-guide" class="button ghost" type="button">Docs</button>
+          <button id="top-guide" class="button ghost" type="button">Help</button>
         </div>
       </header>
 
       <section id="view-console" class="view active">
+        <section id="quick-start" class="quick-start panel" aria-labelledby="quick-start-title" hidden>
+          <div class="quick-start-copy">
+            <span class="quick-start-badge"><i aria-hidden="true"></i> First query</span>
+            <h2 id="quick-start-title">Find your first neighbor in under a minute.</h2>
+            <p>A complete sample is ready. Create the table, then swap in the hybrid-search example to rank only matching rows.</p>
+            <div class="quick-start-actions">
+              <button class="button primary compact" data-load-example="quickstart" type="button">Focus sample SQL <span aria-hidden="true">→</span></button>
+              <button id="quick-start-guide" class="button ghost compact" type="button">Open tutorial</button>
+            </div>
+          </div>
+          <ol class="quick-start-steps" aria-label="Quick-start steps">
+            <li><span>01</span><div><strong>Load</strong><small>Create a typed <code>VECTOR(3)</code> table and sample rows.</small></div></li>
+            <li><span>02</span><div><strong>Run</strong><small>Press <kbd>Ctrl</kbd><kbd>Enter</kbd> and check the results.</small></div></li>
+            <li><span>03</span><div><strong>Search</strong><small>Choose “Hybrid similarity search” and run again.</small></div></li>
+          </ol>
+          <button id="dismiss-quick-start" class="quick-start-close" type="button" aria-label="Dismiss quick start" title="Dismiss quick start">×</button>
+        </section>
+
         <div class="stats-grid" aria-label="Database overview">
           <article class="stat-card accent-a">
             <span class="stat-label">Tables</span>
@@ -252,6 +270,89 @@
           <article><span class="concept-number">03</span><h3>Search hybrid</h3><p>Hash-indexed scalar predicates prune candidates before exact vector distance evaluation.</p></article>
         </div>
 
+        <section class="hands-on panel" aria-labelledby="tutorial-title">
+          <div class="hands-on-heading">
+            <div>
+              <span class="panel-kicker">GUIDED QUICKSTART</span>
+              <h2 id="tutorial-title" tabindex="-1">From empty database to ranked results</h2>
+            </div>
+            <p>Run two copy-ready examples. Every step uses the same SQL editor you already know.</p>
+          </div>
+          <ol class="tutorial-steps">
+            <li>
+              <span class="tutorial-number">01</span>
+              <h3>Model and seed</h3>
+              <p>Create <code>documents</code>, add a hash index for metadata, and insert three fixed-width embeddings.</p>
+              <button class="button ghost compact" data-load-example="quickstart" type="button">Load setup SQL <span aria-hidden="true">→</span></button>
+            </li>
+            <li>
+              <span class="tutorial-number">02</span>
+              <h3>Execute safely</h3>
+              <p>Review the SQL, then run it with <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. The batch commits together or not at all.</p>
+              <span class="tutorial-hint">Look for three completed statements</span>
+            </li>
+            <li>
+              <span class="tutorial-number">03</span>
+              <h3>Search with context</h3>
+              <p>Filter to <code>category = 'tech'</code>, calculate cosine distance, and return the nearest rows first.</p>
+              <button class="button ghost compact" data-load-example="hybrid" type="button">Load search SQL <span aria-hidden="true">→</span></button>
+            </li>
+          </ol>
+        </section>
+
+        <section class="command-reference panel" aria-labelledby="command-reference-title">
+          <div class="command-reference-heading">
+            <div>
+              <span class="panel-kicker">COMMAND REFERENCE</span>
+              <h2 id="command-reference-title" tabindex="-1">Everything close at hand</h2>
+            </div>
+            <p>Open a group when you need it. Press <kbd>?</kbd> anywhere outside an input to return here.</p>
+          </div>
+          <div class="command-groups">
+            <details class="command-group" open>
+              <summary><span>Web console</span><small>Actions and shortcuts</small></summary>
+              <div class="command-list">
+                <div><code>Ctrl / ⌘ + Enter</code><span>Run every SQL statement in the editor.</span></div>
+                <div><code>Understand query</code><span>Explain the query intent and optimized vector plan.</span></div>
+                <div><code>Clean up</code><span>Remove extra blank lines without changing the SQL.</span></div>
+                <div><code>Examples</code><span>Load setup, hybrid search, upsert, or aggregate SQL.</span></div>
+                <div><code>Tables</code><span>Inspect schemas and indexes or generate a SELECT.</span></div>
+                <div><code>Vector search</code><span>Build an exact search using guided form controls.</span></div>
+              </div>
+            </details>
+            <details class="command-group">
+              <summary><span>SQL vocabulary</span><small>Supported statements and functions</small></summary>
+              <div class="command-list">
+                <div><code>CREATE / DROP</code><span>Manage tables and scalar hash indexes.</span></div>
+                <div><code>INSERT / UPDATE / DELETE</code><span>Write rows and use <code>ON CONFLICT</code> upserts.</span></div>
+                <div><code>SELECT</code><span>Filter, group, aggregate, order, limit, and offset results.</span></div>
+                <div><code>EXPLAIN</code><span>Inspect index pruning and vector top-k planning.</span></div>
+                <div><code>cosine_distance · l2_distance · squared_l2_distance</code><span>Rank vectors by cosine or Euclidean distance.</span></div>
+                <div><code>dot_product · normalize · vector_norm · vector_dims</code><span>Transform and inspect embeddings.</span></div>
+                <div><code>&lt;=&gt; · &lt;-&gt; · &lt;#&gt;</code><span>Use operator shortcuts for cosine, L2, and negative dot product.</span></div>
+              </div>
+            </details>
+            <details class="command-group">
+              <summary><span>Terminal shell</span><small>Dot commands for <code>vectors&gt;</code></small></summary>
+              <div class="command-list shell-commands">
+                <div><code>.help</code><span>List every shell command.</span></div>
+                <div><code>.tutorial</code><span>Print the copy-ready SQL walkthrough.</span></div>
+                <div><code>.tables</code><span>List tables.</span></div>
+                <div><code>.schema TABLE</code><span>Show columns and constraints.</span></div>
+                <div><code>.indexes TABLE</code><span>Show scalar hash indexes.</span></div>
+                <div><code>.checkpoint</code><span>Compact the durable write-ahead log.</span></div>
+                <div><code>.save PATH</code><span>Write a portable snapshot.</span></div>
+                <div><code>.open PATH</code><span>Open a snapshot as an in-memory session.</span></div>
+                <div><code>.read PATH</code><span>Execute SQL from a file.</span></div>
+                <div><code>.timer on|off</code><span>Toggle execution timing.</span></div>
+                <div><code>.cancel</code><span>Discard pending multiline SQL.</span></div>
+                <div><code>.quit / .exit</code><span>Close the shell.</span></div>
+              </div>
+              <p class="command-note">Dot commands belong to the terminal shell; enter SQL in this browser console.</p>
+            </details>
+          </div>
+        </section>
+
         <section class="workflow panel">
           <div class="workflow-copy">
             <span class="panel-kicker">CORE WORKFLOW</span>
@@ -262,7 +363,7 @@
             <div><strong>01</strong><span><b>Model</b><small>CREATE TABLE with VECTOR dimensions</small></span></div>
             <div><strong>02</strong><span><b>Ingest</b><small>SQL inserts or typed bulk JSON</small></span></div>
             <div><strong>03</strong><span><b>Query</b><small>Exact hybrid search with standard SQL</small></span></div>
-            <div><strong>04</strong><span><b>Persist</b><small>Checksummed, atomic snapshots</small></span></div>
+            <div><strong>04</strong><span><b>Persist</b><small>Fsynced WAL + compact checkpoints</small></span></div>
           </div>
         </section>
       </section>

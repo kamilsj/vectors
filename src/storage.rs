@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::{
-    rebuild_indexes, validate_row, validate_unique, Catalog, Column, DataType, HashIndex, Table,
-    Value,
+    extend_vector_columns, rebuild_relational_indexes, validate_row, validate_unique, Catalog,
+    Column, DataType, HashIndex, Table, Value, MAX_TABLE_ROWS,
 };
 use crate::{Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
@@ -18,11 +18,12 @@ const FORMAT_VERSION: u32 = 3;
 const MAX_TABLES: usize = 100_000;
 const MAX_COLUMNS: usize = 100_000;
 const MAX_INDEXES: usize = 100_000;
-const MAX_ROWS: usize = 10_000_000;
 const MAX_STRING_BYTES: usize = 64 * 1024 * 1024;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const SNAPSHOT_IO_BUFFER_BYTES: usize = 1024 * 1024;
+const SNAPSHOT_VECTOR_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const SNAPSHOT_MAX_BATCH_ROWS: usize = 65_536;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn save(catalog: &Catalog, path: &Path) -> Result<()> {
@@ -125,25 +126,47 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
             indexes.insert(index_name, HashIndex::new(column));
         }
 
-        let row_count = read_count(&mut reader, "row count", MAX_ROWS)?;
-        let mut rows = Vec::with_capacity(row_count.min(4096));
+        let row_count = read_count(&mut reader, "row count", MAX_TABLE_ROWS)?;
+        let vector_bytes_per_row = columns.iter().fold(0_usize, |total, column| {
+            total.saturating_add(match &column.data_type {
+                DataType::Vector(dimensions) => dimensions.saturating_mul(size_of::<f32>()),
+                _ => 0,
+            })
+        });
+        let vector_batch_rows = SNAPSHOT_VECTOR_BATCH_BYTES
+            .checked_div(vector_bytes_per_row)
+            .unwrap_or(SNAPSHOT_MAX_BATCH_ROWS)
+            .clamp(1, SNAPSHOT_MAX_BATCH_ROWS);
+        let mut table = Table::new(
+            columns,
+            Vec::with_capacity(row_count.min(SNAPSHOT_MAX_BATCH_ROWS)),
+            indexes,
+        );
+        extend_vector_columns(&mut table, 0);
+        let mut first_unpacked_row = 0;
         for _ in 0..row_count {
-            let mut row = Vec::with_capacity(columns.len());
-            for column in &columns {
+            let mut row = Vec::with_capacity(table.columns.len());
+            for column in &table.columns {
                 row.push(read_value(
                     &mut reader,
                     &column.data_type,
                     &mut vector_bytes,
                 )?);
             }
-            validate_row(&columns, &row)
+            validate_row(&table.columns, &row)
                 .map_err(|error| corrupt(format!("invalid row in table '{name}': {error}")))?;
-            rows.push(row);
+            table.rows.push(row);
+            if table.rows.len() - first_unpacked_row == vector_batch_rows {
+                extend_vector_columns(&mut table, first_unpacked_row);
+                first_unpacked_row = table.rows.len();
+            }
         }
-        let mut table = Table::new(columns, rows, indexes);
+        if first_unpacked_row != table.rows.len() {
+            extend_vector_columns(&mut table, first_unpacked_row);
+        }
         validate_unique(&table, &[])
             .map_err(|error| corrupt(format!("invalid table '{name}': {error}")))?;
-        rebuild_indexes(&mut table);
+        rebuild_relational_indexes(&mut table);
         tables.insert(name, table);
     }
 
@@ -185,7 +208,7 @@ fn write_catalog(file: File, catalog: &Catalog) -> Result<()> {
     for (name, table) in tables {
         ensure_maximum("column count", table.columns.len(), MAX_COLUMNS)?;
         ensure_maximum("index count", table.indexes.len(), MAX_INDEXES)?;
-        ensure_maximum("row count", table.rows.len(), MAX_ROWS)?;
+        ensure_maximum("row count", table.rows.len(), MAX_TABLE_ROWS)?;
         write_string(&mut writer, name)?;
         write_count(&mut writer, table.columns.len())?;
         for column in &table.columns {

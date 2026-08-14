@@ -5,12 +5,16 @@
 //! data directory adds a synchronized write-ahead log and compact checkpoints.
 
 pub mod api;
+mod compute;
 mod durable;
 mod engine;
 mod error;
+#[cfg(feature = "gpu")]
+mod gpu;
 mod storage;
 mod vector;
 
+pub use compute::{ComputeConfig, ComputeDevice};
 pub use engine::{
     Column, DataType, Database, ExecutionResult, IndexInfo, InsertConflict, QueryColumnRole,
     QueryIntent, QueryIntentColumn, QueryResult, TableInfo, Value, VectorQueryIntent,

@@ -33,6 +33,11 @@ directly to the public internet. Only one process may own a durable data
 directory at a time; do not bypass or delete `vectors.lock` while a server is
 running.
 
+`VECTORS_SHUTDOWN_FILE` is a local control channel: creating that file requests
+a graceful server stop. Keep it at an absolute path inside a directory writable
+only by the service account. The installers place it in their private state
+directory automatically.
+
 The web console, `/healthz`, `/readyz`, and `/metrics` are intentionally public
 even when bearer authentication is enabled. Restrict these endpoints at the
 reverse proxy if catalog revision, storage mode, version, or capacity metadata

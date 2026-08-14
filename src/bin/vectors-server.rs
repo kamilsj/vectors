@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use vectors::{api, Database};
+use vectors::{api, ComputeConfig, ComputeDevice, Database};
 
 #[derive(Debug, PartialEq, Eq)]
 enum StartupAction {
@@ -18,6 +18,7 @@ enum StartupAction {
 struct StartupOptions {
     bind_override: Option<String>,
     data_dir_override: Option<PathBuf>,
+    compute_override: Option<ComputeDevice>,
 }
 
 #[actix_web::main]
@@ -30,7 +31,7 @@ async fn main() -> io::Result<()> {
         }
         StartupAction::Help => {
             println!(
-                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line options override their VECTORS_* environment equivalents.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n      --data-dir PATH   Persist writes in PATH with a WAL and checkpoints\n  -h, --help            Show this help\n  -V, --version         Show version",
+                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line options override their VECTORS_* environment equivalents.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n      --data-dir PATH   Persist writes in PATH with a WAL and checkpoints\n      --compute DEVICE  Vector scans: auto, cpu, or gpu\n  -h, --help            Show this help\n  -V, --version         Show version\n\nExamples:\n  vectors-server --data-dir ./vectors-data\n  vectors-server --data-dir ./vectors-data --port 8081\n  vectors-server --data-dir ./vectors-data --bind 0.0.0.0:9000\n  vectors-server --data-dir ./vectors-data --compute auto\n\nOpen the web tutorial at http://127.0.0.1:8080 and choose 'Start here'.\nUse VECTORS_API_TOKEN to protect /v1 endpoints; health and metrics stay public.\nInstallers can set VECTORS_SHUTDOWN_FILE to an absolute, private state-file path for graceful restarts.",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -55,11 +56,18 @@ async fn main() -> io::Result<()> {
     let api_token = env::var("VECTORS_API_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
+    let shutdown_file = non_empty_path("VECTORS_SHUTDOWN_FILE");
     let server_config = server_config_from_environment()?;
+    let compute_config = compute_config_from_environment(options.compute_override)?;
     let database = match (data_dir.as_deref(), snapshot.as_deref()) {
-        (Some(directory), _) => Database::open_persistent(directory).map_err(database_error)?,
-        (None, Some(path)) if path.exists() => Database::open(path).map_err(database_error)?,
-        (None, _) => Database::new(),
+        (Some(directory), _) => {
+            Database::open_persistent_with_compute(directory, compute_config.clone())
+                .map_err(database_error)?
+        }
+        (None, Some(path)) if path.exists() => {
+            Database::open_with_compute(path, compute_config.clone()).map_err(database_error)?
+        }
+        (None, _) => Database::new_with_compute(compute_config.clone()),
     };
     if let Some(directory) = &data_dir {
         eprintln!(
@@ -85,13 +93,38 @@ async fn main() -> io::Result<()> {
 
     eprintln!("vectors HTTP API starting on http://{bind_address}");
     eprintln!(
+        "vector compute: {} (GPU crossover: {} elements, cache limit: {} MiB)",
+        compute_config.device,
+        compute_config.gpu_min_elements,
+        compute_config.gpu_cache_bytes / (1024 * 1024)
+    );
+    eprintln!(
         "server capacity: {} workers, {} blocking thread(s) per worker, {} concurrent database task(s)",
         server_config.workers,
         server_config.max_blocking_threads_per_worker,
         server_config.max_concurrent_database_tasks
     );
-    let result = match api_token {
-        Some(token) => {
+    eprintln!(
+        "HTTP limits: {} MiB JSON, {} ingestion rows, {} response rows",
+        server_config.request_limits.max_json_payload_bytes() / (1024 * 1024),
+        server_config.request_limits.max_bulk_rows(),
+        server_config.request_limits.max_response_rows()
+    );
+    if let Some(path) = shutdown_file.as_deref() {
+        eprintln!("cooperative shutdown file enabled at {}", path.display());
+    }
+    let result = match (api_token, shutdown_file) {
+        (Some(token), Some(path)) => {
+            api::serve_authenticated_with_config_and_shutdown_file(
+                database.clone(),
+                &bind_address,
+                token,
+                server_config,
+                path,
+            )
+            .await
+        }
+        (Some(token), None) => {
             api::serve_authenticated_with_config(
                 database.clone(),
                 &bind_address,
@@ -100,7 +133,18 @@ async fn main() -> io::Result<()> {
             )
             .await
         }
-        None => api::serve_with_config(database.clone(), &bind_address, server_config).await,
+        (None, Some(path)) => {
+            api::serve_with_config_and_shutdown_file(
+                database.clone(),
+                &bind_address,
+                server_config,
+                path,
+            )
+            .await
+        }
+        (None, None) => {
+            api::serve_with_config(database.clone(), &bind_address, server_config).await
+        }
     };
     if let Some(autosave) = autosave {
         autosave.stop()?;
@@ -192,6 +236,20 @@ fn parse_arguments(arguments: &[String]) -> io::Result<StartupAction> {
                 }
                 options.data_dir_override = Some(PathBuf::from(value));
             }
+            "--compute" => {
+                if options.compute_override.is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--compute may only be supplied once",
+                    ));
+                }
+                options.compute_override = Some(ComputeDevice::parse(value).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--compute must be auto, cpu, or gpu",
+                    )
+                })?);
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -244,6 +302,48 @@ fn server_config_from_environment() -> io::Result<api::ServerConfig> {
         "VECTORS_HTTP_SHUTDOWN_TIMEOUT_SECS",
         config.shutdown_timeout.as_secs(),
     )?);
+    let max_json_payload_bytes = environment_usize(
+        "VECTORS_HTTP_MAX_JSON_BYTES",
+        config.request_limits.max_json_payload_bytes(),
+    )?;
+    let max_bulk_rows = environment_usize(
+        "VECTORS_HTTP_MAX_BULK_ROWS",
+        config.request_limits.max_bulk_rows(),
+    )?;
+    let max_response_rows = environment_usize(
+        "VECTORS_HTTP_MAX_RESPONSE_ROWS",
+        config.request_limits.max_response_rows(),
+    )?;
+    config.request_limits =
+        api::RequestLimits::new(max_json_payload_bytes, max_bulk_rows, max_response_rows)?;
+    Ok(config)
+}
+
+fn compute_config_from_environment(
+    device_override: Option<ComputeDevice>,
+) -> io::Result<ComputeConfig> {
+    let mut config = ComputeConfig::default();
+    config.device = match device_override {
+        Some(device) => device,
+        None => match env::var("VECTORS_COMPUTE_DEVICE") {
+            Ok(value) => ComputeDevice::parse(&value).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "VECTORS_COMPUTE_DEVICE must be auto, cpu, or gpu",
+                )
+            })?,
+            Err(env::VarError::NotPresent) => config.device,
+            Err(env::VarError::NotUnicode(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "VECTORS_COMPUTE_DEVICE must be valid UTF-8",
+                ))
+            }
+        },
+    };
+    config.gpu_min_elements =
+        environment_usize("VECTORS_GPU_MIN_ELEMENTS", config.gpu_min_elements)?;
+    config.gpu_cache_bytes = environment_usize("VECTORS_GPU_CACHE_BYTES", config.gpu_cache_bytes)?;
     Ok(config)
 }
 
@@ -440,6 +540,7 @@ mod tests {
             StartupAction::Run(StartupOptions {
                 bind_override: Some("127.0.0.1:8081".into()),
                 data_dir_override: Some(PathBuf::from("./data")),
+                compute_override: None,
             })
         );
         assert_eq!(
@@ -447,11 +548,21 @@ mod tests {
             StartupAction::Run(StartupOptions {
                 bind_override: Some("0.0.0.0:9000".into()),
                 data_dir_override: None,
+                compute_override: None,
+            })
+        );
+        assert_eq!(
+            parse_arguments(&["--compute".into(), "gpu".into()]).unwrap(),
+            StartupAction::Run(StartupOptions {
+                bind_override: None,
+                data_dir_override: None,
+                compute_override: Some(ComputeDevice::Gpu),
             })
         );
         assert!(parse_arguments(&["--port".into(), "0".into()]).is_err());
         assert!(parse_arguments(&["--port".into(), "busy".into()]).is_err());
         assert!(parse_arguments(&["--data-dir".into()]).is_err());
+        assert!(parse_arguments(&["--compute".into(), "maybe".into()]).is_err());
         assert_eq!(suggested_port("127.0.0.1:8080"), 8081);
         assert_eq!(suggested_port("invalid"), 8081);
     }

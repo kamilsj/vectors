@@ -182,17 +182,18 @@ async fn bulk_ingests_embeddings_and_runs_filtered_search() {
     let response: Value = test::call_and_read_body_json(&app, upsert).await;
     assert_eq!(response["results"][0]["rows_affected"], 2);
 
+    let search_body = json!({
+        "table": "documents",
+        "vector_column": "embedding",
+        "query": [1, 0, 0],
+        "metric": "cosine",
+        "select": ["id", "title"],
+        "filters": [{"column": "category", "operator": "eq", "value": "tech"}],
+        "limit": 2
+    });
     let search = test::TestRequest::post()
-        .uri("/v1/embeddings/search")
-        .set_json(json!({
-            "table": "documents",
-            "vector_column": "embedding",
-            "query": [1, 0, 0],
-            "metric": "cosine",
-            "select": ["id", "title"],
-            "filters": [{"column": "category", "operator": "eq", "value": "tech"}],
-            "limit": 2
-        }))
+        .uri("/v1/vector/search")
+        .set_json(&search_body)
         .to_request();
     let response: Value = test::call_and_read_body_json(&app, search).await;
     assert_eq!(response["type"], "query");
@@ -201,6 +202,14 @@ async fn bulk_ingests_embeddings_and_runs_filtered_search() {
     assert_eq!(response["rows"][0][0], 1);
     assert_eq!(response["rows"][0][1], "Rust revised");
     assert_eq!(response["rows"][0][2], 0.0);
+
+    let compatibility_search = test::TestRequest::post()
+        .uri("/v1/embeddings/search")
+        .set_json(&search_body)
+        .to_request();
+    let compatibility_response: Value =
+        test::call_and_read_body_json(&app, compatibility_search).await;
+    assert_eq!(compatibility_response, response);
 }
 
 #[actix_web::test]
@@ -283,12 +292,18 @@ async fn exposes_health_schema_and_index_metadata() {
     assert_eq!(response["status"], "ok");
     assert_eq!(response["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(response["storage"], "memory");
+    assert_eq!(
+        response["max_json_payload_bytes"],
+        api::RequestLimits::default().max_json_payload_bytes()
+    );
 
     let readiness = test::TestRequest::get().uri("/readyz").to_request();
     let response: Value = test::call_and_read_body_json(&app, readiness).await;
     assert_eq!(response["status"], "ready");
     assert_eq!(response["revision"], 2);
     assert_eq!(response["database_tasks_in_flight"], 0);
+    assert_eq!(response["max_bulk_rows"], 10_000);
+    assert_eq!(response["max_response_rows"], 10_000);
 
     let metrics = test::TestRequest::get().uri("/metrics").to_request();
     let response = test::call_service(&app, metrics).await;
@@ -298,6 +313,7 @@ async fn exposes_health_schema_and_index_metadata() {
     assert!(body.contains("vectors_up 1"));
     assert!(body.contains("vectors_catalog_revision 2"));
     assert!(body.contains("vectors_database_tasks_rejected_total 0"));
+    assert!(body.contains("vectors_http_max_json_payload_bytes 33554432"));
 
     let console = test::TestRequest::get().uri("/").to_request();
     let response = test::call_service(&app, console).await;
@@ -313,6 +329,15 @@ async fn exposes_health_schema_and_index_metadata() {
     assert!(body
         .windows("Understand query".len())
         .any(|window| window == b"Understand query"));
+    assert!(body
+        .windows("GUIDED QUICKSTART".len())
+        .any(|window| window == b"GUIDED QUICKSTART"));
+    assert!(body
+        .windows("COMMAND REFERENCE".len())
+        .any(|window| window == b"COMMAND REFERENCE"));
+    assert!(body
+        .windows(".tutorial".len())
+        .any(|window| window == b".tutorial"));
 
     let tables = test::TestRequest::get().uri("/v1/tables").to_request();
     let response: Value = test::call_and_read_body_json(&app, tables).await;
@@ -392,4 +417,76 @@ async fn bearer_authentication_protects_v1_but_not_health() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+#[actix_web::test]
+async fn rejects_oversized_json_with_a_structured_413_response() {
+    let limits = api::RequestLimits::new(128, 10, 10).unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(api_database()))
+            .configure(move |config| api::configure_with_limits(config, limits)),
+    )
+    .await;
+
+    let payload = json!({ "sql": "x".repeat(256) }).to_string();
+    let request = test::TestRequest::post()
+        .uri("/v1/sql")
+        .insert_header(("content-type", "application/json"))
+        .set_payload(payload)
+        .to_request();
+    let response = test::call_service(&app, request).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["error"]["code"], "payload_too_large");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("128-byte limit"));
+}
+
+#[actix_web::test]
+async fn enforces_configured_ingestion_and_sql_response_row_limits() {
+    let database = api_database();
+    database
+        .execute(
+            "INSERT INTO documents VALUES
+                (1, 'one', 'test', ARRAY[1, 0, 0]),
+                (2, 'two', 'test', ARRAY[0, 1, 0])",
+        )
+        .unwrap();
+    let limits = api::RequestLimits::new(4_096, 1, 1).unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(database))
+            .configure(move |config| api::configure_with_limits(config, limits)),
+    )
+    .await;
+
+    let ingest = test::TestRequest::post()
+        .uri("/v1/tables/documents/rows")
+        .set_json(json!({
+            "rows": [
+                {"id": 3, "title": "three", "embedding": [0, 0, 1]},
+                {"id": 4, "title": "four", "embedding": [1, 1, 0]}
+            ]
+        }))
+        .to_request();
+    let response = test::call_service(&app, ingest).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["error"]["code"], "too_many_rows");
+
+    let select = test::TestRequest::post()
+        .uri("/v1/sql")
+        .set_json(json!({ "sql": "SELECT id FROM documents ORDER BY id" }))
+        .to_request();
+    let response = test::call_service(&app, select).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["error"]["code"], "response_too_large");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("add LIMIT"));
 }

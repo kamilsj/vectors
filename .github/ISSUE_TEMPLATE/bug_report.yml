@@ -24,6 +24,7 @@ body:
         - HTTP API
         - Web console
         - Snapshot storage
+        - Installer or upgrade
         - Build or packaging
     validations:
       required: true
@@ -49,11 +50,19 @@ body:
     validations:
       required: true
   - type: input
+    id: installation
+    attributes:
+      label: Installation method
+      description: For install or startup problems, include the command or package you used.
+      placeholder: install.sh, install.ps1, release archive, or cargo install
+    validations:
+      required: false
+  - type: input
     id: environment
     attributes:
       label: Environment
       description: Operating system, Rust version, CPU architecture, and relevant server settings.
-      placeholder: Windows 11, rustc 1.xx, x86-64
+      placeholder: macOS 15 arm64, Ubuntu 22.04 x86-64, or Windows 11 x86-64
     validations:
       required: true
   - type: checkboxes

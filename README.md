@@ -18,6 +18,8 @@
 
 <p align="center">
   <a href="#try-it-in-two-minutes">Quickstart</a> ·
+  <a href="docs/INSTALL.md">Install</a> ·
+  <a href="docs/TUTORIAL.md">Tutorial</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
@@ -45,46 +47,64 @@ LIMIT 5;
 > deployments with workload testing. It is not yet a replacement for a
 > distributed or replicated production database.
 
+New to the project? The [guided tutorial](docs/TUTORIAL.md) covers installation,
+every shell command, the web console, SQL and typed API examples, persistence,
+GPU selection, production batching, and troubleshooting.
+
 ## Install and launch
 
-The installers verify the release archive checksum, install both binaries for
-the current user, add the install directory to future shell sessions, start the
-server with durable storage enabled, and open the web console when a desktop is
-available.
+The installers detect your processor, verify the release archive checksum,
+install both binaries for the current user, start a durable server, and open
+the web console when a desktop is available. Releases support Linux x86-64 and
+ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
-Linux x86-64:
+Linux or macOS:
 
 ```sh
+installer="$(mktemp)"
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh
+  https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
+  -o "$installer"
+sh "$installer"
+rm -f "$installer"
 ```
 
 Windows x86-64 PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1')))
+$installer = Join-Path $env:TEMP 'vectors-install.ps1'
+irm 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1' -OutFile $installer
+Unblock-File $installer
+& $installer
+Remove-Item $installer
 ```
 
 The console opens at [http://127.0.0.1:8080](http://127.0.0.1:8080). Pass
-`--no-start` to the Linux script or `-NoStart` to PowerShell for an install-only
-run. Both scripts support a fixed release version and custom install directory;
-save the script locally and run `./install.sh --help` or
-`Get-Help .\install.ps1 -Full` before execution if you want to inspect or
-customize it. A scheduled GitHub Actions smoke test installs the latest public
-release, starts it, and checks the health endpoint on both operating systems.
+`--no-start` to the POSIX script or `-NoStart` to PowerShell for an install-only
+run. Use `--print-target` or `-PrintTarget` to inspect architecture selection
+without downloading anything. Use `--dry-run` or PowerShell's `-WhatIf` to
+preview the complete plan. The [installation guide](docs/INSTALL.md) covers
+every option, fixed versions, upgrades, uninstalling, release verification,
+default paths, and common setup problems. Release CI installs and health-checks
+every supported OS/architecture combination.
+
+Installer-managed servers retain their bind and storage configuration across
+upgrades. Restarts use a private cooperative-shutdown request so the server can
+finish its WAL checkpoint or legacy snapshot before binaries are replaced; a
+failed start restores the prior runtime and configuration.
+
 Upgrading from 0.2 reuses the existing `vectors.vdb` as the first durable
 checkpoint and begins logging subsequent writes; no export step is required.
 
-If port 8080 is already occupied, choose another address during installation:
+If port 8080 is already occupied, replace the installer invocation above with
+one of these commands before removing the downloaded file:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/kamilsj/vectors/releases/latest/download/install.sh | \
-  sh -s -- --bind 127.0.0.1:8081
+sh "$installer" --bind 127.0.0.1:8081
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1'))) -BindAddress '127.0.0.1:8081'
+& $installer -BindAddress '127.0.0.1:8081'
 ```
 
 ## Why vectors?
@@ -100,8 +120,14 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 - **Hybrid by default.** Scalar hash indexes prune relational candidates before
   exact vector distance evaluation; predicates fully covered by an index are
   not evaluated a second time row by row.
+- **Dense scan storage.** Each vector column has append-only, contiguous `f32`
+  slabs with cached norms and compact presence metadata, so exact scans avoid
+  walking the relational `Value` representation for every candidate.
 - **Rust all the way down.** Memory-safe engine code, immutable vector values,
   cached norms, and SIMD-friendly distance loops.
+- **Optional GPU execution.** Release binaries can move sufficiently large
+  compatible exact scans to a bounded wgpu cache on Vulkan, DirectX 12, or
+  Metal; automatic mode falls back to the CPU without changing SQL semantics.
 - **Low repeat-query overhead.** Cloned handles share a bounded SQL AST cache;
   schema checks still run against the current catalog on every execution.
 - **Direct typed ingestion.** JSON and Rust values enter the shared atomic
@@ -110,10 +136,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   rows without rescanning the existing table.
 - **Indexed uniqueness.** Primary-key and `UNIQUE` checks use maintained key
   maps, making idempotent batch replay independent of existing table scans.
-- **One binary, three interfaces.** Embed the library, use the interactive
+- **One engine, three interfaces.** Embed the library, use the interactive
   shell, or run the Actix HTTP server with its built-in web console.
-- **Durable by default.** A checksummed, fsynced write-ahead log protects every
-  acknowledged write; compact binary checkpoints keep recovery bounded.
+- **Durability built in.** Start either binary with `--data-dir` to protect
+  acknowledged writes with a checksummed, fsynced write-ahead log and compact
+  binary checkpoints. The installers choose a durable data directory for you.
 - **No frontend toolchain.** The console ships inside the server with no CDN,
   Node runtime, or asset build required.
 
@@ -135,14 +162,25 @@ For safe projections, this becomes a specialized `VectorTopK` plan:
 1. scalar hash indexes prune relational candidates;
 2. fully indexed filters skip redundant row-level expression evaluation;
 3. the query vector is evaluated once rather than once per row;
-4. distance functions call the vector kernels directly, bypassing generic AST
-   evaluation;
-5. large scans are scored in parallel with thread-local bounded heaps;
+4. scoring reads contiguous vector slabs and their cached norms directly;
+5. the CPU path uses SIMD-friendly kernels and Rayon thread-local bounded
+   heaps, while eligible large scans may use the optional wgpu compute path;
 6. text, vectors, and other projected values are cloned only for final winners.
 
 Queries with additional sort keys, `DISTINCT`, or complex projections fall back
 to the general SQL executor without changing their semantics. Use `EXPLAIN` to
 see whether a statement selected `VectorTopK`.
+
+GPU execution accelerates scoring; result selection and projection remain on
+the CPU. It is considered only when `VectorTopK` has no residual predicate to
+evaluate row by row. `auto` also checks the candidate-count × dimensions
+crossover, adapter availability, device limits, and the configured cache bound.
+Any of those checks may retain the Rayon path. For scans that satisfy the GPU
+eligibility rules, `gpu` requires accelerator execution and returns a clear
+error when the adapter or limits cannot satisfy it. Queries outside the
+specialized eligibility rules continue through their normal CPU executor.
+Resident columns may be split into device-sized shards, and dispatch/readback
+is batched, so a scan is not limited to one result or storage buffer.
 
 WAL writes are sequential and typed embedding batches store vectors as compact
 binary `f32` values rather than SQL text. Checkpoint I/O uses 1 MiB sequential
@@ -154,7 +192,12 @@ Run the reproducible local benchmark:
 
 ```sh
 cargo run --release --example benchmark_vector_search
+cargo run --release --features gpu --example benchmark_vector_search -- --compute auto
 ```
+
+The benchmark defaults to `cpu` for repeatable historical comparisons. Pass
+`--compute cpu|auto|gpu`, or set `VECTORS_COMPUTE_DEVICE`; it validates the set
+of returned primary keys against the general SQL executor before timing.
 
 On the development machine, the median 20,000-row × 64-dimension filtered
 cosine query—10,000 exact candidates and a top-20 result—took 0.471 ms after
@@ -198,13 +241,15 @@ cargo run --release --bin vectors
 
 ```text
 vectors 0.6.0 | in-memory SQL vector database
-Type .help for help. End SQL with ';'.
+Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```
 
-Pass `--data-dir ./vectors-data` to make shell writes durable. The shell provides
-`.tables`, `.schema`, `.indexes`, `.checkpoint`, `.read`, `.save`, `.open`,
-`.timer`, and multiline cancellation commands.
+Enter `.tutorial` for the built-in lesson, or run
+`.read examples/quickstart.sql` from a repository checkout. Pass
+`--data-dir ./vectors-data` to make shell writes durable. The
+[tutorial's shell reference](docs/TUTORIAL.md#every-shell-command) documents
+every dot command.
 
 ### 3. Or embed the engine
 
@@ -252,6 +297,10 @@ See [`examples/hybrid_search.rs`](examples/hybrid_search.rs) for a complete
 program and [`examples/benchmark_vector_search.rs`](examples/benchmark_vector_search.rs)
 for the reproducible performance harness.
 
+For a fuller first-run path—including the web console, HTTP API, typed bulk
+ingestion, persistence, GPU configuration, and troubleshooting—continue with
+the [guided tutorial](docs/TUTORIAL.md).
+
 ## A deliberately small architecture
 
 ```mermaid
@@ -261,6 +310,9 @@ flowchart LR
     C["Web console"] --> D["Actix HTTP API"]
     D --> E["sqlparser AST + executor"]
     E --> K["VectorTopK planner"]
+    K --> M["dense vector slabs"]
+    M --> N["Rayon CPU kernels"]
+    M --> O["optional wgpu scan"]
     K --> F["RwLock catalog"]
     E --> F
     F --> G["Relational rows"]
@@ -303,6 +355,13 @@ Vector literals can be written as `ARRAY[1, 2, 3]` or `VECTOR(1, 2, 3)`.
 - `vector_norm(v)` / `norm(v)`
 - `normalize(v)` / `normalize_vector(v)`
 
+PostgreSQL-style operator shortcuts are also accepted. For nearest-neighbor
+ranking, order them as follows:
+
+- `a <=> b` — cosine distance
+- `a <-> b` — Euclidean (L2) distance
+- `a <#> b` — negative dot product
+
 ## HTTP API
 
 The server binds to `127.0.0.1:8080` by default.
@@ -320,6 +379,7 @@ The server binds to `127.0.0.1:8080` by default.
 | `GET` | `/v1/tables/{table}/indexes` | Scalar index metadata |
 | `POST` | `/v1/tables/{table}/rows` | Typed bulk ingestion and upserts |
 | `POST` | `/v1/vector/search` | Structured hybrid vector search |
+| `POST` | `/v1/embeddings/search` | Compatibility alias for `/v1/vector/search` |
 
 Run SQL:
 
@@ -385,12 +445,20 @@ curl http://127.0.0.1:8080/v1/vector/search \
   }'
 ```
 
-Requests are limited to 16 MiB, bulk ingestion to 1,000 rows per request, and
-search results to 1,000 rows. Typed ingestion performs JSON validation on a
-blocking worker and shares SQL `INSERT` constraint, conflict, revision, and
-index-maintenance semantics without reparsing generated SQL. Database handlers
-also share a process-wide capacity limit. When it is exhausted, new database
-requests receive HTTP 503 with error code `overloaded` and `Retry-After: 1`.
+JSON request bodies default to 32 MiB, typed bulk ingestion to 10,000 rows per
+request, and the combined SQL response to 10,000 query rows. All three limits
+are configurable within hard ceilings; structured vector search keeps its
+separate 1,000-row maximum. SQL execution pushes that budget into the planner,
+so oversized final output is rejected without constructing an unbounded HTTP
+response. This is an output bound rather than a general query-memory limit:
+filtering, aggregation, `DISTINCT`, ordering, and a large `OFFSET` may still
+scan or retain additional working state required by SQL semantics.
+
+Typed ingestion performs JSON validation on a blocking worker and shares SQL
+`INSERT` constraint, conflict, revision, and index-maintenance semantics without
+reparsing generated SQL. Database handlers also share a process-wide capacity
+limit. When it is exhausted, new database requests receive HTTP 503 with error
+code `overloaded` and `Retry-After: 1`.
 
 ## Server configuration
 
@@ -399,6 +467,7 @@ Select a local port directly from the command line:
 ```sh
 vectors-server --data-dir ./vectors-data --port 8081
 vectors-server --data-dir ./vectors-data --bind 0.0.0.0:9000
+vectors-server --data-dir ./vectors-data --compute auto
 ```
 
 `--port` listens on localhost. Use `--bind` when the host address also needs to
@@ -410,7 +479,8 @@ VECTORS_BIND=127.0.0.1:9000 \
 VECTORS_DATA_DIR=./vectors-data \
 VECTORS_API_TOKEN=replace-with-a-long-random-token \
 VECTORS_MAX_CONCURRENT_DATABASE_TASKS=8 \
-cargo run --release --bin vectors-server
+VECTORS_COMPUTE_DEVICE=auto \
+cargo run --release --features gpu --bin vectors-server
 ```
 
 | Variable | Meaning |
@@ -420,19 +490,42 @@ cargo run --release --bin vectors-server
 | `VECTORS_SNAPSHOT` | Legacy snapshot-only mode; mutually exclusive with `VECTORS_DATA_DIR` |
 | `VECTORS_AUTOSAVE_INTERVAL_SECS` | Legacy snapshot checkpoint interval; requires `VECTORS_SNAPSHOT` |
 | `VECTORS_API_TOKEN` | Requires `Authorization: Bearer …` on every `/v1` endpoint |
+| `VECTORS_COMPUTE_DEVICE` | Exact-vector scan policy: `auto`, `cpu`, or `gpu`; defaults to `auto`; overridden by `--compute` |
+| `VECTORS_GPU_MIN_ELEMENTS` | Candidate count × dimensions required before `auto` tries the GPU; defaults to `8388608` |
+| `VECTORS_GPU_CACHE_BYTES` | Upper bound for resident cached dense GPU columns; defaults to `536870912` (512 MiB) |
 | `VECTORS_HTTP_WORKERS` | Actix worker count; defaults to available CPU parallelism |
 | `VECTORS_HTTP_MAX_BLOCKING_THREADS_PER_WORKER` | Blocking threads per Actix worker; defaults to `1` |
 | `VECTORS_HTTP_MAX_CONNECTIONS_PER_WORKER` | Simultaneous connections per worker; defaults to `4096` |
 | `VECTORS_MAX_CONCURRENT_DATABASE_TASKS` | Process-wide database task capacity; defaults to available CPU parallelism |
+| `VECTORS_HTTP_MAX_JSON_BYTES` | Maximum buffered JSON request body; defaults to `33554432` (32 MiB), maximum `67108864` (64 MiB) |
+| `VECTORS_HTTP_MAX_BULK_ROWS` | Maximum rows in one typed bulk-ingestion request; defaults to `10000`, maximum `1000000` |
+| `VECTORS_HTTP_MAX_RESPONSE_ROWS` | Maximum combined query rows returned by one SQL request; defaults to `10000`, maximum `1000000` |
 | `VECTORS_HTTP_KEEP_ALIVE_SECS` | HTTP keep-alive timeout; defaults to `30` |
 | `VECTORS_HTTP_CLIENT_TIMEOUT_SECS` | Timeout for receiving initial request headers; defaults to `5` |
 | `VECTORS_HTTP_SHUTDOWN_TIMEOUT_SECS` | Grace period for workers during shutdown; defaults to `30` |
+| `VECTORS_SHUTDOWN_FILE` | Absolute private request-file path for cooperative graceful shutdown; managed automatically by the installers |
 
 All numeric capacity and timeout variables must be positive. Start with the
 defaults, load-test the actual dimensions, filter selectivity, and concurrency,
 then adjust database-task capacity before increasing blocking threads. The
 catalog is shared, so extra workers improve admission and concurrent reads but
-do not remove write serialization.
+do not remove write serialization. Request-limit values above their documented
+hard maxima are rejected during server startup.
+
+The upper HTTP bounds are safety ceilings, not recommended batch sizes. Every
+durable mutation must fit the WAL format's 64 MiB encoded-record cap, and a typed
+WAL batch is additionally capped at 1,000,000 rows. JSON, SQL, row, and WAL
+metadata consume part of the byte budget, so a request accepted by the HTTP
+decoder can still be too large for one durable record. Split larger imports into
+independently retryable batches with headroom below the WAL-compatible cap.
+
+The default Cargo feature set keeps the embeddable library free of a GPU
+runtime. In such builds, `auto` uses the CPU and `gpu` reports that the feature
+is unavailable when an eligible GPU scan is executed. Official release binaries
+are built with `--features gpu`; they still start normally on hosts without a
+supported adapter because `auto` falls back. Force the portable path with
+`--compute cpu` when predictable CPU placement matters more than accelerator
+selection.
 
 Use `/healthz` for process liveness, `/readyz` for readiness and current
 capacity, and `/metrics` for scraping. The console and those three operational
@@ -445,23 +538,37 @@ CPU, memory, or execution-time limit.
 ## Persistence model
 
 `Database::open_persistent` opens or creates a data directory and obtains an
-exclusive process lock. Each successful SQL write request or typed embedding
-batch is validated against a private catalog, encoded as one WAL record,
-checksummed, appended sequentially, and synchronized to storage before the new
-catalog becomes visible. Failed validation or I/O leaves the live catalog
-unchanged.
+exclusive process lock. The common append-only, single-statement durable
+`INSERT` path validates an append delta under the write lock, synchronizes its
+WAL record, and applies that delta only after the append succeeds; it does not
+clone the full catalog. Typed embedding batches use the same append-delta
+boundary when their conflict policy permits it. Multi-statement write requests
+and mutations that replace existing rows remain staged against an isolated
+catalog before one WAL commit. Failed validation or I/O leaves the live catalog
+unchanged in either path.
 
 On startup, `vectors` loads `vectors.vdb` into memory and replays newer WAL
 records. A torn final record is safely discarded; checksum errors, invalid
 sequences, and operations that cannot be replayed stop startup rather than
 silently exposing partial data. The WAL is compacted automatically after 64 MiB
 and on graceful server shutdown. `Database::checkpoint` and the shell's
-`.checkpoint` command trigger compaction explicitly.
+`.checkpoint` command trigger compaction explicitly. A checkpoint holds a shared
+catalog read guard while it writes the snapshot and resets the WAL: concurrent
+reads and searches continue, while writers wait for that coherent boundary.
 
-Vectors remain dense contiguous `f32` values on disk and in memory. Checkpoints
-use bounded decoding and 1 MiB buffered I/O, validate dimensions and finite
-values before allocation, rebuild scalar indexes, and retain compatibility with
-snapshot versions 1 and 2.
+Vectors remain dense contiguous `f32` values on disk. In memory, every vector
+column also has append-only batch slabs with one cached norm and presence bit
+per row; row-level vector values are shared views into those slabs. Appends add
+a slab without repacking older batches, while updates and deletes rebuild the
+table's vector-column generations. Checkpoints use bounded decoding and 1 MiB
+buffered I/O, validate dimensions and finite values before allocation, rebuild
+indexes and dense scan storage, and retain compatibility with snapshot versions
+1 and 2.
+
+Snapshot loading reconstructs dense vector columns incrementally instead of
+first retaining a second table-sized vector copy. Decode batches are bounded by
+an 8 MiB vector payload target and at most 65,536 rows; the in-memory dense
+layout independently splits vector slabs around an 8 MiB `f32` payload target.
 
 `Database::save` and `Database::open` remain available for portable standalone
 snapshots. Snapshot saves copy a coherent catalog and perform disk I/O without
@@ -476,7 +583,8 @@ numbers are separate and are persisted in snapshot format version 3.
 - exact search only; no approximate-nearest-neighbor index yet;
 - no joins, subqueries, window functions, or aggregate `FILTER` clauses;
 - no explicit transaction spanning multiple HTTP requests;
-- checkpoint creation currently pauses writers while the checkpoint is written;
+- checkpoint creation pauses writers while snapshot and WAL reset complete;
+  concurrent reads continue;
 - no replication;
 - no roles, per-user authorization, or built-in TLS.
 
@@ -488,14 +596,15 @@ are tracked in [ROADMAP.md](ROADMAP.md).
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo doc --no-deps
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+cargo doc --all-features --no-deps
 ```
 
-CI runs formatting, linting, documentation, tests, and release builds on Linux
-and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a large SQL
-or storage change. Design invariants live in
+CI runs formatting, linting, documentation, tests, and native release builds on
+Linux, macOS, and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md) before
+proposing a large SQL or storage change. Design invariants live in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), performance results in
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md), and security reporting guidance in
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). User-facing examples and the complete command
+reference live in [docs/TUTORIAL.md](docs/TUTORIAL.md).

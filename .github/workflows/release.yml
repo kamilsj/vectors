@@ -13,27 +13,41 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - name: Linux x86-64
+            os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: vectors-x86_64-unknown-linux-gnu.tar.gz
-          - os: windows-latest
+          - name: Linux ARM64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: vectors-aarch64-unknown-linux-gnu.tar.gz
+          - name: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: vectors-x86_64-apple-darwin.tar.gz
+          - name: macOS Apple silicon
+            os: macos-15
+            target: aarch64-apple-darwin
+            archive: vectors-aarch64-apple-darwin.tar.gz
+          - name: Windows x86-64
+            os: windows-2025
             target: x86_64-pc-windows-msvc
             archive: vectors-x86_64-pc-windows-msvc.zip
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo test --all-targets --locked --target ${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Verify Linux binaries
-        if: runner.os == 'Linux'
+      - run: cargo test --all-targets --all-features --locked --target ${{ matrix.target }}
+      - run: cargo build --release --locked --features gpu --target ${{ matrix.target }}
+      - name: Verify Unix binaries
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           target/${{ matrix.target }}/release/vectors --version
@@ -44,8 +58,8 @@ jobs:
         run: |
           & "target/${{ matrix.target }}/release/vectors.exe" --version
           & "target/${{ matrix.target }}/release/vectors-server.exe" --version
-      - name: Package Linux binaries
-        if: runner.os == 'Linux'
+      - name: Package Unix binaries
+        if: runner.os != 'Windows'
         shell: bash
         run: >-
           tar -C target/${{ matrix.target }}/release -czf ${{ matrix.archive }}
@@ -57,7 +71,7 @@ jobs:
           Compress-Archive `
             -Path "target/${{ matrix.target }}/release/vectors.exe", "target/${{ matrix.target }}/release/vectors-server.exe" `
             -DestinationPath "${{ matrix.archive }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
@@ -68,24 +82,52 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      artifact-metadata: write
+      attestations: write
       contents: write
+      id-token: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
-      - name: Verify tag and package version
+      - name: Verify tag, package version, and release notes
         shell: bash
         run: |
+          set -euo pipefail
           package_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
           test "v$package_version" = "${{ github.ref_name }}"
+          heading_prefix="## $package_version - "
+          heading_count=$(awk -v prefix="$heading_prefix" '
+            index($0, prefix) == 1 && $0 ~ /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ { count++ }
+            END { print count + 0 }
+          ' CHANGELOG.md)
+          if [ "$heading_count" -ne 1 ]; then
+            echo "CHANGELOG.md must contain exactly one dated section for $package_version" >&2
+            exit 1
+          fi
+          awk -v prefix="$heading_prefix" '
+            index($0, prefix) == 1 { capture = 1; next }
+            capture && /^## / { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          grep -Eq '^### (Added|Changed|Deprecated|Removed|Fixed|Security)$' release-notes.md
+          grep -Eq '^- ' release-notes.md
       - name: Add installers
         shell: bash
         run: cp install.sh install.ps1 dist/
       - name: Create checksums
         shell: bash
-        run: cd dist && sha256sum vectors-* > SHA256SUMS
+        run: cd dist && sha256sum vectors-* install.sh install.ps1 > SHA256SUMS
+      - name: Attest release provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            dist/vectors-*
+            dist/install.sh
+            dist/install.ps1
+            dist/SHA256SUMS
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -93,21 +135,33 @@ jobs:
           gh release create "${{ github.ref_name }}" dist/*
           --repo "${{ github.repository }}"
           --title "${{ github.ref_name }}"
+          --notes-file release-notes.md
           --generate-notes
+          --fail-on-no-commits
           --verify-tag
 
   verify-installers:
-    name: Verify installer (${{ matrix.os }})
+    name: Verify installer (${{ matrix.name }})
     needs: publish
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - name: Linux x86-64
+            os: ubuntu-22.04
+          - name: Linux ARM64
+            os: ubuntu-22.04-arm
+          - name: macOS Intel
+            os: macos-15-intel
+          - name: macOS Apple silicon
+            os: macos-15
+          - name: Windows x86-64
+            os: windows-2025
     steps:
-      - uses: actions/checkout@v7
-      - name: Verify Linux installer
-        if: runner.os == 'Linux'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify POSIX installer
+        if: runner.os != 'Windows'
         shell: bash
         env:
           VECTORS_VERSION: ${{ github.ref_name }}

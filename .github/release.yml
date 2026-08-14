@@ -1,0 +1,40 @@
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+        - semver-major
+    - title: New features
+      labels:
+        - enhancement
+        - feature
+    - title: Fixes
+      labels:
+        - bug
+        - bugfix
+        - fix
+    - title: Performance
+      labels:
+        - performance
+    - title: Installation and releases
+      labels:
+        - installer
+        - packaging
+        - release
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Maintenance
+      labels:
+        - ci
+        - maintenance
+    - title: Other changes
+      labels:
+        - "*"
