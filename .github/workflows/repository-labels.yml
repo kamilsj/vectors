@@ -1,0 +1,48 @@
+name: Repository labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/release.yml
+      - .github/workflows/release-notes.yml
+      - .github/workflows/repository-labels.yml
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  ensure-release-labels:
+    name: Ensure release-note labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create missing labels
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ensure_label() {
+            name=$1
+            color=$2
+            description=$3
+            if gh label view "$name" --repo "$GH_REPO" >/dev/null 2>&1; then
+              echo "Label already exists: $name"
+              return
+            fi
+            gh label create "$name" \
+              --repo "$GH_REPO" \
+              --color "$color" \
+              --description "$description"
+          }
+
+          ensure_label skip-changelog 6e7781 "No user-visible changelog entry is required"
+          ensure_label breaking-change b60205 "Introduces an incompatible public change"
+          ensure_label performance 5319e7 "Improves speed, memory use, or scalability"
+          ensure_label installer 0e8a16 "Changes installation or upgrade behavior"
+          ensure_label dependencies 0366d6 "Updates project dependencies"
+          ensure_label maintenance c5def5 "Repository or development maintenance"
