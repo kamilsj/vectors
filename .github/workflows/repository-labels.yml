@@ -26,11 +26,17 @@ jobs:
         run: |
           set -euo pipefail
 
+          existing_labels=$(gh label list \
+            --repo "$GH_REPO" \
+            --limit 1000 \
+            --json name \
+            --jq '.[].name')
+
           ensure_label() {
             name=$1
             color=$2
             description=$3
-            if gh label view "$name" --repo "$GH_REPO" >/dev/null 2>&1; then
+            if printf '%s\n' "$existing_labels" | grep -Fqx "$name"; then
               echo "Label already exists: $name"
               return
             fi
