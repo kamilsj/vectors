@@ -19,6 +19,8 @@ uses that section as the curated introduction to the GitHub release notes.
 - Invoke the Windows one-line installer as a script block so its PowerShell
   confirmation and preview options initialize correctly. Smoke tests now run
   the documented download commands, including Windows PowerShell 5.1.
+- Keep macOS installer smoke tests successful when their test server finishes
+  its requested graceful shutdown.
 
 ## 0.7.0 - 2026-09-17
 
