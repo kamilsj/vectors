@@ -171,6 +171,12 @@ Queries with additional sort keys, `DISTINCT`, or complex projections fall back
 to the general SQL executor without changing their semantics. Use `EXPLAIN` to
 see whether a statement selected `VectorTopK`.
 
+CPU scans split work by row count and dimensions, so one large ingestion slab
+can use multiple cores. Indexed scans use a minimum amount of vector work per
+task to limit scheduling and heap-merging overhead. Compare batch layouts and
+thread counts with `cargo run --release --locked --example benchmark_scan_layout`;
+see the [measured CPU results](docs/BENCHMARKS.md#cpu-scan-scheduling).
+
 GPU execution accelerates scoring; result selection and projection remain on
 the CPU. It is considered only when `VectorTopK` has no residual predicate to
 evaluate row by row. `auto` also checks the candidate-count × dimensions
@@ -534,6 +540,12 @@ API calls require the token. There is no built-in TLS or per-user authorization;
 keep the default localhost bind or place the server behind a TLS-enabled reverse
 proxy. The capacity guard bounds concurrent database work; it is not a per-query
 CPU, memory, or execution-time limit.
+
+Cancelling a request does not cancel database work that has already been
+scheduled. Its capacity slot remains occupied until that work finishes, and
+`vectors_database_tasks_in_flight` includes both queued and running tasks even
+after the request is cancelled. A write may still commit after the client
+disconnects; use the ingestion conflict policies for retryable writes.
 
 ## Persistence model
 

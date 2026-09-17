@@ -643,7 +643,7 @@ async fn metrics(
          # HELP vectors_catalog_revision Current committed catalog revision.\n\
          # TYPE vectors_catalog_revision gauge\n\
          vectors_catalog_revision {revision}\n\
-         # HELP vectors_database_tasks_in_flight Database tasks currently executing.\n\
+         # HELP vectors_database_tasks_in_flight Database tasks queued or executing, including cancelled requests still doing work.\n\
          # TYPE vectors_database_tasks_in_flight gauge\n\
          vectors_database_tasks_in_flight {in_flight}\n\
          # HELP vectors_database_task_limit Maximum concurrent database tasks.\n\
@@ -689,15 +689,13 @@ async fn tables(
     database: web::Data<Database>,
 ) -> Result<web::Json<TablesResponse>, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
-    let _permit = acquire_database_task(limiter.as_ref())?;
     let database = database.get_ref().clone();
-    let (revision, tables) = web::block(move || {
+    let (revision, tables) = run_database_task(limiter.as_ref(), move || {
         let revision = database.revision()?;
         let tables = database.table_info()?;
         Ok::<_, Error>((revision, tables))
     })
-    .await
-    .map_err(ApiError::from_blocking)??;
+    .await?;
     Ok(web::Json(TablesResponse {
         revision,
         tables: tables
@@ -761,13 +759,13 @@ async fn execute_sql(
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
     }
-    let _permit = acquire_database_task(limiter.as_ref())?;
     let sql = request.into_inner().sql;
     let max_response_rows = limits.max_response_rows;
     let database = database.get_ref().clone();
-    let results = web::block(move || database.execute_with_row_limit(&sql, max_response_rows))
-        .await
-        .map_err(ApiError::from_blocking)??;
+    let results = run_database_task(limiter.as_ref(), move || {
+        database.execute_with_row_limit(&sql, max_response_rows)
+    })
+    .await?;
     enforce_response_row_limit(&results, max_response_rows)?;
     Ok(web::Json(SqlResponse::from(results)))
 }
@@ -817,12 +815,9 @@ async fn query_intent(
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
     }
-    let _permit = acquire_database_task(limiter.as_ref())?;
     let sql = request.into_inner().sql;
     let database = database.get_ref().clone();
-    let intent = web::block(move || database.query_intent(&sql))
-        .await
-        .map_err(ApiError::from_blocking)??;
+    let intent = run_database_task(limiter.as_ref(), move || database.query_intent(&sql)).await?;
     Ok(web::Json(QueryIntentResponse::from(intent)))
 }
 
@@ -885,13 +880,10 @@ async fn table_schema(
     table: web::Path<String>,
 ) -> Result<web::Json<SchemaResponse>, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
-    let _permit = acquire_database_task(limiter.as_ref())?;
     let table = table.into_inner();
     let lookup = table.clone();
     let database = database.get_ref().clone();
-    let columns = web::block(move || database.schema(&lookup))
-        .await
-        .map_err(ApiError::from_blocking)??;
+    let columns = run_database_task(limiter.as_ref(), move || database.schema(&lookup)).await?;
     Ok(web::Json(SchemaResponse {
         table,
         columns: columns
@@ -926,13 +918,10 @@ async fn table_indexes(
     table: web::Path<String>,
 ) -> Result<web::Json<IndexesResponse>, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
-    let _permit = acquire_database_task(limiter.as_ref())?;
     let table = table.into_inner();
     let lookup = table.clone();
     let database = database.get_ref().clone();
-    let indexes = web::block(move || database.indexes(&lookup))
-        .await
-        .map_err(ApiError::from_blocking)??;
+    let indexes = run_database_task(limiter.as_ref(), move || database.indexes(&lookup)).await?;
     Ok(web::Json(IndexesResponse {
         table,
         indexes: indexes
@@ -1000,11 +989,9 @@ async fn insert_rows(
             ),
         ));
     }
-    let _permit = acquire_database_task(limiter.as_ref())?;
-
     let request = request.into_inner();
     let database = database.get_ref().clone();
-    let response = web::block(move || {
+    let response = run_database_task(limiter.as_ref(), move || {
         let schema = database.schema(&table)?;
         let rows = build_insert_values(&schema, &request.rows, request.normalize_vectors)?;
         let conflict = build_insert_conflict(
@@ -1021,8 +1008,7 @@ async fn insert_rows(
             }],
         })
     })
-    .await
-    .map_err(ApiError::from_blocking)??;
+    .await?;
     Ok(web::Json(response))
 }
 
@@ -1090,17 +1076,13 @@ async fn vector_search(
             format!("limit must be between 1 and {MAX_SEARCH_LIMIT}"),
         ));
     }
-    let _permit = acquire_database_task(limiter.as_ref())?;
-    let database_handle = database.get_ref().clone();
-    let table = request.table.clone();
-    let schema = web::block(move || database_handle.schema(&table))
-        .await
-        .map_err(ApiError::from_blocking)??;
-    let sql = build_search_sql(&request, &schema)?;
     let database = database.get_ref().clone();
-    let mut results = web::block(move || database.execute(&sql))
-        .await
-        .map_err(ApiError::from_blocking)??;
+    let mut results = run_database_task(limiter.as_ref(), move || {
+        let schema = database.schema(&request.table)?;
+        let sql = build_search_sql(&request, &schema)?;
+        Ok::<_, ApiError>(database.execute(&sql)?)
+    })
+    .await?;
     let result = results
         .pop()
         .ok_or_else(|| ApiError::internal("empty search execution result"))?;
@@ -1460,10 +1442,25 @@ fn authorize(request: &HttpRequest, security: Option<&ApiSecurity>) -> Result<()
     }
 }
 
-fn acquire_database_task(
+// A blocking task can outlive a cancelled request. Its closure must own the
+// permit so queued and running work retain capacity until completion or unwind.
+async fn run_database_task<F, T, E>(
     limiter: Option<&web::Data<DatabaseTaskLimiter>>,
-) -> Result<Option<DatabaseTaskPermit>, ApiError> {
-    limiter.map(|limiter| limiter.acquire()).transpose()
+    task: F,
+) -> Result<T, ApiError>
+where
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+    T: Send + 'static,
+    E: Into<ApiError> + Send + 'static,
+{
+    let permit = limiter.map(|limiter| limiter.acquire()).transpose()?;
+    web::block(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(ApiError::from_blocking)?
+    .map_err(Into::into)
 }
 
 fn constant_time_eq(left: &str, right: &str) -> bool {
@@ -1710,6 +1707,7 @@ fn json_payload_error(error: JsonPayloadError, _: &actix_web::HttpRequest) -> ac
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
 
     use super::*;
 
@@ -1762,6 +1760,174 @@ mod tests {
         assert_eq!(limiter.state.rejected.load(Ordering::Relaxed), 1);
         drop(permit);
         assert!(limiter.acquire().is_ok());
+    }
+
+    #[actix_web::test]
+    async fn cancelled_database_request_retains_capacity_until_worker_finishes() {
+        let limiter = web::Data::new(DatabaseTaskLimiter::new(1));
+        let worker_limiter = limiter.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let request = actix_web::rt::spawn(async move {
+            run_database_task(Some(&worker_limiter), move || {
+                started_tx.send(()).unwrap();
+                // Dropping the sender also releases the worker if an assertion fails.
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                Ok::<_, Error>(())
+            })
+            .await
+        });
+        web::block(move || started_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .unwrap()
+            .expect("database worker did not start");
+
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(limiter.state.in_flight.load(Ordering::Acquire), 1);
+        let error = limiter.acquire().unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error.error_response().headers().get(RETRY_AFTER).unwrap(),
+            "1"
+        );
+
+        release_tx.send(()).unwrap();
+        actix_web::rt::time::timeout(Duration::from_secs(5), async {
+            while limiter.state.in_flight.load(Ordering::Acquire) != 0 {
+                actix_web::rt::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("finished database worker did not release its capacity");
+        assert!(limiter.acquire().is_ok());
+    }
+
+    #[actix_web::test]
+    async fn database_workers_release_capacity_on_success_error_and_panic() {
+        let limiter = web::Data::new(DatabaseTaskLimiter::new(1));
+
+        let result = run_database_task(Some(&limiter), || Ok::<_, Error>(42))
+            .await
+            .unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(limiter.state.in_flight.load(Ordering::Acquire), 0);
+
+        let error = run_database_task(Some(&limiter), || {
+            Err::<(), _>(Error::TableNotFound("missing".into()))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(limiter.state.in_flight.load(Ordering::Acquire), 0);
+
+        let error = run_database_task(Some(&limiter), || -> Result<(), Error> {
+            panic!("injected database worker failure");
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(limiter.state.in_flight.load(Ordering::Acquire), 0);
+
+        let _permit = limiter.acquire().unwrap();
+        let error = run_database_task(Some(&limiter), || -> Result<(), Error> {
+            panic!("an overloaded task must never run");
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(limiter.state.in_flight.load(Ordering::Acquire), 1);
+        assert_eq!(limiter.state.rejected.load(Ordering::Relaxed), 1);
+    }
+
+    #[actix_web::test]
+    async fn all_database_routes_reject_overload_and_resume_after_capacity_is_released() {
+        use actix_web::{http::Method, test};
+        use serde_json::json;
+
+        let database = Database::new();
+        database
+            .execute("CREATE TABLE documents (id INTEGER PRIMARY KEY, embedding VECTOR(3))")
+            .unwrap();
+        let limiter = web::Data::new(DatabaseTaskLimiter::new(1));
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database))
+                .app_data(limiter.clone())
+                .configure(configure),
+        )
+        .await;
+        let search = json!({
+            "table": "documents",
+            "vector_column": "embedding",
+            "query": [1, 0, 0],
+            "limit": 1
+        });
+        let routes = [
+            (Method::GET, "/v1/tables", None),
+            (Method::GET, "/v1/tables/documents/schema", None),
+            (Method::GET, "/v1/tables/documents/indexes", None),
+            (
+                Method::POST,
+                "/v1/sql",
+                Some(json!({"sql": "SELECT id FROM documents"})),
+            ),
+            (
+                Method::POST,
+                "/v1/sql/intent",
+                Some(json!({"sql": "SELECT id FROM documents"})),
+            ),
+            (
+                Method::POST,
+                "/v1/tables/documents/rows",
+                Some(json!({"rows": [{"id": 1, "embedding": [1, 0, 0]}]})),
+            ),
+            (Method::POST, "/v1/vector/search", Some(search.clone())),
+            (Method::POST, "/v1/embeddings/search", Some(search)),
+        ];
+
+        let mut permit = Some(limiter.acquire().unwrap());
+        for overloaded in [true, false] {
+            if !overloaded {
+                drop(permit.take());
+            }
+            for (method, path, body) in &routes {
+                let mut request = test::TestRequest::default()
+                    .method(method.clone())
+                    .uri(path);
+                if let Some(body) = body {
+                    request = request.set_json(body);
+                }
+                let response = test::call_service(&app, request.to_request()).await;
+                if overloaded {
+                    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+                    assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "1");
+                    let body: JsonValue = test::read_body_json(response).await;
+                    assert_eq!(body["error"]["code"], "overloaded");
+                } else {
+                    assert_eq!(response.status(), StatusCode::OK, "{path}");
+                }
+            }
+            assert_eq!(
+                limiter.state.in_flight.load(Ordering::Acquire),
+                usize::from(overloaded)
+            );
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request())
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = test::read_body(response).await;
+            let body = std::str::from_utf8(&body).unwrap();
+            assert!(body.lines().any(|line| {
+                line == format!(
+                    "vectors_database_tasks_in_flight {}",
+                    usize::from(overloaded)
+                )
+            }));
+            assert!(body
+                .lines()
+                .any(|line| line == "vectors_database_tasks_rejected_total 8"));
+        }
     }
 
     #[test]

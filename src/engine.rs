@@ -392,7 +392,7 @@ impl DenseVectorColumn {
         self.storage_id = next_vector_storage_id();
     }
 
-    fn get(&self, row: usize) -> Option<DenseVectorRef<'_>> {
+    fn chunk_index(&self, row: usize) -> Option<usize> {
         if row >= self.row_count {
             return None;
         }
@@ -407,9 +407,12 @@ impl DenseVectorColumn {
         let local_chunk = local_chunks
             .partition_point(|chunk| chunk.first_row <= row)
             .checked_sub(1)?;
-        let chunk = &local_chunks[local_chunk];
-        let local_row = row.checked_sub(chunk.first_row)?;
-        chunk.get(local_row, self.dimensions)
+        Some(first_chunk + local_chunk)
+    }
+
+    fn get(&self, row: usize) -> Option<DenseVectorRef<'_>> {
+        let chunk = &self.chunks[self.chunk_index(row)?];
+        chunk.get(row.checked_sub(chunk.first_row)?, self.dimensions)
     }
 }
 
@@ -3316,6 +3319,7 @@ fn build_projection(items: &[SelectItem], columns: &[Column]) -> Result<Vec<Proj
 }
 
 const PARALLEL_VECTOR_SCAN_MIN_ELEMENTS: usize = 256 * 1024;
+const MIN_VECTOR_SCAN_TASK_ELEMENTS: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FastVectorMetric {
@@ -4072,29 +4076,31 @@ fn parallel_fast_vector_heap<I>(
     plan: &FastVectorTopKPlan,
 ) -> Result<BinaryHeap<FastVectorCandidate>>
 where
-    I: ParallelIterator<Item = usize>,
+    I: IndexedParallelIterator<Item = usize>,
 {
-    rows.try_fold(BinaryHeap::new, |mut heap, row_index| {
-        if let Some(candidate) = plan.score_row(table, row_index, selection)? {
-            push_fast_vector_candidate(&mut heap, candidate, plan.capacity);
-        }
-        Ok(heap)
-    })
-    .try_reduce(BinaryHeap::new, |mut left, right| {
-        for candidate in right {
-            push_fast_vector_candidate(&mut left, candidate, plan.capacity);
-        }
-        Ok(left)
-    })
+    rows.with_min_len(MIN_VECTOR_SCAN_TASK_ELEMENTS.div_ceil(plan.query.dimensions()))
+        .try_fold(BinaryHeap::new, |mut heap, row_index| {
+            if let Some(candidate) = plan.score_row(table, row_index, selection)? {
+                push_fast_vector_candidate(&mut heap, candidate, plan.capacity);
+            }
+            Ok(heap)
+        })
+        .try_reduce(BinaryHeap::new, |mut left, right| {
+            for candidate in right {
+                push_fast_vector_candidate(&mut left, candidate, plan.capacity);
+            }
+            Ok(left)
+        })
 }
 
 fn score_dense_chunk(
     heap: &mut BinaryHeap<FastVectorCandidate>,
     table: &Table,
     chunk: &DenseVectorChunk,
+    local_rows: std::ops::Range<usize>,
     plan: &FastVectorTopKPlan,
 ) -> Result<()> {
-    for local_row in 0..chunk.row_count {
+    for local_row in local_rows {
         let row_index = chunk.first_row + local_row;
         let candidate = plan.score_dense_candidate(
             table,
@@ -4113,7 +4119,7 @@ fn sequential_dense_vector_heap(
 ) -> Result<BinaryHeap<FastVectorCandidate>> {
     let mut heap = BinaryHeap::new();
     for chunk in &dense.chunks {
-        score_dense_chunk(&mut heap, table, chunk, plan)?;
+        score_dense_chunk(&mut heap, table, chunk, 0..chunk.row_count, plan)?;
     }
     Ok(heap)
 }
@@ -4123,11 +4129,33 @@ fn parallel_dense_vector_heap(
     table: &Table,
     plan: &FastVectorTopKPlan,
 ) -> Result<BinaryHeap<FastVectorCandidate>> {
-    dense
-        .chunks
-        .par_iter()
-        .try_fold(BinaryHeap::new, |mut heap, chunk| {
-            score_dense_chunk(&mut heap, table, chunk, plan)?;
+    // Partition by vector work, not ingestion slabs: a large slab can use all
+    // workers, and many tiny appends do not each allocate their own top-k heap.
+    // Keep at least 256 KiB of vector data per task to amortize scheduling and
+    // heap merging, with up to four tasks per worker for load balancing.
+    let rows_per_task = MIN_VECTOR_SCAN_TASK_ELEMENTS
+        .div_ceil(dense.dimensions)
+        .max(
+            dense
+                .row_count
+                .div_ceil(rayon::current_num_threads().saturating_mul(4)),
+        );
+    (0..dense.row_count)
+        .into_par_iter()
+        .step_by(rows_per_task)
+        .try_fold(BinaryHeap::new, |mut heap, first_row| {
+            let end_row = first_row.saturating_add(rows_per_task).min(dense.row_count);
+            let first_chunk = dense.chunk_index(first_row).ok_or_else(|| {
+                Error::InvalidQuery("dense vector storage is missing a scan row".into())
+            })?;
+            for chunk in &dense.chunks[first_chunk..] {
+                let local_start = first_row.saturating_sub(chunk.first_row);
+                let local_end = (end_row - chunk.first_row).min(chunk.row_count);
+                score_dense_chunk(&mut heap, table, chunk, local_start..local_end, plan)?;
+                if chunk.first_row + chunk.row_count >= end_row {
+                    break;
+                }
+            }
             Ok(heap)
         })
         .try_reduce(BinaryHeap::new, |mut left, right| {
@@ -4187,10 +4215,11 @@ fn run_fast_vector_top_k(
     };
     let parallel = source_count.saturating_mul(plan.query.dimensions())
         >= PARALLEL_VECTOR_SCAN_MIN_ELEMENTS
-        && source_count > 1;
+        && source_count > 1
+        && rayon::current_num_threads() > 1;
     let mut heap = if let Some(heap) = gpu_heap {
         heap
-    } else if selection.is_none() && indexed_rows.is_none() && parallel && dense.chunks.len() > 1 {
+    } else if selection.is_none() && indexed_rows.is_none() && parallel {
         parallel_dense_vector_heap(dense, table, &plan)?
     } else if selection.is_none() && indexed_rows.is_none() && !parallel {
         sequential_dense_vector_heap(dense, table, &plan)?
@@ -6002,6 +6031,125 @@ mod tests {
                     .map(|id| vec![Value::Integer(id)])
                     .collect::<Vec<_>>()
             );
+        }
+    }
+
+    #[test]
+    fn tiled_dense_scans_match_general_sql_across_layouts_and_thread_counts() {
+        let dimensions = 131;
+        let row_count = 4_099;
+        let query_vector = vec!["0.5"; dimensions].join(",");
+        for batch_rows in [row_count, 127] {
+            let database = Database::new_with_compute(ComputeConfig {
+                device: crate::ComputeDevice::Cpu,
+                ..ComputeConfig::default()
+            });
+            database
+                .execute(&format!(
+                    "CREATE TABLE points (id INTEGER PRIMARY KEY, category INTEGER, embedding VECTOR({dimensions}));
+                     CREATE INDEX points_category ON points (category)"
+                ))
+                .unwrap();
+            for first in (0..row_count).step_by(batch_rows) {
+                let rows = (first..(first + batch_rows).min(row_count))
+                    .map(|id| {
+                        let vector = if id % 31 == 0 {
+                            Value::Null
+                        } else {
+                            Value::Vector(
+                                Vector::new(
+                                    (0..dimensions)
+                                        .map(|dim| ((id % 71 + dim * 13) % 97) as f32 / 97.0)
+                                        .collect(),
+                                )
+                                .unwrap(),
+                            )
+                        };
+                        vec![
+                            Value::Integer(id as i64),
+                            Value::Integer((id % 2) as i64),
+                            vector,
+                        ]
+                    })
+                    .collect();
+                database
+                    .insert_rows("points", rows, InsertConflict::Fail)
+                    .unwrap();
+            }
+            for threads in [1, 4] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    for metric in [
+                        "cosine_distance",
+                        "squared_l2_distance",
+                        "l2_distance",
+                        "dot_product",
+                    ] {
+                        for order in ["ASC NULLS LAST", "DESC NULLS FIRST"] {
+                            for predicate in [
+                                "",
+                                "WHERE category = 0",
+                                "WHERE category = 0 AND id > 20",
+                            ] {
+                                let score = format!("{metric}(embedding, [{query_vector}])");
+                                let tail = format!(
+                                    "FROM points {predicate} ORDER BY score {order} LIMIT 23 OFFSET 7"
+                                );
+                                let optimized = format!("SELECT id, {score} AS score {tail}");
+                                // The general executor leaves SQL ties unspecified;
+                                // request source order explicitly for the oracle.
+                                let generic = format!(
+                                    "SELECT id, {score} AS score, id + 0 FROM points {predicate} \
+                                     ORDER BY score {order}, id ASC LIMIT 23 OFFSET 7"
+                                );
+                                let ExecutionResult::Query(actual) =
+                                    database.execute(&optimized).unwrap().remove(0)
+                                else {
+                                    panic!("expected optimized query rows");
+                                };
+                                let ExecutionResult::Query(mut expected) =
+                                    database.execute(&generic).unwrap().remove(0)
+                                else {
+                                    panic!("expected generic query rows");
+                                };
+                                for row in &mut expected.rows {
+                                    row.pop();
+                                }
+                                assert_eq!(
+                                    actual.rows, expected.rows,
+                                    "{batch_rows} rows/batch, {threads} threads, {metric}, {order}, {predicate}"
+                                );
+                                let candidates = if predicate.is_empty() {
+                                    row_count
+                                } else {
+                                    row_count.div_ceil(2)
+                                };
+                                assert_eq!(actual.rows_examined, candidates);
+                            }
+                        }
+                    }
+                });
+            }
+            // Even a later task outside the winning top-k must report math errors.
+            database
+                .execute(&format!(
+                    "UPDATE points SET embedding = [{}] WHERE id = {}",
+                    vec!["0"; dimensions].join(","),
+                    row_count - 1
+                ))
+                .unwrap();
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                assert_eq!(database.execute(&format!(
+                    "SELECT id FROM points ORDER BY cosine_distance(embedding, [{query_vector}]) LIMIT 1"
+                )), Err(Error::ZeroNorm));
+            });
         }
     }
 

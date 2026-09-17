@@ -113,6 +113,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           cargo run --release --locked --features gpu --example benchmark_vector_search -- --compute cpu
+          cargo run --release --locked --example benchmark_scan_layout
           cargo run --release --locked --example benchmark_ingestion
           cargo run --release --locked --example benchmark_storage
         env:

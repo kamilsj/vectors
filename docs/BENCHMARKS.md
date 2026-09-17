@@ -91,6 +91,59 @@ No GPU latency or throughput number is published here yet. A result belongs in
 this document only after repeat runs on named hardware establish a crossover
 and the neighbor-ID correctness check passes.
 
+## CPU scan scheduling
+
+The scan-layout harness isolates exact CPU search from SQL ingestion and
+snapshot I/O. It generates deterministic vectors through typed batches and
+checks every result, including scores, against the general SQL executor before
+timing. It tests cosine distance, squared L2, and dot product, both unfiltered
+and with a hash-indexed 50% filter. Every query returns 20 rows after an offset
+of 3. General-executor ties are explicitly ordered by source ID.
+
+```sh
+cargo build --release --locked --example benchmark_scan_layout
+RAYON_NUM_THREADS=16 VECTORS_BENCH_ROWS=32768 \
+  VECTORS_BENCH_DIMENSIONS=384 VECTORS_BENCH_BATCH_ROWS=32768 \
+  VECTORS_BENCH_ITERATIONS=80 target/release/examples/benchmark_scan_layout
+```
+
+`VECTORS_BENCH_BATCH_ROWS` defaults to the entire row count; change it to `500`
+to exercise fragmented append slabs. Other defaults are 32,768 rows, 384
+dimensions, and 60 timed iterations. Change `RAYON_NUM_THREADS` in separate
+processes to measure scaling. The output includes per-process p50, p95, and
+mean latency after five warm-up queries; initialization and ingestion are
+excluded. This harness forces CPU execution, even in a GPU-enabled build.
+
+On 2026-09-17, balanced scan ranges and dimension-aware task granularity were
+compared with the scan engine at `9238cc8` on an Apple M4 Max (16 CPU cores,
+48 GiB memory), macOS 27.0 (26A428), Rust 1.97.1, default release profile, no
+custom target-CPU flags, and locked dependencies. Each configuration ran in
+three processes with 80 timed queries per metric/filter, alternating baseline
+and updated binaries. The following cosine latencies are the median of the
+three process p50 values; all metrics and process results are retained in the
+[raw CSV](benchmarks/cpu-scan-layout-2026-09-17.csv).
+
+| Rows × dimensions | Ingest batch | Threads | Filter | Before | After | Speedup |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| 32,768 × 64 | 32,768 | 16 | none | 0.628 ms | 0.212 ms | 2.97× |
+| 32,768 × 64 | 32,768 | 16 | 50% | 0.493 ms | 0.233 ms | 2.12× |
+| 32,768 × 384 | 32,768 | 16 | none | 0.618 ms | 0.493 ms | 1.25× |
+| 32,768 × 384 | 32,768 | 16 | 50% | 0.651 ms | 0.440 ms | 1.48× |
+| 8,192 × 1,536 | 8,192 | 16 | none | 0.719 ms | 0.616 ms | 1.17× |
+| 8,192 × 1,536 | 8,192 | 16 | 50% | 0.650 ms | 0.494 ms | 1.32× |
+| 32,768 × 384 | 500 | 16 | none | 0.468 ms | 0.480 ms | 0.97× |
+| 32,768 × 384 | 500 | 16 | 50% | 0.649 ms | 0.439 ms | 1.48× |
+| 32,768 × 384 | 32,768 | 1 | none | 2.931 ms | 2.841 ms | 1.03× |
+| 32,768 × 384 | 32,768 | 1 | 50% | 2.515 ms | 2.346 ms | 1.07× |
+
+The largest gain removes repeated slab lookups and excessive small tasks for
+a single-slab scan. Larger slabs can also use more cores instead of assigning
+one worker per slab. Indexed scans benefit from fewer small heaps and merges.
+Already-fragmented full scans were mixed: cosine and dot product regressed by
+2.6% and 3.9%, while squared L2 improved by 5.8%. These local measurements do
+not establish a universal improvement, GPU crossover, or cross-database ranking.
+Repeat the harness on the intended hardware and workload before tuning threads.
+
 ## Reference result
 
 This result is the median of three local benchmark processes recorded on

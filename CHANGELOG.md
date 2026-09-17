@@ -12,6 +12,9 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- A CPU scan-layout benchmark with deterministic typed ingestion, exact-result
+  checks, latency percentiles, and controls for dimensions, batch size, and
+  Rayon thread count.
 - Optional wgpu exact-scan acceleration behind the `gpu` Cargo feature, with
   Vulkan, DirectX 12, and Metal backends, lazy adapter initialization, and a
   bounded generation-aware dense-column cache.
@@ -37,6 +40,10 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Changed
 
+- Exact CPU searches distribute full scans across balanced row ranges, allowing
+  large ingestion slabs to use multiple cores. Indexed and residual-filter
+  scans amortize scheduling and heap merging across dimension-aware batches;
+  single-thread pools use the sequential path.
 - Vector columns now maintain append-only contiguous `f32` slabs with cached
   norms, compact null-presence metadata, and shared row views. Exact top-k scans
   read this dense layout without traversing relational values for each
@@ -83,6 +90,12 @@ uses that section as the curated introduction to the GitHub release notes.
 - Pull requests must record release-note intent, and tagged releases validate
   and publish the matching curated changelog section alongside categorized
   GitHub-generated details.
+
+### Fixed
+
+- Cancelled HTTP requests retain their database capacity slots until queued or
+  running work finishes, preventing disconnects and request timeouts from
+  bypassing overload protection or undercounting in-flight database work.
 
 ## 0.6.0 - 2026-07-24
 

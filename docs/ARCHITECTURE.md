@@ -62,9 +62,13 @@ semantics. Structured vector search retains its separate 1,000-row limit.
 
 The standalone HTTP server admits database work through one process-wide
 capacity guard before scheduling it on Actix blocking workers. Capacity is held
-for the complete database operation and released by an RAII permit on success
-or failure. Saturated requests fail immediately with HTTP 503 and a retry hint,
-rather than accumulating an unbounded work queue. Worker, connection, blocking
+for queued and running work by an RAII permit owned by the blocking closure,
+and released on completion or panic. Cancelling the HTTP handler does not
+release capacity while its database work continues, and the in-flight metric
+still counts that work. All database routes use the same dispatch helper;
+structured search keeps schema lookup, SQL construction, and execution inside
+one admitted task. Saturated requests fail immediately with HTTP 503 and a retry
+hint, rather than accumulating an unbounded work queue. Worker, connection, blocking
 thread, capacity, keep-alive, client-header-timeout, and graceful-shutdown
 settings are explicit. `/healthz`, `/readyz`, and `/metrics` remain outside the
 database admission path so an overloaded process is still observable.
@@ -127,11 +131,19 @@ It has two relevant query paths:
 2. `VectorTopK` recognizes a single vector-distance sort with a `LIMIT` and a
    projection that is safe to defer. It evaluates the query vector once,
    applies eligible scalar hash indexes, and reads candidate vectors and norms
-   from the dense column. Unfiltered CPU scans walk slabs directly; fragmented
-   columns can be split across Rayon workers without a per-row chunk lookup.
+   from the dense column. Unfiltered CPU scans split rows into balanced ranges
+   independently of ingestion slab boundaries. Each task resolves its first
+   slab once and walks subsequent slabs directly without a per-row lookup.
    The implementation keeps only the best candidates in bounded heaps and
    merges worker-local heaps deterministically. Euclidean top-k ranks squared
    distances and computes square roots only for returned score projections.
+
+Parallel CPU scans start at 262,144 candidate vector elements. Full scans target
+up to four tasks per Rayon worker, with at least 65,536 vector elements per task
+(except the final partial task). Indexed and residual-filter scans use the same
+minimum grain to amortize scheduling and heap merging. A one-thread Rayon pool
+uses the sequential path. The grain size is an execution detail, not a change to
+filtering, score arithmetic, null ordering, or deterministic source-row ties.
 
 With the optional `gpu` Cargo feature, a compute policy may send eligible large
 scans through wgpu. `auto` requires at least `gpu_min_elements` candidate vector

@@ -33,6 +33,11 @@ and presence metadata, plus optional exact wgpu scans with bounded device
 caching and CPU fallback. These are scan-engine improvements; they do not remove
 the requirement that the active catalog fit in host memory.
 
+CPU scan scheduling now divides work independently of ingestion slab boundaries
+and uses dimension-aware task sizes. A correctness-checked layout/thread
+benchmark and Apple M4 Max measurements are recorded in `docs/BENCHMARKS.md`;
+broader CPU and GPU measurements remain necessary before changing device policy.
+
 ## Next: scale the working set
 
 - Add an approximate-nearest-neighbor index, beginning with HNSW, while keeping
