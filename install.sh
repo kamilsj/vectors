@@ -68,7 +68,7 @@ Install vectors for Linux or macOS.
 Usage: install.sh [options]
 
 Options:
-  --version TAG       Install a release tag such as v0.6.0
+  --version TAG       Install a release tag such as v0.7.0
   --install-dir PATH  Install binaries here (default: ~/.local/bin)
   --bind ADDRESS      Server address (default: 127.0.0.1:8080)
   --restart           Gracefully restart a managed server after an upgrade
@@ -376,7 +376,7 @@ fi
 if [ -n "$version" ]; then
     case "$version" in v*) ;; *) version="v$version" ;; esac
     case "$version" in *[!A-Za-z0-9._-]*) die "invalid release tag '$version'" ;; esac
-    case "$version" in v[0-9]*) ;; *) die "release tags must start with a numeric version, for example v0.6.0" ;; esac
+    case "$version" in v[0-9]*) ;; *) die "release tags must start with a numeric version, for example v0.7.0" ;; esac
 fi
 
 host_os=$(uname -s 2>/dev/null) || die "could not detect the operating system"

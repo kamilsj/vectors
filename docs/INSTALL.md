@@ -23,17 +23,13 @@ distributions; users of older distributions or musl-based systems should
 
 ## Linux and macOS
 
-Download the installer to a temporary file so you can inspect it before it
-runs:
+Install and launch with one command:
 
 ```sh
-installer="$(mktemp "${TMPDIR:-/tmp}/vectors-install.XXXXXX")"
-curl --proto '=https' --tlsv1.2 -fL \
-  https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
-  -o "$installer"
-less "$installer"                    # optional review; press q to close
-sh "$installer"
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh
 ```
+
+Installer download: [install.sh](https://github.com/kamilsj/vectors/releases/latest/download/install.sh).
 
 The script needs `curl`, `tar`, and either `sha256sum` or `shasum`. These are
 already present on macOS and most Linux distributions. It recognizes Intel and
@@ -42,49 +38,77 @@ ARM64 processors and selects the matching archive.
 For an install-only run that does not start a server or open a browser:
 
 ```sh
-sh "$installer" --no-start --no-open
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh -s -- --no-start --no-open
 ```
 
-Remove the temporary installer when you are finished:
+Append options after `sh -s --`. For example, use a different port:
 
 ```sh
-rm -f "$installer"
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh -s -- --bind 127.0.0.1:8081
 ```
 
 ## Windows
 
-Run the following in a 64-bit PowerShell session. The temporary copy makes the
-script reviewable before execution:
+Run this in a 64-bit PowerShell session:
+
+```powershell
+irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1 | iex
+```
+
+Installer download: [install.ps1](https://github.com/kamilsj/vectors/releases/latest/download/install.ps1).
+
+The installer supports Windows x86-64, including a 64-bit PowerShell process
+started from a 32-bit parent. It refuses unsupported processors and 32-bit-only
+Windows before downloading an archive.
+
+To pass options, invoke the downloaded text as a script block. For an
+install-only run:
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1))) -NoStart -NoOpen
+```
+
+Use `-BindAddress 127.0.0.1:8081` instead to change the port, or `-WhatIf` to
+download the script and preview its plan without installing anything. A
+locally saved script can run `-PrintTarget` or `-WhatIf` without networking.
+
+## Review before running
+
+The commands above download and execute the release installer directly. To
+inspect it first, save a local copy instead.
+
+Linux or macOS:
+
+```sh
+installer="$(mktemp "${TMPDIR:-/tmp}/vectors-install.XXXXXX")"
+curl --proto '=https' --tlsv1.2 -fL \
+  https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
+  -o "$installer"
+less "$installer"                    # press q to close
+```
+
+After review, run it with any desired options, then remove the temporary file:
+
+```sh
+sh "$installer"
+rm -f "$installer"
+```
+
+Windows PowerShell:
 
 ```powershell
 $Installer = Join-Path ([IO.Path]::GetTempPath()) "vectors-install-$([guid]::NewGuid()).ps1"
 Invoke-WebRequest `
     -Uri 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1' `
     -OutFile $Installer
-Get-Content -LiteralPath $Installer       # optional review
+Get-Content -LiteralPath $Installer
+```
+
+After review, run it with any desired switches, then remove the temporary file:
+
+```powershell
 Unblock-File -LiteralPath $Installer
 & $Installer
-```
-
-The installer supports Windows x86-64, including a 64-bit PowerShell process
-started from a 32-bit parent. It refuses unsupported processors and 32-bit-only
-Windows before downloading an archive.
-
-Preview the complete plan without changing the machine or using the network:
-
-```powershell
-& $Installer -WhatIf
-```
-
-For an install-only run:
-
-```powershell
-& $Installer -NoStart -NoOpen
-```
-
-Remove the downloaded script after the install or preview:
-
-```powershell
 Remove-Item -LiteralPath $Installer -Force
 ```
 
@@ -115,7 +139,7 @@ manage `vectors-server --data-dir PATH` with your existing service manager.
 | Show help | `--help` | `Get-Help .\install.ps1 -Full` |
 | Inspect the resolved target | `--print-target` | `-PrintTarget` |
 | Preview changes | `--dry-run` | `-WhatIf` |
-| Install a fixed release | `--version v0.6.0` | `-Version v0.6.0` |
+| Install a fixed release | `--version v0.7.0` | `-Version v0.7.0` |
 | Choose the binary directory | `--install-dir PATH` | `-InstallDir PATH` |
 | Choose the server address | `--bind 127.0.0.1:8081` | `-BindAddress 127.0.0.1:8081` |
 | Do not start the server | `--no-start` | `-NoStart` |
@@ -146,7 +170,7 @@ Examples:
 ```sh
 # Pin a release and leave the server stopped.
 VECTORS_INSTALL_DIR="$HOME/bin" \
-  sh ./install.sh --version v0.6.0 --no-start --no-open
+  sh ./install.sh --version v0.7.0 --no-start --no-open
 
 # Start on a different local port with an explicit durable directory.
 VECTORS_DATA_DIR="$HOME/vectors-data" \
@@ -155,7 +179,7 @@ VECTORS_DATA_DIR="$HOME/vectors-data" \
 
 ```powershell
 # Pin a release and leave the server stopped.
-& .\install.ps1 -Version v0.6.0 -InstallDir "$HOME\bin" -NoStart -NoOpen
+& .\install.ps1 -Version v0.7.0 -InstallDir "$HOME\bin" -NoStart -NoOpen
 
 # Start on another local port with an explicit durable directory.
 $env:VECTORS_DATA_DIR = "$HOME\vectors-data"
@@ -354,6 +378,12 @@ On Linux or macOS, run `uname -s` and `uname -m`; supported pairs are listed at
 the top of this guide. On Windows, use a 64-bit PowerShell session on x86-64.
 Windows ARM64, 32-bit Windows, musl Linux, and other operating systems currently
 require a source build.
+
+The message `this installer supports Linux; use install.ps1 on Windows` comes
+from the old v0.6.0 installer, which has no macOS binaries. macOS and Linux ARM64
+release support starts with v0.7.0. Use the latest-release command above and
+remove any `VECTORS_VERSION=v0.6.0` override or older `--version` argument.
+Changing only the script URL cannot add missing binaries to an older release.
 
 ### PowerShell refuses to run the script
 

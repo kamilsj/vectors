@@ -11,7 +11,7 @@ request graceful shutdown before replacement. Existing database files are never
 removed.
 
 .PARAMETER Version
-Release tag such as v0.6.0. The latest release is used by default.
+Release tag such as v0.7.0. The latest release is used by default.
 
 .PARAMETER InstallDir
 Destination for vectors.exe and vectors-server.exe. Defaults to
@@ -35,7 +35,7 @@ network or changing the computer. Intended for diagnostics and CI.
 .\install.ps1
 
 .EXAMPLE
-.\install.ps1 -Version v0.6.0 -NoStart
+.\install.ps1 -Version v0.7.0 -NoStart
 
 .EXAMPLE
 .\install.ps1 -BindAddress 127.0.0.1:8081 -NoOpen
@@ -194,7 +194,7 @@ function Get-NormalizedRelease {
         $Tag = "v$Tag"
     }
     if ($Tag -notmatch "^v(?<version>$SemverPattern)$") {
-        throw "Version must be a semantic release tag such as v0.6.0 or v0.7.0-rc.1."
+        throw "Version must be a semantic release tag such as v0.7.0 or v0.7.0-rc.1."
     }
     $ReleaseVersion = $Matches.version
     $EncodedTag = [Uri]::EscapeDataString("v$ReleaseVersion")

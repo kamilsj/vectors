@@ -12,6 +12,14 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## 0.7.0 - 2026-09-17
+
+### Added
+
 - A CPU scan-layout benchmark with deterministic typed ingestion, exact-result
   checks, latency percentiles, and controls for dimensions, batch size, and
   Rayon thread count.
@@ -40,6 +48,9 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Changed
 
+- Installation quickstarts now use one command per platform and direct installer
+  links, with custom-port and install-only examples and an optional
+  download-and-review path.
 - Exact CPU searches distribute full scans across balanced row ranges, allowing
   large ingestion slabs to use multiple cores. Indexed and residual-filter
   scans amortize scheduling and heap merging across dimension-aware batches;
@@ -93,6 +104,10 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Fixed
 
+- Publish the macOS Intel/Apple silicon and Linux ARM64 installers and native
+  archives together, so the documented latest-release command works on those
+  platforms. Release checks now execute the downloaded installer through the
+  same one-line entry points used in the documentation.
 - Cancelled HTTP requests retain their database capacity slots until queued or
   running work finishes, preventing disconnects and request timeouts from
   bypassing overload protection or undercounting in-flight database work.

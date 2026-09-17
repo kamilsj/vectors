@@ -348,8 +348,8 @@ fn read_value(
             vector_bytes.resize(byte_length, 0);
             read_exact(reader, vector_bytes)?;
             let mut values = Vec::with_capacity(*dimensions);
-            for bytes in vector_bytes.chunks_exact(size_of::<f32>()) {
-                let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            for bytes in vector_bytes.as_chunks::<{ size_of::<f32>() }>().0 {
+                let value = f32::from_le_bytes(*bytes);
                 if !value.is_finite() {
                     return Err(corrupt("vector contains a non-finite value"));
                 }

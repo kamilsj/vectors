@@ -167,19 +167,22 @@ jobs:
           VECTORS_VERSION: ${{ github.ref_name }}
           VECTORS_INSTALL_DIR: ${{ runner.temp }}/vectors-bin
           VECTORS_NO_START: 1
+          VECTORS_NO_OPEN: 1
         run: |
-          chmod +x install.sh
-          ./install.sh --no-start --no-open
+          set -euo pipefail
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$VECTORS_VERSION/install.sh" | sh
           "$VECTORS_INSTALL_DIR/vectors" --version
           "$VECTORS_INSTALL_DIR/vectors-server" --version
       - name: Verify Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          VECTORS_VERSION: ${{ github.ref_name }}
+          VECTORS_INSTALL_DIR: ${{ runner.temp }}\vectors-bin
+          VECTORS_NO_START: 1
+          VECTORS_NO_OPEN: 1
         run: |
-          & ./install.ps1 `
-            -Version "${{ github.ref_name }}" `
-            -InstallDir "$env:RUNNER_TEMP\vectors-bin" `
-            -NoStart `
-            -NoOpen
+          $ErrorActionPreference = "Stop"
+          irm "https://github.com/${{ github.repository }}/releases/download/$env:VECTORS_VERSION/install.ps1" | iex
           & "$env:RUNNER_TEMP\vectors-bin\vectors.exe" --version
           & "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --version

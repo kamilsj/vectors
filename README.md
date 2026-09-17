@@ -61,31 +61,27 @@ ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 Linux or macOS:
 
 ```sh
-installer="$(mktemp)"
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
-  -o "$installer"
-sh "$installer"
-rm -f "$installer"
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh
 ```
+
+Installer download: [install.sh](https://github.com/kamilsj/vectors/releases/latest/download/install.sh).
 
 Windows x86-64 PowerShell:
 
 ```powershell
-$installer = Join-Path $env:TEMP 'vectors-install.ps1'
-irm 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1' -OutFile $installer
-Unblock-File $installer
-& $installer
-Remove-Item $installer
+irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1 | iex
 ```
+
+Installer download: [install.ps1](https://github.com/kamilsj/vectors/releases/latest/download/install.ps1).
 
 The console opens at [http://127.0.0.1:8080](http://127.0.0.1:8080). Pass
 `--no-start` to the POSIX script or `-NoStart` to PowerShell for an install-only
-run. Use `--print-target` or `-PrintTarget` to inspect architecture selection
-without downloading anything. Use `--dry-run` or PowerShell's `-WhatIf` to
-preview the complete plan. The [installation guide](docs/INSTALL.md) covers
+run. With a locally saved installer, `--print-target` or `-PrintTarget` inspects
+architecture selection without downloading anything. Use `--dry-run` or
+PowerShell's `-WhatIf` to preview the complete plan. The [installation guide](docs/INSTALL.md) covers
 every option, fixed versions, upgrades, uninstalling, release verification,
-default paths, and common setup problems. Release CI installs and health-checks
+default paths, [reviewing the script before running it](docs/INSTALL.md#review-before-running),
+and common setup problems. Release CI installs and health-checks
 every supported OS/architecture combination.
 
 Installer-managed servers retain their bind and storage configuration across
@@ -96,15 +92,14 @@ failed start restores the prior runtime and configuration.
 Upgrading from 0.2 reuses the existing `vectors.vdb` as the first durable
 checkpoint and begins logging subsequent writes; no export step is required.
 
-If port 8080 is already occupied, replace the installer invocation above with
-one of these commands before removing the downloaded file:
+If port 8080 is already occupied, use port 8081:
 
 ```sh
-sh "$installer" --bind 127.0.0.1:8081
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh -s -- --bind 127.0.0.1:8081
 ```
 
 ```powershell
-& $installer -BindAddress '127.0.0.1:8081'
+& ([scriptblock]::Create((irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1))) -BindAddress 127.0.0.1:8081
 ```
 
 ## Why vectors?
@@ -246,7 +241,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.6.0 | in-memory SQL vector database
+vectors 0.7.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```

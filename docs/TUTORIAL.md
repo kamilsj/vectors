@@ -33,22 +33,19 @@ and Windows x86-64.
 ### Linux or macOS
 
 ```sh
-installer="$(mktemp)"
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/kamilsj/vectors/releases/latest/download/install.sh \
-  -o "$installer"
-sh "$installer"
-rm -f "$installer"
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh
 ```
+
+Installer download: [install.sh](https://github.com/kamilsj/vectors/releases/latest/download/install.sh).
 
 The binaries go to `~/.local/bin`. Linux follows XDG data/state locations;
 macOS uses `~/Library/Application Support/vectors` for data and state and
 `~/Library/Logs/vectors` for logs.
 
-To install without starting the server, replace the `sh` command above with:
+To install without starting the server or opening a browser:
 
 ```sh
-sh "$installer" --no-start --no-open
+curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.sh | sh -s -- --no-start --no-open
 ```
 
 ### Windows x86-64
@@ -56,23 +53,19 @@ sh "$installer" --no-start --no-open
 Run this in PowerShell:
 
 ```powershell
-$Installer = Join-Path $env:TEMP 'vectors-install.ps1'
-Invoke-WebRequest `
-  -Uri 'https://github.com/kamilsj/vectors/releases/latest/download/install.ps1' `
-  -OutFile $Installer
-Unblock-File $Installer
-& $Installer
-Remove-Item $Installer
+irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1 | iex
 ```
+
+Installer download: [install.ps1](https://github.com/kamilsj/vectors/releases/latest/download/install.ps1).
 
 The default binaries go to `%LOCALAPPDATA%\Programs\vectors`. Durable data and
 server state live below `%LOCALAPPDATA%\vectors`.
 
-To install without starting the server, pass these switches before removing
-the downloaded file:
+To install without starting the server or opening a browser, invoke the
+downloaded script with switches:
 
 ```powershell
-& $Installer -NoStart -NoOpen
+& ([scriptblock]::Create((irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1))) -NoStart -NoOpen
 ```
 
 Both installers accept a release version, custom install directory, bind
@@ -82,7 +75,7 @@ address, install-only mode, and no-browser mode:
 | --- | --- | --- |
 | inspect target without downloading | `--print-target` | `-PrintTarget` |
 | preview the complete plan | `--dry-run` | `-WhatIf` |
-| fixed version | `--version v0.6.0` or `VECTORS_VERSION` | `-Version v0.6.0` or `VECTORS_VERSION` |
+| fixed version | `--version v0.7.0` or `VECTORS_VERSION` | `-Version v0.7.0` or `VECTORS_VERSION` |
 | install directory | `--install-dir PATH` or `VECTORS_INSTALL_DIR` | `-InstallDir PATH` or `VECTORS_INSTALL_DIR` |
 | listen address | `--bind 127.0.0.1:8081` or `VECTORS_BIND` | `-BindAddress 127.0.0.1:8081` or `VECTORS_BIND` |
 | do not start | `--no-start` or `VECTORS_NO_START=1` | `-NoStart` or `VECTORS_NO_START=1` |
@@ -90,7 +83,8 @@ address, install-only mode, and no-browser mode:
 | restart an installed server after upgrade | `--restart` | automatic for an installer-managed server |
 | process-state directory | `VECTORS_STATE_DIR` | `VECTORS_STATE_DIR` |
 
-Save an installer locally and run `sh ./install.sh --help` or
+To [review the script first](INSTALL.md#review-before-running), save it locally.
+Run `sh ./install.sh --help` or
 `Get-Help .\install.ps1 -Full` to inspect every option before running it.
 The complete [installation guide](INSTALL.md) covers upgrades, uninstalling,
 release verification, default paths, and troubleshooting.
@@ -140,7 +134,7 @@ The shell executable accepts these options:
 The opening prompt points to the built-in lesson:
 
 ```text
-vectors 0.6.0 | in-memory SQL vector database
+vectors 0.7.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```
