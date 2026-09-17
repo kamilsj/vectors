@@ -70,17 +70,13 @@ jobs:
           else
             installer_path="latest/download"
           fi
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            "https://github.com/kamilsj/vectors/releases/$installer_path/install.sh" \
-            -o "$RUNNER_TEMP/install.sh"
-          chmod +x "$RUNNER_TEMP/install.sh"
-          "$RUNNER_TEMP/install.sh" --no-open
+          curl -fsSL "https://github.com/kamilsj/vectors/releases/$installer_path/install.sh" | sh
           curl -fsS http://127.0.0.1:18080/healthz | grep -q '"status":"ok"'
           "$VECTORS_INSTALL_DIR/vectors" --version
           "$VECTORS_INSTALL_DIR/vectors-server" --version
       - name: Windows installer and startup
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         env:
           VECTORS_VERSION: ${{ inputs.version }}
           VECTORS_INSTALL_DIR: ${{ runner.temp }}\vectors-bin
@@ -90,7 +86,6 @@ jobs:
           VECTORS_NO_OPEN: 1
         run: |
           $ErrorActionPreference = "Stop"
-          $installer = Join-Path $env:RUNNER_TEMP "install.ps1"
           if ([string]::IsNullOrWhiteSpace($env:VECTORS_VERSION)) {
             $installerPath = "latest/download"
           } else {
@@ -100,11 +95,8 @@ jobs:
             }
             $installerPath = "download/$releaseTag"
           }
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://github.com/kamilsj/vectors/releases/$installerPath/install.ps1" `
-            -OutFile $installer
           try {
-            & $installer -NoOpen
+            & ([scriptblock]::Create((irm "https://github.com/kamilsj/vectors/releases/$installerPath/install.ps1")))
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:18080/healthz"
             if ($health.status -ne "ok") {
               throw "Unexpected health response"

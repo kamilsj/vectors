@@ -183,6 +183,6 @@ jobs:
           VECTORS_NO_OPEN: 1
         run: |
           $ErrorActionPreference = "Stop"
-          irm "https://github.com/${{ github.repository }}/releases/download/$env:VECTORS_VERSION/install.ps1" | iex
+          & ([scriptblock]::Create((irm "https://github.com/${{ github.repository }}/releases/download/$env:VECTORS_VERSION/install.ps1")))
           & "$env:RUNNER_TEMP\vectors-bin\vectors.exe" --version
           & "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --version

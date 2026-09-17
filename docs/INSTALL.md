@@ -52,7 +52,7 @@ curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.s
 Run this in a 64-bit PowerShell session:
 
 ```powershell
-irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1 | iex
+& ([scriptblock]::Create((irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1)))
 ```
 
 Installer download: [install.ps1](https://github.com/kamilsj/vectors/releases/latest/download/install.ps1).
@@ -61,8 +61,8 @@ The installer supports Windows x86-64, including a 64-bit PowerShell process
 started from a 32-bit parent. It refuses unsupported processors and 32-bit-only
 Windows before downloading an archive.
 
-To pass options, invoke the downloaded text as a script block. For an
-install-only run:
+The script block preserves PowerShell's installer options, including `-WhatIf`.
+Append switches to the command for an install-only run:
 
 ```powershell
 & ([scriptblock]::Create((irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1))) -NoStart -NoOpen

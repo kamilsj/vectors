@@ -69,7 +69,7 @@ Installer download: [install.sh](https://github.com/kamilsj/vectors/releases/lat
 Windows x86-64 PowerShell:
 
 ```powershell
-irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1 | iex
+& ([scriptblock]::Create((irm https://github.com/kamilsj/vectors/releases/latest/download/install.ps1)))
 ```
 
 Installer download: [install.ps1](https://github.com/kamilsj/vectors/releases/latest/download/install.ps1).
