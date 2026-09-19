@@ -9,3 +9,6 @@ vectors.lock
 .idea/
 .git.dropbox-backup/
 /.installer-fixture/
+/node_modules/
+/playwright-report/
+/test-results/

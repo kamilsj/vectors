@@ -89,6 +89,19 @@ upgrades. Restarts use a private cooperative-shutdown request so the server can
 finish its WAL checkpoint or legacy snapshot before binaries are replaced; a
 failed start restores the prior runtime and configuration.
 
+Check for a newer stable release or update in place:
+
+```sh
+vectors update --check
+vectors update
+```
+
+For automatic checks and updates every six hours, run `vectors update --watch`.
+The watcher must remain running; use your service manager for unattended hosts.
+See [automatic updates](docs/INSTALL.md#automatic-updates) for authentication,
+restart behavior, Windows operation, and installation options. Older binaries
+without the `update` command need the installer above once to gain this feature.
+
 Upgrading from 0.2 reuses the existing `vectors.vdb` as the first durable
 checkpoint and begins logging subsequent writes; no export step is required.
 
@@ -127,6 +140,13 @@ curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.s
   schema checks still run against the current catalog on every execution.
 - **Direct typed ingestion.** JSON and Rust values enter the shared atomic
   insert core without being serialized into SQL literals and parsed again.
+- **Direct vector API.** Structured searches feed typed vectors into the SQL
+  engine's indexed top-k executor, avoiding vector-to-SQL conversion and
+  keeping one-off search vectors out of the SQL parse cache.
+- **Document chunks and graph retrieval.** Split text at natural boundaries,
+  embed chunks with title/section context, and connect adjacent passages and
+  semantically similar chunks across documents. Embedding profiles and source
+  citations stay attached to SQL-visible data.
 - **Incremental scalar indexes.** Append-only batches add hash buckets for new
   rows without rescanning the existing table.
 - **Indexed uniqueness.** Primary-key and `UNIQUE` checks use maintained key
@@ -222,17 +242,26 @@ machine; transaction size and storage hardware materially change the result.
 cargo run --release --bin vectors-server -- --data-dir ./vectors-data
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The console includes:
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The console separates five
+workspaces:
 
-- a multiline SQL editor with ready-to-run examples;
-- schema-aware **Understand query** analysis before execution;
-- live table, schema, index, row-count, and revision navigation;
-- a guided structured vector-search builder;
-- relational filters, selectable distance metrics, and ranked result tables;
-- optional bearer-token authentication stored only in the browser tab.
+- **Search:** search with text through OpenAI or Voyage AI, or supply a vector.
+- **Connections:** chunk documents, explore their relationships, and retrieve
+  context using hybrid search with optional cross-encoder reranking. Explore
+  connections around a selected passage across page boundaries, without a
+  provider call.
+- **Data:** browse pages, create tables, add documents with embeddings, and
+  edit or delete rows with protection against stale edits.
+- **SQL:** run SQL, inspect schemas, and understand queries before execution.
+- **Settings:** configure embedding and reranking providers and request limits;
+  adjust browser preferences and inspect server capacity.
 
-Click **Run query** on the default quickstart, select the new `documents` table,
-then open **Search vectors**.
+For a sample without a provider key, open **SQL**, run the quickstart, and
+select `documents`. For text search, configure a provider in **Settings** and
+use the same model and dimensions for documents and queries. Provider keys
+stay on the server; environment keys use `OPENAI_API_KEY` or `VOYAGE_API_KEY`.
+See [embeddings and administration](docs/EMBEDDINGS_AND_ADMIN.md) for setup,
+data-management workflows, API examples, and key persistence behavior.
 
 ### 2. Or use the shell
 
@@ -381,6 +410,17 @@ The server binds to `127.0.0.1:8080` by default.
 | `POST` | `/v1/tables/{table}/rows` | Typed bulk ingestion and upserts |
 | `POST` | `/v1/vector/search` | Structured hybrid vector search |
 | `POST` | `/v1/embeddings/search` | Compatibility alias for `/v1/vector/search` |
+| `POST` | `/v1/graph/chunk` | Preview source-aware chunks and exact embedding inputs |
+| `GET` / `POST` | `/v1/graph/collections` | List or create collections with pinned embedding profiles |
+| `GET` | `/v1/graph/collections/{collection}` | Collection counts, revision, profile, and SQL table names |
+| `POST` | `/v1/graph/collections/{collection}/documents` | Atomically embed, store, and connect a document's chunks |
+| `GET` / `DELETE` | `/v1/graph/collections/{collection}/documents/{id}` | Read source or delete a document and its relationships |
+| `POST` | `/v1/graph/collections/{collection}/search` | Embed a query, find vector seeds, and expand graph context |
+| `POST` | `/v1/graph/collections/{collection}/retrieve` | Hybrid RAG retrieval, optional cross-encoder reranking, and diverse context selection |
+| `GET` | `/v1/graph/collections/{collection}/graph` | Browse a bounded page of chunks and their relationships without a provider call |
+| `GET` | `/v1/graph/collections/{collection}/neighborhood` | Explore around a `chunk_id` with hop, direction, kind, weight, and size limits; no provider call |
+| `POST` / `DELETE` | `/v1/graph/collections/{collection}/relationships` | Add, update, or remove a directed relationship with revision protection |
+| `GET` / `PUT` | `/v1/settings/reranking` | Configure Voyage reranking with write-only credentials |
 
 Run SQL:
 
@@ -448,8 +488,9 @@ curl http://127.0.0.1:8080/v1/vector/search \
 
 JSON request bodies default to 32 MiB, typed bulk ingestion to 10,000 rows per
 request, and the combined SQL response to 10,000 query rows. All three limits
-are configurable within hard ceilings; structured vector search keeps its
-separate 1,000-row maximum. SQL execution pushes that budget into the planner,
+are configurable within hard ceilings; a structured search's requested `limit`
+must be between 1 and the smaller of 1,000 and `VECTORS_HTTP_MAX_RESPONSE_ROWS`.
+SQL execution pushes that budget into the planner,
 so oversized final output is rejected without constructing an unbounded HTTP
 response. This is an output bound rather than a general query-memory limit:
 filtering, aggregation, `DISTINCT`, ordering, and a large `OFFSET` may still
@@ -457,9 +498,55 @@ scan or retain additional working state required by SQL semantics.
 
 Typed ingestion performs JSON validation on a blocking worker and shares SQL
 `INSERT` constraint, conflict, revision, and index-maintenance semantics without
-reparsing generated SQL. Database handlers also share a process-wide capacity
-limit. When it is exhausted, new database requests receive HTTP 503 with error
-code `overloaded` and `Retry-After: 1`.
+reparsing generated SQL. Column names are mapped once per input row, text buffers
+are moved into typed values, and normalization reuses the vector buffer. If a
+table's column definitions change before the batch commits, it fails atomically
+with HTTP 409 and `schema_changed`; refresh the schema before retrying.
+
+Structured searches use the same scalar indexes, exact ranking, bounded heaps,
+and configured compute device as SQL. Validation and execution share a catalog
+read lock. Selected column names must be distinct, ignoring ASCII case. The
+final `distance` field always contains the computed score; even if a selected
+source column is also named `distance`, ranking uses the computed score. Use an
+explicit `select` to omit that source column if you need unique output labels.
+
+SQL and search responses are encoded directly from typed results on blocking
+workers, preserving the JSON format without allocating a second tree of JSON
+values. Database handlers share a process-wide capacity limit, held through
+response encoding. When it is exhausted, new database requests receive HTTP
+503 with error code `overloaded` and `Retry-After: 1`.
+
+## Documents and GraphRAG
+
+Open **Connections** to explore chunks and their semantic links, inspect source
+citations, add labeled relationships, and ingest documents with a chunk preview.
+Choose **Explore connections** on a passage or search result to follow incoming,
+outgoing, or both directions across the collection. Hop rings identify depth;
+arrows retain relationship direction. Exploration uses stored data without
+calling an embedding or reranking provider.
+
+RAG retrieval combines keyword and vector matches, merges graph candidates from
+all passages in each expansion step, and ranks added context using both link
+strength and query relevance. A passage used to reach another result need not
+appear in the final context. Diversity, per-document, and byte budgets bound the
+selection. Optional Voyage cross-encoder reranking scores the query together
+with each candidate; configure its key in **Settings** before choosing that mode.
+The keyword cache survives relationship edits and unrelated writes, while chunk
+storage changes invalidate it. The existing `/search` route retains its simpler
+vector-seed traversal; `/retrieve` uses this hybrid pipeline.
+
+The graph workflow uses the same configured OpenAI or Voyage provider for
+document chunks and query embeddings, with a collection-pinned model and
+dimensions. Ingestion preserves original UTF-8 source offsets, skips unchanged
+uploads, and commits documents, chunks, and relationships together. Retrieval
+returns direct matches, related context, relationship weights, and citations.
+
+Documents, vectors, and edges are ordinary SQL tables; you can inspect them in
+the Data workspace or add directed relationship labels such as `references`
+with SQL. This is a bounded graph of text chunks; automatic semantic links
+represent similarity and do not assert entity relationships or extracted facts.
+Start with the [chunking and GraphRAG guide](docs/GRAPH_RAG.md) for API
+examples, limits, model compatibility, and replacement/deletion behavior.
 
 ## Server configuration
 
@@ -491,6 +578,8 @@ cargo run --release --features gpu --bin vectors-server
 | `VECTORS_SNAPSHOT` | Legacy snapshot-only mode; mutually exclusive with `VECTORS_DATA_DIR` |
 | `VECTORS_AUTOSAVE_INTERVAL_SECS` | Legacy snapshot checkpoint interval; requires `VECTORS_SNAPSHOT` |
 | `VECTORS_API_TOKEN` | Requires `Authorization: Bearer …` on every `/v1` endpoint |
+| `OPENAI_API_KEY` | Server-side OpenAI embedding credential, also configurable for the current process in Settings |
+| `VOYAGE_API_KEY` | Server-side Voyage AI embedding credential, also configurable for the current process in Settings |
 | `VECTORS_COMPUTE_DEVICE` | Exact-vector scan policy: `auto`, `cpu`, or `gpu`; defaults to `auto`; overridden by `--compute` |
 | `VECTORS_GPU_MIN_ELEMENTS` | Candidate count × dimensions required before `auto` tries the GPU; defaults to `8388608` |
 | `VECTORS_GPU_CACHE_BYTES` | Upper bound for resident cached dense GPU columns; defaults to `536870912` (512 MiB) |

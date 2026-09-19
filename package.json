@@ -1,0 +1,11 @@
+{
+  "name": "vectors-console-tests",
+  "private": true,
+  "scripts": {
+    "test:web": "playwright test",
+    "benchmark:web": "node scripts/benchmark_web.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

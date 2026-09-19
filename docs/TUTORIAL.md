@@ -378,21 +378,38 @@ Where both forms exist, command-line settings take precedence:
 `--port`/`--bind` override `VECTORS_BIND`, `--data-dir` overrides
 `VECTORS_DATA_DIR`, and `--compute` overrides `VECTORS_COMPUTE_DEVICE`.
 
-The console has three useful views:
-
-1. **Start here** explains the workflow and loads the sample dataset.
-2. **SQL console** runs multiline SQL, formats it, analyzes query intent, and
-   shows typed result tables plus rows examined.
-3. **Vector search** builds an exact hybrid query from table, vector, metric,
-   scalar-filter, selected-column, and limit controls.
+The console opens with **Search**, which accepts a question or a raw vector.
+**Data** browses and manages existing rows and tables. **SQL** runs multiline
+queries and analyzes their intent. **Settings** configures OpenAI/Voyage
+embeddings and browser preferences, and reports effective server settings.
+The **Help** button explains the workflow and loads sample SQL.
+See [embeddings and administration](EMBEDDINGS_AND_ADMIN.md) for provider setup,
+document insertion, protected row edits, and the administrative API.
 
 After running the quickstart, select `documents` in the sidebar to inspect its
 schema and indexes. Choose **Understand query** before **Run query** when you
 want a plain description of the selected columns, filters, ranking, and whether
 the optimized top-k path is available.
 
-When `VECTORS_API_TOKEN` is enabled, choose **API token** and paste the token.
+When `VECTORS_API_TOKEN` is enabled, choose **Connection** and paste the token.
 The console keeps it in browser session storage, not permanent local storage.
+If browser storage is disabled, the token remains available in memory until
+the page reloads. Press Enter in the token field to connect.
+
+SQL and search results show 100 rows at a time by default. Use the page
+controls or set 50/250 rows in Settings; paging uses the returned result and
+does not rerun the query. The Data view fetches separate pages from the server.
+Expand a vector or long value to inspect its complete contents.
+
+The sidebar shows the actual server address and catalog request latency.
+Connection loss keeps the current editor and last loaded tables visible;
+**Reconnect** refreshes the connection. A rejected query leaves a reachable
+server connected, while capacity errors show **Server busy**. Metadata refreshes
+every 15 seconds by default while the tab is visible and idle; Settings can
+change or disable this refresh. Queries time out after
+60 seconds without automatically retrying. A timed-out write, a lost response,
+or a token change during a request can leave its outcome uncertain: it may
+still finish on the server, so check its result before running it again.
 
 ## 6. Use the HTTP API
 
@@ -569,8 +586,15 @@ curl http://127.0.0.1:8080/v1/vector/search \
 ```
 
 If `select` is empty, the response includes every scalar column and omits the
-stored vector. The computed score is always returned as `distance`. A structured
-search limit must be between 1 and 1,000.
+stored vector; a table containing only vectors returns the searched vector.
+Explicit selected names must be distinct, ignoring ASCII case. The computed
+score is always the last field, named `distance`, and controls ranking even if
+a selected source column has that name. A structured search limit must be
+between 1 and the smaller of 1,000 and `VECTORS_HTTP_MAX_RESPONSE_ROWS`.
+
+Structured searches use SQL's exact top-k executor and scalar indexes directly,
+without converting the query vector into SQL text. Both forms see one coherent
+catalog snapshot and use the server's configured CPU/GPU backend.
 
 ### Authenticate API calls
 
@@ -754,7 +778,13 @@ The standalone server has finite admission and payload bounds by design:
 
 Configure the first three with `VECTORS_HTTP_MAX_JSON_BYTES`,
 `VECTORS_HTTP_MAX_BULK_ROWS`, and `VECTORS_HTTP_MAX_RESPONSE_ROWS`. Values over
-the hard ceilings make startup fail.
+the hard ceilings make startup fail. The response-row setting also caps the
+requested structured-search limit, including its default of 10. If configured
+below 10, send an explicit smaller `limit`.
+
+Typed imports return HTTP 409 with `schema_changed` if the table's column
+definitions change between request preparation and commit. No input rows are
+inserted in this case; refresh the schema and rebuild the batch before retrying.
 
 Advanced worker, connection, timeout, snapshot, and autosave settings are
 listed under [Server configuration](../README.md#server-configuration).

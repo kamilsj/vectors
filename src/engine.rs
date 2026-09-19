@@ -19,6 +19,18 @@ use crate::compute::{ComputeConfig, ComputeRuntime};
 use crate::durable::{PersistentStorage, WalOperation};
 use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
+mod graph;
+pub use graph::{
+    GraphBrowseRequest, GraphBrowseResult, GraphChunkInput, GraphChunkPreview, GraphCollection,
+    GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentInput,
+    GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit, GraphIngestRequest,
+    GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
+    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagRequest,
+    GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRelationshipDeleteRequest,
+    GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
+    GraphSearchRequest, GraphSearchResult, GraphTables,
+};
+
 /// Logical types supported by the in-memory storage engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DataType {
@@ -124,6 +136,57 @@ pub struct QueryResult {
     pub rows_examined: usize,
 }
 
+/// Score used to rank a typed vector search. Dot product ranks largest first;
+/// every distance metric ranks smallest first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VectorSearchMetric {
+    #[default]
+    Cosine,
+    L2,
+    SquaredL2,
+    DotProduct,
+}
+
+/// Comparison applied to one scalar search filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorFilterOperator {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+/// One schema-checked predicate in a typed vector search.
+///
+/// Filters are combined with AND. Null values use IS NULL / IS NOT NULL for
+/// equality / inequality, including on vector columns. Other vector filters
+/// and ordered comparisons against null are rejected.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorSearchFilter {
+    pub column: String,
+    pub operator: VectorFilterOperator,
+    pub value: Value,
+}
+
+/// A vector search that avoids formatting and parsing a SQL query.
+///
+/// An empty selection returns all scalar columns, or the searched vector when
+/// no scalar columns exist. The computed score is appended as `distance`, even
+/// when a selected source column has that name. Ranking always uses the score.
+/// Names are case-insensitive; duplicate selected columns are rejected.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorSearch {
+    pub table: String,
+    pub vector_column: String,
+    pub query: Vector,
+    pub metric: VectorSearchMetric,
+    pub select: Vec<String>,
+    pub filters: Vec<VectorSearchFilter>,
+    pub limit: usize,
+}
+
 impl QueryResult {
     pub fn row_count(&self) -> usize {
         self.rows.len()
@@ -206,6 +269,13 @@ pub struct TableInfo {
     pub row_count: usize,
     pub column_count: usize,
     pub index_count: usize,
+}
+
+pub(crate) struct TablePage {
+    pub revision: u64,
+    pub columns: Vec<Column>,
+    pub rows: Vec<Vec<Value>>,
+    pub total_rows: usize,
 }
 
 /// Result of one SQL statement.
@@ -569,7 +639,10 @@ impl Database {
         database.recover(records)?;
         {
             let mut catalog = database.catalog.write().map_err(|_| Error::LockPoisoned)?;
-            catalog.revision = 0;
+            // A browser may retain an edit across a server restart. Reuse the
+            // committed WAL sequence so an intervening write cannot appear to
+            // have the same revision after recovery. Checkpoints already store it.
+            catalog.revision = catalog.durable_sequence;
         }
         Ok(Self {
             persistent: Some(persistent),
@@ -594,7 +667,11 @@ impl Database {
         self.save_snapshot(path.as_ref(), Some(last_revision))
     }
 
-    /// Return the current in-process catalog revision.
+    /// Return the current catalog revision.
+    ///
+    /// Durable databases use their committed WAL sequence, which survives both
+    /// checkpoint and WAL recovery and advances once per committed transaction.
+    /// In-memory and snapshot-only databases use an in-process change counter.
     pub fn revision(&self) -> Result<u64> {
         let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
         Ok(catalog.revision)
@@ -666,7 +743,7 @@ impl Database {
     /// first and committed under one write lock. If any statement or durable
     /// WAL append fails, none of the writes in that request become visible.
     pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
-        self.execute_inner(sql, None)
+        self.execute_inner(sql, None, None)
     }
 
     /// Execute SQL while bounding every query result before it is materialized.
@@ -685,26 +762,54 @@ impl Database {
                 "result row limit must be smaller than usize::MAX".into(),
             ));
         }
-        self.execute_inner(sql, Some(max_rows))
+        self.execute_inner(sql, Some(max_rows), None)
+    }
+
+    /// Run an exact typed vector search through the SQL executor's indexed,
+    /// bounded top-k and compute paths, without constructing SQL text.
+    ///
+    /// Schema validation, planning, and execution share one catalog read lock,
+    /// so concurrent schema changes cannot reinterpret the request midway.
+    pub fn search_vectors(&self, request: VectorSearch) -> Result<QueryResult> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let table_name = normalize_name(&request.table);
+        let table = catalog
+            .tables
+            .get(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        run_typed_vector_search(table, request, &self.compute)
+    }
+
+    /// Apply an admin edit only while its inspected catalog version is current.
+    /// The comparison and commit share the same write lock, including WAL writes.
+    pub(crate) fn execute_if_revision(
+        &self,
+        sql: &str,
+        expected_revision: u64,
+    ) -> Result<Vec<ExecutionResult>> {
+        self.execute_inner(sql, None, Some(expected_revision))
     }
 
     fn execute_inner(
         &self,
         sql: &str,
         result_row_limit: Option<usize>,
+        expected_revision: Option<u64>,
     ) -> Result<Vec<ExecutionResult>> {
         let mut statements = self.parse_sql(sql)?;
-        if self.persistent.is_some()
+        if expected_revision.is_none()
+            && self.persistent.is_some()
             && statements.len() == 1
             && matches!(statements.first(), Some(Statement::Insert { .. }))
         {
             let statement = statements.pop().expect("one statement checked above");
             return Ok(vec![self.execute_persistent_insert(sql, statement)?]);
         }
-        if (self.persistent.is_none() && statements.len() <= 1)
-            || statements
-                .iter()
-                .all(|statement| matches!(statement, Statement::Query(_)))
+        if expected_revision.is_none()
+            && ((self.persistent.is_none() && statements.len() <= 1)
+                || statements
+                    .iter()
+                    .all(|statement| matches!(statement, Statement::Query(_))))
         {
             let mut remaining = result_row_limit;
             let mut results = Vec::with_capacity(statements.len());
@@ -721,6 +826,14 @@ impl Database {
         }
 
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        if let Some(expected) = expected_revision {
+            if expected != catalog.revision {
+                return Err(Error::RevisionConflict {
+                    expected,
+                    actual: catalog.revision,
+                });
+            }
+        }
         let staging = Self {
             catalog: Arc::new(RwLock::new(catalog.clone())),
             snapshot_lock: self.snapshot_lock.clone(),
@@ -749,6 +862,7 @@ impl Database {
                 let operation = PersistentStorage::prepare_sql(sql)?;
                 let checkpoint_needed = persistent.append(sequence, operation)?;
                 committed.durable_sequence = sequence;
+                committed.revision = sequence;
                 checkpoint_needed
             } else {
                 false
@@ -812,8 +926,8 @@ impl Database {
                     .get_mut(&table_name)
                     .expect("table exists while write lock is held"),
             );
-            catalog.mark_changed();
             catalog.durable_sequence = sequence;
+            catalog.revision = sequence;
             checkpoint_needed
         };
         drop(catalog);
@@ -902,6 +1016,29 @@ impl Database {
             .ok_or(Error::TableNotFound(table_name))
     }
 
+    /// Copy only the requested rows, with schema and revision from one read lock.
+    pub(crate) fn table_page(
+        &self,
+        table_name: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TablePage> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let table_name = normalize_name(table_name);
+        let table = catalog
+            .tables
+            .get(&table_name)
+            .ok_or(Error::TableNotFound(table_name))?;
+        let start = offset.min(table.rows.len());
+        let end = start.saturating_add(limit).min(table.rows.len());
+        Ok(TablePage {
+            revision: catalog.revision,
+            columns: table.columns.clone(),
+            rows: table.rows[start..end].to_vec(),
+            total_rows: table.rows.len(),
+        })
+    }
+
     /// Return table names in deterministic order.
     pub fn tables(&self) -> Result<Vec<String>> {
         let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
@@ -958,8 +1095,31 @@ impl Database {
         rows: Vec<Vec<Value>>,
         conflict: InsertConflict,
     ) -> Result<usize> {
+        self.insert_rows_inner(table_name, None, rows, conflict)
+    }
+
+    /// Insert schema-ordered values only if the inspected column definitions
+    /// still match. The comparison shares the mutation's write lock and runs
+    /// before any row changes or durable WAL append.
+    pub fn insert_rows_if_schema(
+        &self,
+        table_name: &str,
+        expected_schema: &[Column],
+        rows: Vec<Vec<Value>>,
+        conflict: InsertConflict,
+    ) -> Result<usize> {
+        self.insert_rows_inner(table_name, Some(expected_schema), rows, conflict)
+    }
+
+    fn insert_rows_inner(
+        &self,
+        table_name: &str,
+        expected_schema: Option<&[Column]>,
+        rows: Vec<Vec<Value>>,
+        conflict: InsertConflict,
+    ) -> Result<usize> {
         if self.persistent.is_none() {
-            return self.insert_rows_in_memory(table_name, rows, conflict);
+            return self.insert_rows_in_memory(table_name, expected_schema, rows, conflict);
         }
         let table_name = normalize_name(table_name);
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
@@ -967,6 +1127,7 @@ impl Database {
             .tables
             .get(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        check_insert_schema(&table_name, table, expected_schema)?;
         let conflict_plan = resolve_typed_conflict_plan(table, &conflict)?;
         let pending = prepare_typed_rows(table, rows)?;
         let wal_operation =
@@ -986,8 +1147,8 @@ impl Database {
                     .get_mut(&table_name)
                     .expect("table exists while write lock is held"),
             );
-            catalog.mark_changed();
             catalog.durable_sequence = sequence;
+            catalog.revision = sequence;
             checkpoint_needed
         } else {
             false
@@ -1005,6 +1166,7 @@ impl Database {
     fn insert_rows_in_memory(
         &self,
         table_name: &str,
+        expected_schema: Option<&[Column]>,
         rows: Vec<Vec<Value>>,
         conflict: InsertConflict,
     ) -> Result<usize> {
@@ -1014,6 +1176,7 @@ impl Database {
             .tables
             .get_mut(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        check_insert_schema(&table_name, table, expected_schema)?;
         let conflict_plan = resolve_typed_conflict_plan(table, &conflict)?;
         let pending = prepare_typed_rows(table, rows)?;
         let rows_affected = apply_insert_plan(table, pending, conflict_plan)?;
@@ -2073,6 +2236,193 @@ fn intent_summary(intent: IntentSummary<'_>) -> String {
         }
         (None, _) => format!("Compute {columns}{limit}"),
     }
+}
+
+fn check_insert_schema(
+    table_name: &str,
+    table: &Table,
+    expected_schema: Option<&[Column]>,
+) -> Result<()> {
+    if expected_schema.is_some_and(|expected| expected != table.columns) {
+        return Err(Error::SchemaChanged {
+            table: table_name.into(),
+        });
+    }
+    Ok(())
+}
+
+fn run_typed_vector_search(
+    table: &Table,
+    request: VectorSearch,
+    compute: &ComputeRuntime,
+) -> Result<QueryResult> {
+    if request.limit == 0 {
+        return Err(Error::InvalidQuery(
+            "search limit must be greater than zero".into(),
+        ));
+    }
+    let columns = &table.columns;
+    let vector_column = find_column(columns, &request.vector_column)?;
+    let DataType::Vector(dimensions) = columns[vector_column].data_type else {
+        return Err(declared_type_mismatch(
+            "VECTOR",
+            &columns[vector_column].data_type,
+        ));
+    };
+    if request.query.dimensions() != dimensions {
+        return Err(Error::DimensionMismatch {
+            left: dimensions,
+            right: request.query.dimensions(),
+        });
+    }
+    let mut selected = if request.select.is_empty() {
+        columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                (!matches!(column.data_type, DataType::Vector(_))).then_some(index)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        let mut seen = HashSet::with_capacity(request.select.len());
+        request
+            .select
+            .iter()
+            .map(|name| {
+                let index = find_column(columns, name)?;
+                if !seen.insert(index) {
+                    return Err(Error::DuplicateColumn(columns[index].name.clone()));
+                }
+                Ok(index)
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    if selected.is_empty() {
+        selected.push(vector_column);
+    }
+    let mut result_columns = selected
+        .iter()
+        .map(|index| columns[*index].name.clone())
+        .collect::<Vec<_>>();
+    result_columns.push("distance".into());
+    let mut result_types = selected
+        .iter()
+        .map(|index| Some(columns[*index].data_type.clone()))
+        .collect::<Vec<_>>();
+    result_types.push(Some(DataType::Float));
+    let mut projections = selected
+        .into_iter()
+        .map(FastProjection::Column)
+        .collect::<Vec<_>>();
+    projections.push(FastProjection::Score);
+
+    // Reuse SQL predicates and index pruning. Only small scalar literals need
+    // an AST representation; the query vector stays typed all the way through.
+    let mut predicates = request
+        .filters
+        .into_iter()
+        .map(|filter| typed_search_predicate(columns, filter))
+        .collect::<Result<Vec<_>>>()?;
+    // Typed callers do not pass through the SQL parser's recursion guard.
+    // Preserve predicate order while keeping evaluation/drop stack depth
+    // logarithmic even for a large conjunction.
+    while predicates.len() > 1 {
+        let mut next = Vec::with_capacity(predicates.len().div_ceil(2));
+        let mut remaining = predicates.into_iter();
+        while let Some(left) = remaining.next() {
+            next.push(match remaining.next() {
+                Some(right) => Expr::BinaryOp {
+                    left: Box::new(left),
+                    op: BinaryOperator::And,
+                    right: Box::new(right),
+                },
+                None => left,
+            });
+        }
+        predicates = next;
+    }
+    let selection = predicates.pop();
+    let indexed_rows = selection
+        .as_ref()
+        .and_then(|selection| indexed_candidate_rows(table, selection));
+    let residual_selection = match &indexed_rows {
+        Some(candidates) if candidates.exact => None,
+        _ => selection.as_ref(),
+    };
+    let rows_examined = indexed_rows
+        .as_ref()
+        .map_or(table.rows.len(), |candidates| candidates.rows.len());
+    let (metric, descending) = match request.metric {
+        VectorSearchMetric::Cosine => (FastVectorMetric::Cosine, false),
+        VectorSearchMetric::L2 => (FastVectorMetric::L2, false),
+        VectorSearchMetric::SquaredL2 => (FastVectorMetric::SquaredL2, false),
+        VectorSearchMetric::DotProduct => (FastVectorMetric::DotProduct, true),
+    };
+    let plan = FastVectorTopKPlan {
+        vector_column,
+        query: request.query,
+        metric,
+        projections,
+        order: FastSortOrder {
+            descending,
+            nulls_first: descending,
+        },
+        offset: 0,
+        limit: request.limit,
+        capacity: request.limit,
+    };
+    run_fast_vector_top_k(
+        table,
+        indexed_rows
+            .as_ref()
+            .map(|candidates| candidates.rows.as_slice()),
+        residual_selection,
+        plan,
+        result_columns,
+        result_types,
+        rows_examined,
+        compute,
+    )
+}
+
+fn typed_search_predicate(columns: &[Column], filter: VectorSearchFilter) -> Result<Expr> {
+    let column = &columns[find_column(columns, &filter.column)?];
+    let identifier = Box::new(Expr::Identifier(Ident::with_quote('"', &column.name)));
+    if matches!(filter.value, Value::Null) {
+        return match filter.operator {
+            VectorFilterOperator::Eq => Ok(Expr::IsNull(identifier)),
+            VectorFilterOperator::Ne => Ok(Expr::IsNotNull(identifier)),
+            _ => Err(Error::InvalidQuery(
+                "NULL filters only support eq and ne".into(),
+            )),
+        };
+    }
+    if matches!(column.data_type, DataType::Vector(_)) {
+        return Err(Error::InvalidFilterColumn(column.name.clone()));
+    }
+    let literal = match coerce(filter.value, &column.data_type)? {
+        Value::Integer(value) => SqlValue::Number(value.to_string(), false),
+        // Debug formatting preserves floating-point syntax for integral values
+        // and very large magnitudes, which SQL must not interpret as i64.
+        Value::Float(value) if value.is_finite() => SqlValue::Number(format!("{value:?}"), false),
+        Value::Float(_) => return Err(Error::InvalidQuery("numbers must be finite".into())),
+        Value::Text(value) => SqlValue::SingleQuotedString(value),
+        Value::Boolean(value) => SqlValue::Boolean(value),
+        Value::Null | Value::Vector(_) => unreachable!("non-null scalar schema checked above"),
+    };
+    let op = match filter.operator {
+        VectorFilterOperator::Eq => BinaryOperator::Eq,
+        VectorFilterOperator::Ne => BinaryOperator::NotEq,
+        VectorFilterOperator::Gt => BinaryOperator::Gt,
+        VectorFilterOperator::Gte => BinaryOperator::GtEq,
+        VectorFilterOperator::Lt => BinaryOperator::Lt,
+        VectorFilterOperator::Lte => BinaryOperator::LtEq,
+    };
+    Ok(Expr::BinaryOp {
+        left: identifier,
+        op,
+        right: Box::new(Expr::Value(literal)),
+    })
 }
 
 fn run_query(
@@ -4532,9 +4882,15 @@ impl<'a> EvalContext<'a> {
         let identifier = identifiers
             .last()
             .ok_or_else(|| Error::InvalidQuery("empty identifier".into()))?;
-        let index = find_column(self.columns, &ident_name(identifier))?;
+        let index = find_column(self.columns, &identifier.value)?;
         if identifiers.len() == 2
-            && identifiers.first().map(ident_name).as_deref() == Some("excluded")
+            && identifiers.first().is_some_and(|identifier| {
+                if identifier.quote_style.is_some() {
+                    identifier.value == "excluded"
+                } else {
+                    identifier.value.eq_ignore_ascii_case("excluded")
+                }
+            })
         {
             if let Some(excluded) = self.excluded {
                 return Ok(excluded[index].clone());
@@ -4547,7 +4903,7 @@ impl<'a> EvalContext<'a> {
 fn evaluate(expression: &Expr, context: &EvalContext<'_>) -> Result<Value> {
     match expression {
         Expr::Value(value) => sql_literal(value),
-        Expr::Identifier(identifier) => context.column(&ident_name(identifier)),
+        Expr::Identifier(identifier) => context.column(&identifier.value),
         Expr::CompoundIdentifier(identifiers) => context.compound_column(identifiers),
         Expr::Nested(expression) => evaluate(expression, context),
         Expr::Array(array) => {
@@ -5754,11 +6110,13 @@ fn table_factor_name(factor: &TableFactor) -> Result<String> {
 }
 
 fn find_column(columns: &[Column], name: &str) -> Result<usize> {
-    let name = normalize_name(name);
+    // Lookup runs for each evaluated row, including vector-search residual
+    // filters. Compare borrowed names without allocating lowercase copies of
+    // the request and every column visited. Preserve normalized error names.
     columns
         .iter()
-        .position(|column| normalize_name(&column.name) == name)
-        .ok_or(Error::ColumnNotFound(name))
+        .position(|column| column.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| Error::ColumnNotFound(normalize_name(name)))
 }
 
 fn expression_label(expression: &Expr) -> String {
@@ -5807,6 +6165,205 @@ fn ensure_finite_f32(values: &[f32]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_column_lookup_matches_normalized_reference() {
+        let names = [
+            "Id",
+            "MixedCase",
+            "name with spaces",
+            "Straße",
+            "STRASSE",
+            "Å",
+            "å",
+            "é",
+            "",
+            "quote\"inside",
+        ];
+        let columns = names
+            .iter()
+            .map(|name| Column {
+                name: (*name).into(),
+                data_type: DataType::Integer,
+                nullable: false,
+                unique: false,
+            })
+            .collect::<Vec<_>>();
+        for name in names.into_iter().chain([
+            "ID",
+            "mixedcase",
+            "NAME WITH SPACES",
+            "STRAßE",
+            "strasse",
+            "É",
+            "missing",
+            "QUOTE\"INSIDE",
+        ]) {
+            let normalized = normalize_name(name);
+            let expected = columns
+                .iter()
+                .position(|column| normalize_name(&column.name) == normalized)
+                .ok_or(Error::ColumnNotFound(normalized));
+            assert_eq!(
+                find_column(&columns, name).map_err(|error| error.to_string()),
+                expected.map_err(|error| error.to_string()),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn borrowed_identifier_evaluation_preserves_quoted_and_excluded_semantics() {
+        let columns = vec![Column {
+            name: "MixedCase".into(),
+            data_type: DataType::Integer,
+            nullable: false,
+            unique: false,
+        }];
+        let row = vec![Value::Integer(7)];
+        let excluded = vec![Value::Integer(11)];
+        let context = EvalContext::upsert(&columns, &row, &excluded);
+        for name in ["MixedCase", "mixedcase", "MIXEDCASE"] {
+            for identifier in [Ident::new(name), Ident::with_quote('"', name)] {
+                let expected = context.column(&ident_name(&identifier)).unwrap();
+                assert_eq!(
+                    evaluate(&Expr::Identifier(identifier.clone()), &context).unwrap(),
+                    expected
+                );
+                for prefix in [
+                    Ident::new("points"),
+                    Ident::new("EXCLUDED"),
+                    Ident::with_quote('"', "excluded"),
+                    Ident::with_quote('"', "EXCLUDED"),
+                ] {
+                    let expected = if ident_name(&prefix) == "excluded" {
+                        Value::Integer(11)
+                    } else {
+                        Value::Integer(7)
+                    };
+                    assert_eq!(
+                        evaluate(
+                            &Expr::CompoundIdentifier(vec![prefix, identifier.clone()]),
+                            &context
+                        )
+                        .unwrap(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_case_sql_projections_filters_and_upserts_keep_results() {
+        let database = Database::new();
+        database.execute("CREATE TABLE records (id INTEGER PRIMARY KEY, \"Payload\" TEXT, \"Score\" INTEGER); INSERT INTO records VALUES (1, 'one', 3), (2, 'two', 7), (3, 'three', 5)").unwrap();
+        let expected = database.execute("SELECT id, \"Payload\" FROM records WHERE \"Score\" >= 5 ORDER BY \"Score\" DESC LIMIT 2").unwrap();
+        let actual = database.execute("SELECT ID, records.PAYLOAD FROM records WHERE records.SCORE >= 5 ORDER BY score DESC LIMIT 2").unwrap();
+        let (ExecutionResult::Query(expected), ExecutionResult::Query(actual)) =
+            (&expected[0], &actual[0])
+        else {
+            panic!("queries must return rows")
+        };
+        assert_eq!(actual.rows, expected.rows);
+        database.execute("INSERT INTO records VALUES (2, 'revised', 9) ON CONFLICT (ID) DO UPDATE SET PAYLOAD = EXCLUDED.payload, SCORE = excluded.Score").unwrap();
+        let result = database
+            .execute("SELECT payload, score FROM records WHERE ID = 2")
+            .unwrap();
+        let ExecutionResult::Query(result) = &result[0] else {
+            panic!("query must return rows")
+        };
+        assert_eq!(
+            result.rows,
+            vec![vec![Value::Text("revised".into()), Value::Integer(9)]]
+        );
+    }
+
+    #[test]
+    fn admin_page_is_bounded_and_edits_reject_stale_revisions() {
+        let database = Database::new();
+        database.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT); INSERT INTO items VALUES (1, 'one'), (2, 'two'), (3, 'three')").unwrap();
+        let page = database.table_page("items", 1, 1).unwrap();
+        assert_eq!(page.total_rows, 3);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0][0], Value::Integer(2));
+        assert_eq!(page.columns[1].name, "title");
+        database
+            .execute_if_revision(
+                "UPDATE items SET title = 'revised' WHERE id = 2",
+                page.revision,
+            )
+            .unwrap();
+        assert!(matches!(
+            database.execute_if_revision("DELETE FROM items WHERE id = 2", page.revision),
+            Err(Error::RevisionConflict { .. })
+        ));
+        assert_eq!(
+            database.table_page("items", 1, 1).unwrap().rows[0][1],
+            Value::Text("revised".into())
+        );
+        assert!(database
+            .table_page("items", usize::MAX, 250)
+            .unwrap()
+            .rows
+            .is_empty());
+    }
+
+    #[test]
+    fn only_one_concurrent_admin_edit_commits_for_a_revision() {
+        let database = Database::new();
+        database
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1)")
+            .unwrap();
+        let revision = database.revision().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let database = database.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    database.execute_if_revision("UPDATE items SET id = id + 1", revision)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(Error::RevisionConflict { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(
+            database.table_page("items", 0, 1).unwrap().rows[0][0],
+            Value::Integer(2)
+        );
+    }
+
+    #[test]
+    fn failed_admin_transaction_preserves_data_and_revision() {
+        let database = Database::new();
+        database
+            .execute(
+                "CREATE TABLE items (id INTEGER PRIMARY KEY); INSERT INTO items VALUES (1), (2)",
+            )
+            .unwrap();
+        let revision = database.revision().unwrap();
+        assert!(database
+            .execute_if_revision(
+                "DELETE FROM items WHERE id = 2; INSERT INTO items VALUES (1)",
+                revision
+            )
+            .is_err());
+        let page = database.table_page("items", 0, 10).unwrap();
+        assert_eq!(page.revision, revision);
+        assert_eq!(page.rows.len(), 2);
+    }
 
     #[test]
     fn parse_cache_is_shared_bounded_and_catalog_independent() {

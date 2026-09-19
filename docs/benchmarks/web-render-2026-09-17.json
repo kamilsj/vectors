@@ -1,0 +1,112 @@
+{
+  "benchmark": "web_result_render",
+  "measured_at": "2026-09-17T21:54:56.475Z",
+  "browser_version": "152.0.7977.83",
+  "platform": "darwin arm64",
+  "cpu": "Apple M4 Max",
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "row_count": 10000,
+  "dimensions": 384,
+  "seed": 42,
+  "warmups": 1,
+  "repetitions": 5,
+  "timing_scope": "DOM construction, insertion, style, and forced layout; excludes data generation, API transfer, and JSON parsing",
+  "results": [
+    {
+      "variant": "baseline",
+      "median_render_ms": 204.1,
+      "rendered_rows": 10000,
+      "dom_nodes": 70017,
+      "dom_elements": 40011,
+      "preview_rows_verified": 100,
+      "full_vector_verified": true,
+      "samples": [
+        {
+          "render_ms": 218.3,
+          "rendered_rows": 10000,
+          "dom_nodes": 70017,
+          "dom_elements": 40011,
+          "rendered_height_px": 340044
+        },
+        {
+          "render_ms": 204.1,
+          "rendered_rows": 10000,
+          "dom_nodes": 70017,
+          "dom_elements": 40011,
+          "rendered_height_px": 340044
+        },
+        {
+          "render_ms": 197.5,
+          "rendered_rows": 10000,
+          "dom_nodes": 70017,
+          "dom_elements": 40011,
+          "rendered_height_px": 340044
+        },
+        {
+          "render_ms": 218.5,
+          "rendered_rows": 10000,
+          "dom_nodes": 70017,
+          "dom_elements": 40011,
+          "rendered_height_px": 340044
+        },
+        {
+          "render_ms": 203.1,
+          "rendered_rows": 10000,
+          "dom_nodes": 70017,
+          "dom_elements": 40011,
+          "rendered_height_px": 340044
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "median_render_ms": 2.8,
+      "rendered_rows": 100,
+      "dom_nodes": 1139,
+      "dom_elements": 724,
+      "preview_rows_verified": 100,
+      "full_vector_verified": true,
+      "samples": [
+        {
+          "render_ms": 2.8,
+          "rendered_rows": 100,
+          "dom_nodes": 1139,
+          "dom_elements": 724,
+          "rendered_height_px": 617
+        },
+        {
+          "render_ms": 2.6,
+          "rendered_rows": 100,
+          "dom_nodes": 1139,
+          "dom_elements": 724,
+          "rendered_height_px": 617
+        },
+        {
+          "render_ms": 2.8,
+          "rendered_rows": 100,
+          "dom_nodes": 1139,
+          "dom_elements": 724,
+          "rendered_height_px": 617
+        },
+        {
+          "render_ms": 2.8,
+          "rendered_rows": 100,
+          "dom_nodes": 1139,
+          "dom_elements": 724,
+          "rendered_height_px": 617
+        },
+        {
+          "render_ms": 2.7,
+          "rendered_rows": 100,
+          "dom_nodes": 1139,
+          "dom_elements": 724,
+          "rendered_height_px": 617
+        }
+      ]
+    }
+  ],
+  "median_speedup": 72.893
+}

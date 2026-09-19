@@ -116,10 +116,10 @@ jobs:
           grep -Eq '^- ' release-notes.md
       - name: Add installers
         shell: bash
-        run: cp install.sh install.ps1 dist/
+        run: cp install.sh install.ps1 update.sh update.ps1 dist/
       - name: Create checksums
         shell: bash
-        run: cd dist && sha256sum vectors-* install.sh install.ps1 > SHA256SUMS
+        run: cd dist && sha256sum vectors-* install.sh install.ps1 update.sh update.ps1 > SHA256SUMS
       - name: Attest release provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -127,6 +127,8 @@ jobs:
             dist/vectors-*
             dist/install.sh
             dist/install.ps1
+            dist/update.sh
+            dist/update.ps1
             dist/SHA256SUMS
       - name: Create release
         env:

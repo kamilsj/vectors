@@ -19,6 +19,8 @@ pub enum Error {
     ColumnNotFound(String),
     #[error("column '{0}' appears more than once")]
     DuplicateColumn(String),
+    #[error("vector column '{0}' cannot be used as a structured scalar filter")]
+    InvalidFilterColumn(String),
     #[error("expected {expected}, found {found}")]
     TypeMismatch { expected: String, found: String },
     #[error("vector dimensions differ: left has {left}, right has {right}")]
@@ -37,6 +39,10 @@ pub enum Error {
     UniqueViolation(String),
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    #[error("data changed since it was loaded (expected revision {expected}, current {actual}); refresh before editing")]
+    RevisionConflict { expected: u64, actual: u64 },
+    #[error("schema for table '{table}' changed while preparing the request; refresh the schema before retrying")]
+    SchemaChanged { table: String },
     #[error("query returns at least {found_at_least} rows; maximum is {max}")]
     ResultLimitExceeded { found_at_least: usize, max: usize },
     #[error("table would contain {found} rows; maximum is {max}")]

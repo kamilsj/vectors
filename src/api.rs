@@ -1,24 +1,35 @@
 //! Actix Web interface for SQL execution and vector search.
 
-use std::collections::HashMap;
+mod admin;
+mod embeddings;
+mod graph;
+mod ingest;
+mod reranking;
+mod response;
+
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use actix_web::dev::ServerHandle;
 use actix_web::error::{BlockingError, InternalError, JsonPayloadError};
-use actix_web::http::header::{AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE};
+use actix_web::http::header::{
+    EntityTag, IfNoneMatch, AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE,
+};
 use actix_web::http::{KeepAlive, StatusCode};
-use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, ResponseError};
+use actix_web::middleware::Compress;
+use actix_web::{web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, ResponseError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value as JsonValue};
 
 use crate::{
     Column, DataType, Database, Error, ExecutionResult, InsertConflict, QueryIntent, QueryResult,
-    Value, Vector,
+    Value, Vector, VectorFilterOperator, VectorSearch, VectorSearchFilter, VectorSearchMetric,
 };
 
 const DEFAULT_MAX_JSON_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
@@ -30,7 +41,7 @@ const MAX_RESPONSE_ROWS: usize = 1_000_000;
 const MAX_SEARCH_LIMIT: usize = 1_000;
 const SHUTDOWN_FILE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Bounds applied while decoding API requests and producing SQL responses.
+/// Bounds applied while decoding API requests and producing query responses.
 ///
 /// The HTTP API buffers JSON before deserialization, so every deployment has
 /// finite limits even when clients omit `Content-Length`. Large imports should
@@ -68,7 +79,8 @@ impl RequestLimits {
         self.max_bulk_rows
     }
 
-    /// Maximum total query rows returned by one SQL request.
+    /// Maximum total query rows returned by one SQL request. Structured search
+    /// also bounds its requested limit by this value and its own 1,000-row cap.
     pub const fn max_response_rows(&self) -> usize {
         self.max_response_rows
     }
@@ -272,14 +284,42 @@ pub fn configure_with_limits(config: &mut web::ServiceConfig, limits: RequestLim
 
 fn configure_routes(config: &mut web::ServiceConfig) {
     config
-        .route("/", web::get().to(console))
-        .route("/assets/app.css", web::get().to(console_styles))
-        .route("/assets/app.js", web::get().to(console_script))
+        .service(
+            web::resource("/")
+                .wrap(Compress::default())
+                .route(web::get().to(console)),
+        )
+        .service(
+            web::resource("/assets/app.css")
+                .wrap(Compress::default())
+                .route(web::get().to(console_styles)),
+        )
+        .service(
+            web::resource("/assets/app.js")
+                .wrap(Compress::default())
+                .route(web::get().to(console_script)),
+        )
         .route("/healthz", web::get().to(health))
         .route("/readyz", web::get().to(readiness))
         .route("/metrics", web::get().to(metrics))
         .service(
             web::scope("/v1")
+                .configure(admin::configure)
+                .configure(graph::configure)
+                .configure(reranking::configure)
+                .route("/settings/server", web::get().to(server_settings))
+                .route(
+                    "/settings/embeddings",
+                    web::get().to(embeddings::get_settings),
+                )
+                .route(
+                    "/settings/embeddings",
+                    web::put().to(embeddings::update_settings),
+                )
+                .route(
+                    "/embeddings",
+                    web::post().to(embeddings::generate_embeddings),
+                )
                 .route("/sql", web::post().to(execute_sql))
                 .route("/sql/intent", web::post().to(query_intent))
                 .route("/tables", web::get().to(tables))
@@ -291,33 +331,84 @@ fn configure_routes(config: &mut web::ServiceConfig) {
         );
 }
 
-const CONSOLE_HTML: &str = include_str!("../web/index.html");
-const CONSOLE_CSS: &str = include_str!("../web/app.css");
-const CONSOLE_JS: &str = include_str!("../web/app.js");
+static CONSOLE_HTML: ConsoleAsset = ConsoleAsset::new(
+    include_str!("../web/index.html"),
+    "text/html; charset=utf-8",
+);
+static CONSOLE_CSS: ConsoleAsset =
+    ConsoleAsset::new(include_str!("../web/app.css"), "text/css; charset=utf-8");
+static CONSOLE_JS: ConsoleAsset = ConsoleAsset::new(
+    include_str!("../web/app.js"),
+    "text/javascript; charset=utf-8",
+);
 
-async fn console() -> HttpResponse {
-    console_asset(CONSOLE_HTML, "text/html; charset=utf-8")
+struct ConsoleAsset {
+    body: &'static str,
+    content_type: &'static str,
+    etag: OnceLock<EntityTag>,
 }
 
-async fn console_styles() -> HttpResponse {
-    console_asset(CONSOLE_CSS, "text/css; charset=utf-8")
+impl ConsoleAsset {
+    const fn new(body: &'static str, content_type: &'static str) -> Self {
+        Self {
+            body,
+            content_type,
+            etag: OnceLock::new(),
+        }
+    }
+
+    fn etag(&self) -> &EntityTag {
+        self.etag.get_or_init(|| {
+            let mut hasher = DefaultHasher::new();
+            self.body.hash(&mut hasher);
+            // Derive the validator from content, not the package version: local
+            // builds can change assets without a version bump. Weak tags remain
+            // valid across the different negotiated compression encodings.
+            EntityTag::new_weak(format!("{:x}-{:x}", self.body.len(), hasher.finish()))
+        })
+    }
 }
 
-async fn console_script() -> HttpResponse {
-    console_asset(CONSOLE_JS, "text/javascript; charset=utf-8")
+async fn console(request: HttpRequest) -> HttpResponse {
+    console_asset(&request, &CONSOLE_HTML)
 }
 
-fn console_asset(body: &'static str, content_type: &'static str) -> HttpResponse {
-    HttpResponse::Ok()
-        .insert_header(("content-type", content_type))
+async fn console_styles(request: HttpRequest) -> HttpResponse {
+    console_asset(&request, &CONSOLE_CSS)
+}
+
+async fn console_script(request: HttpRequest) -> HttpResponse {
+    console_asset(&request, &CONSOLE_JS)
+}
+
+fn console_asset(request: &HttpRequest, asset: &ConsoleAsset) -> HttpResponse {
+    let etag = asset.etag();
+    let not_modified = match request.get_header::<IfNoneMatch>() {
+        Some(IfNoneMatch::Any) => true,
+        Some(IfNoneMatch::Items(tags)) => tags.iter().any(|tag| tag.weak_eq(etag)),
+        None => false,
+    };
+    let mut response = HttpResponse::build(if not_modified {
+        StatusCode::NOT_MODIFIED
+    } else {
+        StatusCode::OK
+    });
+    response
+        .insert_header(("content-type", asset.content_type))
         .insert_header(("cache-control", "no-cache"))
+        .insert_header(("etag", etag.to_string()))
+        .insert_header(("vary", "Accept-Encoding"))
         .insert_header(("x-content-type-options", "nosniff"))
         .insert_header(("referrer-policy", "no-referrer"))
         .insert_header((
             "content-security-policy",
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
-        ))
-        .body(body)
+        ));
+    if not_modified {
+        response.finish()
+    } else {
+        response.body(asset.body)
+    }
 }
 
 /// Start an HTTP server backed by the supplied database handle.
@@ -422,6 +513,17 @@ async fn serve_inner(
     if let Some(path) = shutdown_file.as_deref() {
         prepare_shutdown_file(path)?;
     }
+    let embeddings = web::Data::new(crate::EmbeddingService::from_environment(
+        database
+            .data_directory()
+            .map(|directory| directory.join("embedding-settings.json")),
+    )?);
+    let reranking = web::Data::new(crate::RerankingService::from_environment(
+        database
+            .data_directory()
+            .map(|directory| directory.join("reranking-settings.json")),
+    )?);
+    let runtime_config = web::Data::new(config.clone());
     let database = web::Data::new(database);
     let limiter = web::Data::new(DatabaseTaskLimiter::new(
         config.max_concurrent_database_tasks,
@@ -430,6 +532,9 @@ async fn serve_inner(
     let server = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(database.clone())
+            .app_data(embeddings.clone())
+            .app_data(reranking.clone())
+            .app_data(runtime_config.clone())
             .app_data(limiter.clone());
         if let Some(security) = security.clone() {
             app = app.app_data(web::Data::new(security));
@@ -566,6 +671,46 @@ async fn health(
         },
         max_json_payload_bytes: limits.max_json_payload_bytes,
     })
+}
+
+async fn server_settings(
+    request: HttpRequest,
+    security: Option<web::Data<ApiSecurity>>,
+    config: Option<web::Data<ServerConfig>>,
+    limits: web::Data<RequestLimits>,
+    database: web::Data<Database>,
+) -> Result<web::Json<JsonValue>, ApiError> {
+    authorize(&request, security.as_ref().map(|data| data.get_ref()))?;
+    let compute = database.compute_config();
+    let capacity = config.map(|config| {
+        serde_json::json!({
+            "workers": config.workers,
+            "max_blocking_threads_per_worker": config.max_blocking_threads_per_worker,
+            "max_connections_per_worker": config.max_connections_per_worker,
+            "max_concurrent_database_tasks": config.max_concurrent_database_tasks,
+            "keep_alive_seconds": config.keep_alive.as_secs(),
+            "client_request_timeout_seconds": config.client_request_timeout.as_secs(),
+            "shutdown_timeout_seconds": config.shutdown_timeout.as_secs(),
+        })
+    });
+    Ok(web::Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "storage": if database.data_directory().is_some() { "durable" } else { "memory" },
+        "authentication": security.is_some(),
+        "compute": {
+            "device": compute.device.to_string(),
+            "gpu_enabled": cfg!(feature = "gpu"),
+            "gpu_min_elements": compute.gpu_min_elements,
+            "gpu_cache_bytes": compute.gpu_cache_bytes,
+        },
+        "limits": {
+            "max_json_payload_bytes": limits.max_json_payload_bytes,
+            "max_bulk_rows": limits.max_bulk_rows,
+            "max_response_rows": limits.max_response_rows,
+            "max_search_limit": MAX_SEARCH_LIMIT.min(limits.max_response_rows),
+        },
+        "capacity": capacity,
+    })))
 }
 
 #[derive(Debug, Serialize)]
@@ -754,7 +899,7 @@ async fn execute_sql(
     limits: web::Data<RequestLimits>,
     database: web::Data<Database>,
     request: web::Json<SqlRequest>,
-) -> Result<web::Json<SqlResponse>, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
@@ -762,12 +907,15 @@ async fn execute_sql(
     let sql = request.into_inner().sql;
     let max_response_rows = limits.max_response_rows;
     let database = database.get_ref().clone();
-    let results = run_database_task(limiter.as_ref(), move || {
-        database.execute_with_row_limit(&sql, max_response_rows)
+    let body = run_database_task(limiter.as_ref(), move || {
+        let results = database.execute_with_row_limit(&sql, max_response_rows)?;
+        enforce_response_row_limit(&results, max_response_rows)?;
+        response::encode_sql(&results)
     })
     .await?;
-    enforce_response_row_limit(&results, max_response_rows)?;
-    Ok(web::Json(SqlResponse::from(results)))
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body))
 }
 
 #[derive(Debug, Serialize)]
@@ -993,14 +1141,14 @@ async fn insert_rows(
     let database = database.get_ref().clone();
     let response = run_database_task(limiter.as_ref(), move || {
         let schema = database.schema(&table)?;
-        let rows = build_insert_values(&schema, &request.rows, request.normalize_vectors)?;
+        let rows = ingest::build_insert_values(&schema, request.rows, request.normalize_vectors)?;
         let conflict = build_insert_conflict(
             &schema,
             request.on_conflict,
             request.conflict_target.as_deref(),
             &request.update_columns,
         )?;
-        let rows_affected = database.insert_rows(&table, rows, conflict)?;
+        let rows_affected = database.insert_rows_if_schema(&table, &schema, rows, conflict)?;
         Ok::<_, ApiError>(SqlResponse {
             results: vec![ApiExecutionResult::Command {
                 tag: "INSERT",
@@ -1065,76 +1213,116 @@ async fn vector_search(
     http_request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
     limiter: Option<web::Data<DatabaseTaskLimiter>>,
+    limits: web::Data<RequestLimits>,
     database: web::Data<Database>,
     request: web::Json<VectorSearchRequest>,
-) -> Result<web::Json<ApiExecutionResult>, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
     let request = request.into_inner();
-    if request.limit == 0 || request.limit > MAX_SEARCH_LIMIT {
+    let maximum = MAX_SEARCH_LIMIT.min(limits.max_response_rows);
+    if request.limit == 0 || request.limit > maximum {
         return Err(ApiError::bad_request(
             "invalid_limit",
-            format!("limit must be between 1 and {MAX_SEARCH_LIMIT}"),
+            format!("limit must be between 1 and {maximum}"),
         ));
     }
     let database = database.get_ref().clone();
-    let mut results = run_database_task(limiter.as_ref(), move || {
-        let schema = database.schema(&request.table)?;
-        let sql = build_search_sql(&request, &schema)?;
-        Ok::<_, ApiError>(database.execute(&sql)?)
+    let body = run_database_task(limiter.as_ref(), move || {
+        let request = typed_search(request)?;
+        let result = database.search_vectors(request).map_err(search_error)?;
+        response::encode_query(&result)
     })
     .await?;
-    let result = results
-        .pop()
-        .ok_or_else(|| ApiError::internal("empty search execution result"))?;
-    Ok(web::Json(ApiExecutionResult::from(result)))
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body))
 }
 
-fn build_insert_values(
-    schema: &[Column],
-    rows: &[Map<String, JsonValue>],
-    normalize_vectors: bool,
-) -> Result<Vec<Vec<Value>>, ApiError> {
-    let known = schema
-        .iter()
-        .map(|column| (column.name.to_ascii_lowercase(), column))
-        .collect::<HashMap<_, _>>();
-    for row in rows {
-        let mut normalized_names = std::collections::HashSet::new();
-        for name in row.keys() {
-            if !known.contains_key(&name.to_ascii_lowercase()) {
-                return Err(ApiError::bad_request(
-                    "unknown_column",
-                    format!("column '{name}' does not exist"),
-                ));
-            }
-            if !normalized_names.insert(name.to_ascii_lowercase()) {
-                return Err(ApiError::bad_request(
-                    "duplicate_column",
-                    format!("column '{name}' appears more than once"),
-                ));
-            }
-        }
-    }
-
-    let mut values = Vec::with_capacity(rows.len());
-    for row in rows {
-        let normalized = row
-            .iter()
-            .map(|(name, value)| (name.to_ascii_lowercase(), value))
-            .collect::<HashMap<_, _>>();
-        let row_values = schema
-            .iter()
-            .map(|column| {
-                let value = normalized
-                    .get(&column.name.to_ascii_lowercase())
-                    .copied()
-                    .unwrap_or(&JsonValue::Null);
-                json_typed_value(value, &column.data_type, &column.name, normalize_vectors)
+fn typed_search(request: VectorSearchRequest) -> Result<VectorSearch, ApiError> {
+    let filters = request
+        .filters
+        .into_iter()
+        .map(|filter| {
+            let invalid = || {
+                ApiError::bad_request(
+                    "invalid_value",
+                    format!(
+                        "filter for column '{}' must be a scalar value",
+                        filter.column
+                    ),
+                )
+            };
+            let value = match filter.value {
+                JsonValue::Null => {
+                    if !matches!(filter.operator, FilterOperator::Eq | FilterOperator::Ne) {
+                        return Err(ApiError::bad_request(
+                            "invalid_null_filter",
+                            "NULL filters only support eq and ne",
+                        ));
+                    }
+                    Value::Null
+                }
+                JsonValue::Bool(value) => Value::Boolean(value),
+                JsonValue::Number(value) => match value.as_i64() {
+                    Some(value) => Value::Integer(value),
+                    None => Value::Float(
+                        value
+                            .as_f64()
+                            .filter(|value| value.is_finite())
+                            .ok_or_else(invalid)?,
+                    ),
+                },
+                JsonValue::String(value) => Value::Text(value),
+                JsonValue::Array(_) | JsonValue::Object(_) => return Err(invalid()),
+            };
+            Ok(VectorSearchFilter {
+                column: filter.column,
+                operator: match filter.operator {
+                    FilterOperator::Eq => VectorFilterOperator::Eq,
+                    FilterOperator::Ne => VectorFilterOperator::Ne,
+                    FilterOperator::Gt => VectorFilterOperator::Gt,
+                    FilterOperator::Gte => VectorFilterOperator::Gte,
+                    FilterOperator::Lt => VectorFilterOperator::Lt,
+                    FilterOperator::Lte => VectorFilterOperator::Lte,
+                },
+                value,
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        values.push(row_values);
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(VectorSearch {
+        table: request.table,
+        vector_column: request.vector_column,
+        query: Vector::new(request.query)?,
+        metric: match request.metric {
+            SearchMetric::Cosine => VectorSearchMetric::Cosine,
+            SearchMetric::L2 => VectorSearchMetric::L2,
+            SearchMetric::SquaredL2 => VectorSearchMetric::SquaredL2,
+            SearchMetric::DotProduct => VectorSearchMetric::DotProduct,
+        },
+        select: request.select,
+        filters,
+        limit: request.limit,
+    })
+}
+
+fn search_error(error: Error) -> ApiError {
+    match error {
+        Error::ColumnNotFound(ref name) => {
+            ApiError::bad_request("unknown_column", format!("column '{name}' does not exist"))
+        }
+        Error::DuplicateColumn(ref name) => ApiError::bad_request(
+            "duplicate_column",
+            format!("column '{name}' appears more than once"),
+        ),
+        Error::InvalidFilterColumn(_) => {
+            ApiError::bad_request("invalid_filter_column", error.to_string())
+        }
+        Error::TypeMismatch { ref expected, .. } if expected == "VECTOR" => {
+            ApiError::bad_request("not_a_vector", error.to_string())
+        }
+        Error::TypeMismatch { .. } => ApiError::bad_request("invalid_value", error.to_string()),
+        _ => ApiError::from(error),
     }
-    Ok(values)
 }
 
 fn build_insert_conflict(
@@ -1208,115 +1396,6 @@ fn build_insert_conflict(
             })
         }
     }
-}
-
-fn build_search_sql(request: &VectorSearchRequest, schema: &[Column]) -> Result<String, ApiError> {
-    let vector_column = resolve_column(schema, &request.vector_column)?;
-    let dimensions = match vector_column.data_type {
-        DataType::Vector(dimensions) => dimensions,
-        _ => {
-            return Err(ApiError::bad_request(
-                "not_a_vector",
-                format!("column '{}' is not a vector", vector_column.name),
-            ))
-        }
-    };
-    let query = Vector::new(request.query.clone()).map_err(ApiError::from)?;
-    if query.dimensions() != dimensions {
-        return Err(ApiError::from(Error::DimensionMismatch {
-            left: dimensions,
-            right: query.dimensions(),
-        }));
-    }
-
-    let mut selected = if request.select.is_empty() {
-        schema
-            .iter()
-            .filter(|column| !matches!(column.data_type, DataType::Vector(_)))
-            .collect::<Vec<_>>()
-    } else {
-        request
-            .select
-            .iter()
-            .map(|name| resolve_column(schema, name))
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    if selected.is_empty() {
-        selected.push(vector_column);
-    }
-
-    let vector = format!(
-        "ARRAY[{}]",
-        query
-            .as_slice()
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let (function, direction) = match request.metric {
-        SearchMetric::Cosine => ("cosine_distance", "ASC"),
-        SearchMetric::L2 => ("l2_distance", "ASC"),
-        SearchMetric::SquaredL2 => ("squared_l2_distance", "ASC"),
-        SearchMetric::DotProduct => ("dot_product", "DESC"),
-    };
-    let distance = format!(
-        "{function}({}, {vector}) AS distance",
-        quote_identifier(&vector_column.name)
-    );
-    let mut projection = selected
-        .into_iter()
-        .map(|column| quote_identifier(&column.name))
-        .collect::<Vec<_>>();
-    projection.push(distance);
-
-    let mut filters = Vec::with_capacity(request.filters.len());
-    for filter in &request.filters {
-        let column = resolve_column(schema, &filter.column)?;
-        let identifier = quote_identifier(&column.name);
-        if filter.value.is_null() {
-            let predicate = match filter.operator {
-                FilterOperator::Eq => format!("{identifier} IS NULL"),
-                FilterOperator::Ne => format!("{identifier} IS NOT NULL"),
-                _ => {
-                    return Err(ApiError::bad_request(
-                        "invalid_null_filter",
-                        "NULL filters only support eq and ne",
-                    ))
-                }
-            };
-            filters.push(predicate);
-            continue;
-        }
-        if matches!(column.data_type, DataType::Vector(_)) {
-            return Err(ApiError::bad_request(
-                "invalid_filter_column",
-                "vector columns cannot be used as structured scalar filters",
-            ));
-        }
-        let operator = match filter.operator {
-            FilterOperator::Eq => "=",
-            FilterOperator::Ne => "!=",
-            FilterOperator::Gt => ">",
-            FilterOperator::Gte => ">=",
-            FilterOperator::Lt => "<",
-            FilterOperator::Lte => "<=",
-        };
-        let literal = json_literal(&filter.value, &column.data_type, &column.name, false)?;
-        filters.push(format!("{identifier} {operator} {literal}"));
-    }
-
-    let where_clause = if filters.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", filters.join(" AND "))
-    };
-    Ok(format!(
-        "SELECT {} FROM {}{where_clause} ORDER BY distance {direction} LIMIT {}",
-        projection.join(", "),
-        quote_identifier(&request.table.to_ascii_lowercase()),
-        request.limit
-    ))
 }
 
 fn resolve_column<'a>(schema: &'a [Column], name: &str) -> Result<&'a Column, ApiError> {
@@ -1641,6 +1720,8 @@ impl From<Error> for ApiError {
             | Error::IndexAlreadyExists(_)
             | Error::UniqueViolation(_)
             | Error::NullViolation(_) => (StatusCode::CONFLICT, "constraint_violation"),
+            Error::RevisionConflict { .. } => (StatusCode::CONFLICT, "stale_revision"),
+            Error::SchemaChanged { .. } => (StatusCode::CONFLICT, "schema_changed"),
             Error::ResultLimitExceeded { .. } => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "response_too_large")
             }
@@ -1719,6 +1800,15 @@ mod tests {
             "vectors-{label}-{}-{sequence}.request",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn console_validator_changes_when_same_length_content_changes() {
+        let original = ConsoleAsset::new("old content", "text/plain");
+        let identical = ConsoleAsset::new("old content", "text/plain");
+        let updated = ConsoleAsset::new("new content", "text/plain");
+        assert!(original.etag().weak_eq(identical.etag()));
+        assert!(!original.etag().weak_eq(updated.etag()));
     }
 
     #[test]

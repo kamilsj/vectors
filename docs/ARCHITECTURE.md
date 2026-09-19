@@ -13,6 +13,8 @@ flowchart LR
     Parser --> Planner["validation and plan selection"]
     Planner --> General["general SQL executor"]
     Planner --> TopK["VectorTopK fast path"]
+    JSON["structured vector API"] --> Typed["typed validation under catalog lock"]
+    Typed --> TopK
     General --> Catalog["shared in-memory catalog"]
     TopK --> Index["scalar hash-index pruning"]
     Index --> Dense["dense vector column"]
@@ -25,14 +27,22 @@ flowchart LR
 ```
 
 The Actix server and interactive shell both call the same public `Database`
-API. The HTTP vector-search endpoint validates structured JSON and translates
-it into SQL, so it does not maintain a second query implementation. The typed
-ingestion endpoint converts JSON directly to `Value` rows and calls the same
+API. The HTTP vector-search endpoint passes typed vectors and scalar filters to
+`Database::search_vectors`. It validates the schema and builds a top-k plan under
+one catalog read lock, reusing SQL predicate evaluation, index pruning, ranking,
+and compute execution. Query vectors never become SQL strings or AST literals;
+only scalar predicates need small AST nodes. Conjunctions are balanced to bound
+stack depth for large filter lists. Explicit selected columns must be distinct.
+The typed ingestion endpoint converts owned JSON directly to `Value` rows and calls the same
 atomic insert core used by SQL `INSERT`; it does not serialize values back into
 SQL. Parsed ASTs for repeated SQL are kept in a shared least-recently-used cache
 capped at 64 entries, 64 KiB per request string, and 1 MiB of SQL text in total.
 ASTs do not contain catalog data and are validated against the current schema
-every time they execute.
+every time they execute. Structured searches do not populate or evict that cache.
+Ingestion uses one schema lookup map and reusable row buffers, moves strings,
+and normalizes owned vector buffers in place. `insert_rows_if_schema` compares
+the inspected column definitions under the insert's write lock, before conflict
+preparation, WAL append, or mutation; a changed schema rejects the entire batch.
 
 `Database::query_intent` uses the same parser, schema lookup, projection
 expansion, expression validation, and `VectorTopK` recognizer without scanning
@@ -58,7 +68,8 @@ ordered top-k plans keep bounded heaps, so an oversized response is rejected
 without constructing an unbounded final result set. This is not a general
 query-memory limit: predicates, aggregates, `DISTINCT`, ordering with a large
 `OFFSET`, and grouping may retain additional working state required by SQL
-semantics. Structured vector search retains its separate 1,000-row limit.
+semantics. Structured vector search rejects requested limits above the smaller
+of the configured response-row budget and its separate 1,000-row cap.
 
 The standalone HTTP server admits database work through one process-wide
 capacity guard before scheduling it on Actix blocking workers. Capacity is held
@@ -66,8 +77,11 @@ for queued and running work by an RAII permit owned by the blocking closure,
 and released on completion or panic. Cancelling the HTTP handler does not
 release capacity while its database work continues, and the in-flight metric
 still counts that work. All database routes use the same dispatch helper;
-structured search keeps schema lookup, SQL construction, and execution inside
-one admitted task. Saturated requests fail immediately with HTTP 503 and a retry
+SQL and structured search also encode their final JSON bytes in that task. The
+serializer reads typed results directly instead of building a second JSON-value
+tree, preserving existing number conversion and response metadata. Thus encoding
+keeps its admission permit and does not block Actix's async worker. Saturated
+requests fail immediately with HTTP 503 and a retry
 hint, rather than accumulating an unbounded work queue. Worker, connection, blocking
 thread, capacity, keep-alive, client-header-timeout, and graceful-shutdown
 settings are explicit. `/healthz`, `/readyz`, and `/metrics` remain outside the
@@ -75,11 +89,108 @@ database admission path so an overloaded process is still observable.
 
 ## Catalog and concurrency
 
+### Document chunks and graph retrieval
+
+`chunking::chunk_text` splits Unicode text with source byte offsets and bounded
+overlap. The HTTP graph workflow adds versioned title/heading context, pins the
+provider/model/dimensions, and generates every embedding before changing data.
+Normalized chunks, source documents, configuration, and directed edges are
+stored in four ordinary tables per collection, with scalar indexes for document
+and edge endpoint lookup.
+
+The graph engine stages a catalog copy under the write lock. Document replacement
+removes old chunks and all incident edges, adds new rows, and uses the existing
+exact vector top-k executor for cross-document semantic neighbors. Adjacent and
+mirrored semantic edges are bounded. In durable mode it appends one equivalent
+SQL transaction to the existing WAL before publishing; recovery uses ordinary
+SQL replay. This adds no storage-format version. Live graph operations use typed
+values; only the durable WAL needs vector literals.
+
+The `/search` route finds exact vector seeds and traverses indexed outgoing edges
+with hop, neighbor, node, and returned-edge budgets. It preserves seeds, prevents
+cycles from duplicating chunks, includes relationships among selected hits, and
+checks citation slices against source text. Profile/schema mismatches are
+rejected. Semantic links mean cosine proximity; application-defined relationship
+labels may be inserted using SQL. No entity extraction or answer-generation
+model runs inside the graph engine.
+
+The separate RAG pipeline combines BM25 posting lists and exact vector ranks
+with weighted reciprocal rank fusion, then reserves candidate capacity for graph
+context when the seed budget permits. `/retrieve` uses a query-aware beam over
+indexed outgoing edges: it merges proposals from the whole frontier before
+applying each hop's candidate-width cap. Per-source distinct-neighbor limits,
+at most three hops, and a maximum 100-candidate beam bound exploration. Scores
+combine decayed path strength and target cosine/BM25 fit; structural strength
+is retained separately so low-relevance bridges can reach useful passages.
+Later stronger paths can improve candidates, zero-weight edges do not propagate
+retrieval evidence, and stable IDs break ties. Traversed bridges need not appear
+in the bounded candidate pool or final selected context. This is selective
+chunk-graph retrieval, not entity extraction or exhaustive path search.
+
+Lexical indexes use catalog identity, collection name, and the chunk embedding
+column's storage generation and row count. Every chunk append or rebuild
+changes that generation, including text-only SQL updates, typed upserts,
+document replacement/deletion, and restore. Catalog clones preserve unchanged
+generations, so relationship edits and unrelated writes do not force
+retokenization. Mutation paths must preserve this invalidation invariant.
+The LRU retains at most three indexes, each checked against a conservative
+16 MiB capacity-aware allocation budget. Oversized vocabularies use exact,
+uncached query-specific postings; builders tokenize outside the global cache
+lock. BM25 length factors are computed once per indexed row using the same
+arithmetic as the scoring loop.
+
+The owned candidate snapshot holds vectors, source text, and citations while an
+optional Voyage cross-encoder runs.
+Final MMR selection performs no further catalog reads; it limits duplicate text,
+source overlap, per-document count, and whole-chunk UTF-8 context bytes. Reranking
+uses independent bounded request admission, write-only keys, strict index/score
+validation, and explicit failures without automatic paid retries or fallback.
+
+Graph browsing needs no query embedding. `/graph` returns a page and its induced
+edges; `/neighborhood` explores from an existing chunk across page boundaries.
+Focused exploration follows incoming, outgoing, or both indexed directions with
+kind/weight filters, merging each breadth-first layer before its node cap. It
+bounds hops to three, neighbors to 32 per expanded node, nodes to 200, and
+returned edges to 2,000, with HTTP node/edge counts further clamped to server
+limits. Returned edges preserve their stored direction and include eligible
+links among selected nodes; `truncated` exposes bound-induced omissions. One
+catalog read lock supplies the citations, edges, and revision.
+
+Relationship upserts/deletes validate
+endpoints and revision, use the same staged/WAL transaction as document changes,
+and remain visible through SQL. The console offers paged and focused views,
+root/depth markers, direction and weight controls, and an equivalent
+keyboard-accessible node list. These are bounded connections among text chunks;
+automatic similarity edges make no factual relationship claims.
+
+Provider awaits hold no catalog lock or database-worker permit. Graph commits
+compare the captured database revision, so a concurrent write rejects a stale
+prepared document atomically. This conservative policy also conflicts with
+unrelated writes. See [GraphRAG](GRAPH_RAG.md) for limits and client behavior.
+
+Provider embeddings run asynchronously through a shared, pooled HTTP client,
+outside the database work limiter. Each request snapshots one provider/model
+configuration and holds a separate admission slot for all its batches. Provider
+responses are bounded and validated before returning vectors; no provider
+request is retried automatically. Keys remain in server memory, while durable
+mode persists only non-secret settings. The console then uses the existing
+typed-ingestion and exact-search routes with the generated vectors.
+
+Administrative page reads copy only a bounded slice of rows and capture the
+schema, count, and revision under one read lock. Row edits/deletes and table
+deletion compare an expected revision under the same write lock used for the
+staged transaction and WAL commit. A stale client therefore cannot overwrite a
+newer change between validation and commit. Raw SQL and typed-ingestion paths
+keep their existing execution behavior.
+
 A `Database` owns an `Arc<RwLock<Catalog>>`. Cloning the handle shares that
 catalog rather than copying data.
 
 - Read statements acquire a read lock and may run concurrently.
-- Write statements acquire the write lock and increment the catalog revision.
+- Writes acquire the write lock and advance the catalog revision. Durable
+  databases publish their WAL commit sequence as the revision, including after
+  checkpoint loading and replay, so administrative compare-and-write checks
+  remain valid across restarts. In-memory revisions remain process-local.
 - A common single-statement persistent `INSERT` is validated into an append
   delta while the writer lock is held. Its WAL record is synchronized before
   applying the delta, avoiding a full catalog clone. Typed ingestion uses the

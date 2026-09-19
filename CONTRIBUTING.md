@@ -26,6 +26,29 @@ example, run:
 cargo run --example hybrid_search
 ```
 
+Console development still needs no frontend build step. To run its optional
+browser regression tests, install Node.js 20 or newer, then run:
+
+```sh
+npm ci
+npx playwright install chromium
+npm run test:web
+```
+
+The tests start a local static server and mock API responses to exercise slow
+connections, authentication changes, invalid queries, and large result sets.
+Live API behavior is covered by the Rust integration suite. Set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE` to use an existing Chromium executable locally.
+
+To measure console result rendering, start `node tests/web-server.cjs` in one
+terminal and run `npm run benchmark:web` in another. The harness generates its
+own deterministic data and reports browser rendering and layout time. Save the
+committed renderer with `git show HEAD:web/app.js > /tmp/vectors-web-baseline-app.js`
+before changing it, then compare with
+`npm run benchmark:web -- --baseline /tmp/vectors-web-baseline-app.js`.
+See [the browser benchmark](docs/BENCHMARKS.md#browser-result-rendering) for the
+recorded baseline, workload controls, and measurement boundaries.
+
 ## Before opening a pull request
 
 Run the same core checks as CI:
@@ -89,6 +112,13 @@ then test the affected native platform before changing its advertised support.
 Managed-server changes must preserve the previous bind/storage configuration,
 verify process identity, and use cooperative shutdown so final checkpoints and
 snapshots complete before replacement.
+
+Updater changes must keep latest-release resolution separate from pinned asset
+downloads, verify the installer before executing it, and avoid implicit
+downgrades or starting stopped services. Run `python3 tests/test_updater.py` on
+POSIX and `powershell -NoProfile -File tests/update_windows.ps1` on Windows.
+Use isolated installation/state/data directories for native restart tests;
+do not test upgrades against an existing user database.
 
 When adding or renaming a release target, update the installer resolver, release
 matrix, checksum generation, smoke tests, and installation documentation in the

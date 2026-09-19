@@ -17,6 +17,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  web:
+    name: Web console regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:web
+
   quality:
     name: Formatting, linting, and docs
     runs-on: ubuntu-latest
@@ -74,6 +83,8 @@ jobs:
         run: |
           set -euo pipefail
           sh -n install.sh
+          sh -n update.sh
+          python3 tests/test_updater.py
           sh install.sh --help >/dev/null
           target=$(sh install.sh --print-target)
           test -n "$target"
@@ -96,6 +107,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($preview)) {
             throw "-WhatIf did not produce an installation plan"
           }
+      - name: Test Windows updater without networking
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -File tests/update_windows.ps1
 
   test:
     name: Tests (${{ matrix.os }})
@@ -116,6 +131,7 @@ jobs:
           cargo run --release --locked --example benchmark_scan_layout
           cargo run --release --locked --example benchmark_ingestion
           cargo run --release --locked --example benchmark_storage
+          cargo run --release --locked --example benchmark_column_lookup
         env:
           VECTORS_BENCH_ROWS: 2000
           VECTORS_BENCH_DIMENSIONS: 32

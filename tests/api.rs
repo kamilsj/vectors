@@ -1,9 +1,52 @@
-use actix_web::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use actix_web::http::header::{
+    ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, ETAG, IF_NONE_MATCH, VARY,
+    WWW_AUTHENTICATE,
+};
 use actix_web::http::StatusCode;
 use actix_web::{test, web, App};
 use serde_json::{json, Value};
 use vectors::{api, Database};
 
+#[actix_web::test]
+async fn server_settings_require_auth_and_report_effective_limits_without_secrets() {
+    let limits = api::RequestLimits::new(8_192, 17, 83).unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(Database::new()))
+            .app_data(web::Data::new(api::ApiSecurity::bearer_token(
+                "private-api-token",
+            )))
+            .app_data(web::Data::new(api::ServerConfig::default()))
+            .configure(move |services| api::configure_with_limits(services, limits)),
+    )
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/v1/settings/server")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/v1/settings/server")
+            .insert_header((AUTHORIZATION, "Bearer private-api-token"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["authentication"], true);
+    assert_eq!(body["storage"], "memory");
+    assert_eq!(body["limits"]["max_json_payload_bytes"], 8_192);
+    assert_eq!(body["limits"]["max_bulk_rows"], 17);
+    assert_eq!(body["limits"]["max_response_rows"], 83);
+    assert_eq!(body["compute"]["device"], "auto");
+    assert!(body["capacity"]["workers"].as_u64().unwrap() > 0);
+    assert!(!body.to_string().contains("private-api-token"));
+}
 fn api_database() -> Database {
     let database = Database::new();
     database
@@ -324,8 +367,8 @@ async fn exposes_health_schema_and_index_metadata() {
     );
     let body = test::read_body(response).await;
     assert!(body
-        .windows("SQL-first vector database".len())
-        .any(|window| window == b"SQL-first vector database"));
+        .windows("vectors workspace".len())
+        .any(|window| window == b"vectors workspace"));
     assert!(body
         .windows("Understand query".len())
         .any(|window| window == b"Understand query"));
@@ -358,6 +401,107 @@ async fn exposes_health_schema_and_index_metadata() {
         .to_request();
     let response: Value = test::call_and_read_body_json(&app, indexes).await;
     assert_eq!(response["indexes"][0]["name"], "documents_category_idx");
+}
+
+#[actix_web::test]
+async fn console_assets_revalidate_without_resending_unchanged_content() {
+    let app = test::init_service(App::new().configure(api::configure)).await;
+
+    for path in ["/", "/assets/app.css", "/assets/app.js"] {
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-cache");
+        assert_eq!(response.headers().get(VARY).unwrap(), "Accept-Encoding");
+        let etag = response
+            .headers()
+            .get(ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let original = test::read_body(response).await;
+        assert!(!original.is_empty());
+
+        for validator in [
+            etag.clone(),
+            etag.trim_start_matches("W/").to_owned(),
+            format!("\"outdated-build\", {etag}"),
+            "*".to_owned(),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(path)
+                    .insert_header((IF_NONE_MATCH, validator))
+                    .insert_header((ACCEPT_ENCODING, "gzip"))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+            assert_eq!(response.headers().get(ETAG).unwrap(), etag.as_str());
+            assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-cache");
+            assert_eq!(response.headers().get(VARY).unwrap(), "Accept-Encoding");
+            assert_eq!(
+                response.headers().get("x-content-type-options").unwrap(),
+                "nosniff"
+            );
+            assert_eq!(
+                response.headers().get("referrer-policy").unwrap(),
+                "no-referrer"
+            );
+            assert!(response.headers().contains_key("content-security-policy"));
+            assert!(test::read_body(response).await.is_empty());
+        }
+
+        for validator in ["\"outdated-build\"", "not-an-entity-tag"] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(path)
+                    .insert_header((IF_NONE_MATCH, validator))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(test::read_body(response).await, original);
+        }
+    }
+}
+
+#[actix_web::test]
+async fn console_assets_negotiate_compression_with_the_same_cache_validator() {
+    let app = test::init_service(App::new().configure(api::configure)).await;
+
+    for path in ["/", "/assets/app.css", "/assets/app.js"] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(path)
+                .insert_header((ACCEPT_ENCODING, "identity"))
+                .to_request(),
+        )
+        .await;
+        let etag = response.headers().get(ETAG).unwrap().clone();
+        assert!(response.headers().get(CONTENT_ENCODING).is_none());
+        let original = test::read_body(response).await;
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(path)
+                .insert_header((ACCEPT_ENCODING, "gzip"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
+        assert_eq!(response.headers().get(ETAG).unwrap(), etag);
+        assert_eq!(response.headers().get(VARY).unwrap(), "Accept-Encoding");
+        let compressed = test::read_body(response).await;
+        assert!(compressed.starts_with(&[0x1f, 0x8b]));
+        assert!(compressed.len() < original.len());
+    }
 }
 
 #[actix_web::test]

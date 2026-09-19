@@ -1,8 +1,9 @@
 # Benchmarks
 
 Performance work in `vectors` starts with a reproducible query and a correctness
-check. The repository benchmark compares execution and parsing paths inside
-this project; it is not presented as a comparison with another database.
+check. The repository benchmarks compare execution, parsing, and browser
+rendering paths inside this project; they are not presented as comparisons
+with another database.
 
 ## Run the benchmark
 
@@ -144,6 +145,123 @@ Already-fragmented full scans were mixed: cosine and dot product regressed by
 not establish a universal improvement, GPU crossover, or cross-database ranking.
 Repeat the harness on the intended hardware and workload before tuning threads.
 
+## SQL column lookup
+
+SQL projections and residual filters resolve column names repeatedly while
+scanning rows. The executor now compares names without allocating lowercase
+copies for each lookup. This preserves its ASCII-insensitive identifier rules,
+qualified-name resolution, and missing-column errors.
+
+The [benchmark harness](../examples/benchmark_column_lookup.rs) exercises
+scalar top-k and exact cosine search with an unindexed modulo filter. It checks
+both against general-executor results before timing. The scalar query orders by
+the last metadata column; the vector query has a single vector sort key. Both
+use `LIMIT 20 OFFSET 3`; approximately half the rows qualify. Timings use the
+normal SQL entry point with a warm parse cache, include execution and result
+construction, exclude data generation and insertion, and follow five warm-up
+queries.
+
+```sh
+cargo build --release --locked --example benchmark_column_lookup
+RAYON_NUM_THREADS=16 VECTORS_BENCH_ROWS=16384 VECTORS_BENCH_COLUMNS=32 \
+  VECTORS_BENCH_DIMENSIONS=64 VECTORS_BENCH_ITERATIONS=40 \
+  target/release/examples/benchmark_column_lookup
+```
+
+Local measurements on 2026-09-18 used an Apple M4 Max (16 CPU cores, 48 GiB),
+macOS 27.0 (26A428), Rust 1.97.1, and the release profile without custom CPU
+flags. Each cell below is the median of the per-process p50 from three
+alternating before/after pairs; each process ran 40 timed queries. All 24
+processes passed result-equivalence checks. Data had 16,384 rows, 64-dimensional
+vectors, and either 4 or 32 additional integer metadata columns.
+
+| Metadata columns | Threads | Query | Before p50 | After p50 | Ratio |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 1 | Scalar top-k | 5.949 ms | 2.123 ms | 2.80× |
+| 4 | 1 | Filtered cosine | 3.354 ms | 1.009 ms | 3.33× |
+| 4 | 16 | Scalar top-k | 6.121 ms | 2.022 ms | 3.03× |
+| 4 | 16 | Filtered cosine | 0.811 ms | 0.337 ms | 2.41× |
+| 32 | 1 | Scalar top-k | 20.170 ms | 3.786 ms | 5.33× |
+| 32 | 1 | Filtered cosine | 13.051 ms | 2.255 ms | 5.79× |
+| 32 | 16 | Scalar top-k | 21.755 ms | 3.323 ms | 6.55× |
+| 32 | 16 | Filtered cosine | 3.494 ms | 0.398 ms | 8.79× |
+
+The [raw CSV](benchmarks/sql-column-lookup-2026-09-18.csv) includes all 48 query
+measurements and qualifying-row counts. The baseline used the same worktree
+before the column-lookup change (engine SHA-256
+`7bf248f9d9056eaadf1153059d2961c03119b7a8be44854da70080ea073cf6b9`).
+Filtered-vector baseline latency varied noticeably between processes; use the
+raw values and repeat on your workload. These results measure name-resolution
+overhead in this workload, not a comparison with other databases or an
+across-the-board vector-kernel speedup.
+
+## Browser result rendering
+
+The console harness measures `renderDataTable` DOM construction, insertion,
+style calculation, and forced layout in headless Chromium. It generates rows
+before timing and mocks the health and table-list APIs. Network transfer,
+response JSON parsing, SQL execution, and vector scoring are excluded; a Rust
+server is not needed. The full result remains available in browser memory,
+while the updated renderer displays one page at a time and expands large cell
+values only when requested.
+
+Install the optional browser tools, save a baseline before editing the
+renderer, and start the static asset server:
+
+```sh
+npm ci
+npx playwright install chromium
+git show HEAD:web/app.js > /tmp/vectors-web-baseline-app.js
+node tests/web-server.cjs
+```
+
+After changing the renderer, run the comparison from another terminal:
+
+```sh
+npm run --silent benchmark:web -- \
+  --baseline /tmp/vectors-web-baseline-app.js \
+  --rows 10000 --dimensions 384 --seed 42 --warmups 1 --repetitions 5 \
+  > /tmp/vectors-web-render.json
+```
+
+Omit `--baseline` to measure the current renderer alone; use `--format csv` for
+a compact CSV summary. `VECTORS_WEB_URL` changes the static server URL from
+`http://127.0.0.1:4173`, and `PLAYWRIGHT_CHROMIUM_EXECUTABLE` selects an existing
+Chromium executable. Both variants use the current HTML and CSS; only the
+baseline JavaScript asset is replaced. Before timing, the harness checks the
+first 100 scalar and vector previews against the generated data, verifies the
+complete first vector, and checks that collapsing an expanded vector removes
+its full text from the DOM.
+
+The recorded run on 2026-09-17 used Apple M4 Max, macOS 27.0 (26A428), Chrome
+152.0.7977.83, and a 1440 × 1000 viewport. The dataset contained 10,000 rows with
+an integer ID, a short title, and a 384-dimensional vector, generated with seed
+42. Each variant ran in its own page context in one browser process, with one
+warmup after verification and five measured renders. The baseline was
+`web/app.js` from commit `4a2a3f4e2c3da838ce031c43bdf2bbbaf479c201`, which was
+`HEAD` before these changes. To reproduce this specific baseline after later
+commits, replace the `git show HEAD:web/app.js` command above with:
+
+```sh
+git show 4a2a3f4e2c3da838ce031c43bdf2bbbaf479c201:web/app.js > /tmp/vectors-web-baseline-app.js
+```
+
+| Local rendering metric | Baseline | Updated |
+| --- | ---: | ---: |
+| Median DOM construction + layout | 204.1 ms | 2.8 ms |
+| Rows initially rendered | 10,000 | 100 |
+| DOM nodes inside the result container | 70,017 | 1,139 |
+| DOM elements inside the result container | 40,011 | 724 |
+
+The 72.9× initial-render speedup comes from rendering the default 100-row page
+instead of all 10,000 rows and deferring complete vector serialization until a
+cell is expanded. All 10,000 rows remain accessible through pagination. This
+single-machine result measures reduced browser work; it is not an API latency,
+database throughput, or universal performance claim. The
+[raw JSON](benchmarks/web-render-2026-09-17.json) preserves every measured sample
+and verification result. Repeat the harness on the intended browser, hardware,
+and result shape before drawing broader conclusions.
+
 ## Reference result
 
 This result is the median of three local benchmark processes recorded on
@@ -218,6 +336,64 @@ behavior, index build time, recall, hardware, and client overhead. Add such a
 benchmark only when its harness and raw results can be reviewed in the
 repository.
 
+## Vector API and response encoding
+
+The [HTTP harness](../scripts/benchmark_api.py) compares two local server
+binaries with synthetic in-memory data and a reused HTTP connection. The
+baseline is the v0.7.0 working tree immediately before the typed-search,
+owned-ingestion, and direct-response changes, including preceding unreleased
+improvements. Both binaries use the same SQL scoring kernels. Preserve a
+baseline binary before applying changes, then run:
+
+```sh
+cargo build --release --locked --bin vectors-server
+cp target/release/vectors-server /tmp/vectors-server-before
+# Apply the API changes and rebuild.
+cargo build --release --locked --bin vectors-server
+python3 scripts/benchmark_api.py \
+  --baseline /tmp/vectors-server-before \
+  --candidate target/release/vectors-server \
+  --output /tmp/vector-api.json
+```
+
+Recorded on 2026-09-19: Apple M4 Max, 16 physical cores, 48 GiB RAM, macOS
+27.0, Rust 1.97.1, release profile, CPU compute, four Rayon threads, two HTTP
+workers, two blocking threads per worker, four admitted database tasks, and
+one client. Each case has five warmups and 30 measured requests in each of
+three paired runs; server order alternates between pairs. No other project
+builds or tests ran during the recorded measurements.
+
+| HTTP workload | Before p50 | After p50 | Speedup |
+| --- | ---: | ---: | ---: |
+| Search, 32 rows × 1,536 dimensions | 1.363 ms | 0.160 ms | 8.51× |
+| Indexed search, 4,096 × 384, 64 candidates | 0.459 ms | 0.128 ms | 3.59× |
+| Full scan, 4,096 × 384 | 0.569 ms | 0.235 ms | 2.42× |
+| SQL response, 1,000 vectors × 384 | 9.221 ms | 7.598 ms | 1.21× |
+| Import, 256 rows × 64, 32 text fields, normalization | 3.068 ms | 1.886 ms | 1.63× |
+
+Numbers are medians of the three per-run p50s. Search uses exact cosine
+ranking, `LIMIT 10`, varying query vectors, and selects only `id` plus the
+computed score. The indexed case uses equality on one of 64 category values.
+Ingestion targets a freshly created table each time, with table creation/drop
+outside the timer. These import measurements exclude durable WAL I/O.
+
+The timer includes HTTP, server JSON decoding, validation, execution, result
+encoding, and response transfer. Client request encoding and response parsing
+are outside it. Complete response bytes matched the baseline in every measured
+pair. The [raw JSON](benchmarks/vector-api-2026-09-19.json) contains individual
+samples, p95s, response sizes/hashes, binary hashes, and workload parameters.
+This is a local comparison within this project; it does not measure competing
+databases, GPU throughput, saturated concurrency, or ANN recall.
+
+The largest gains occur when formatting/parsing a high-dimensional query
+previously dominated search time. Large scans remain bounded by scoring work.
+Response encoding now traverses typed values directly on admitted workers,
+avoiding the intermediate JSON-value tree; imports reuse column lookup state
+and owned buffers. For an engine-only comparison that also includes residual
+filters, run `cargo run --release --locked --example benchmark_typed_search`.
+That harness compares the old SQL-conversion route against typed search,
+alternates order, varies query vectors, and checks every result for equality.
+
 ## Typed ingestion benchmark
 
 ```sh
@@ -262,3 +438,92 @@ ms for ten fsynced 1,000-row × 64-dimension batches (about 351,000 rows/s),
 checkpoint. The batching contract matters: one-row transactions would require
 10,000 synchronization barriers and are intentionally not represented by this
 number.
+
+## Hybrid RAG retrieval and lexical-cache reuse
+
+```sh
+cargo run --release --example benchmark_rag_retrieval -- 64 16 128 20
+```
+
+Recorded on 2026-09-19 using an Apple M4 Max (16 logical CPUs, 48 GiB RAM),
+macOS 27.0 arm64, Rust 1.97.1, release profile, and CPU compute. The deterministic
+fixture contains 64 documents, 16 chunks each (1,024 total), and 128-dimensional
+vectors. Retrieval combines BM25/vector ranks, one graph hop, and MMR selection:
+40 candidates, 12 graph seeds, 8 neighbors, 10 results, diversity 0.3, up to
+3 results per document, and a 24,000-byte context budget.
+
+| Lexical index state | Median | p95 |
+| --- | ---: | ---: |
+| Rebuilt after a catalog revision | 7.294 ms | 7.598 ms |
+| Reused for the same revision | 0.380 ms | 0.416 ms |
+
+Across 20 cold/warm pairs, warm local retrieval was **19.2× faster at
+the median**. Every pair asserted identical ranked hits, scores, edges, and
+context bytes. Queries vary across the fixture; there is no response-result
+cache. In this original measurement, a separate marker-table write invalidated
+the catalog revision before each cold run; its write cost was excluded.
+The cache now survives unrelated writes. The current harness instead performs
+a no-op update to chunk text to force a rebuild, also outside the timer. The
+numbers above describe the original implementation, not the updated harness.
+
+This measures the benefit of reusing lexical tokenization/postings within the
+new RAG pipeline, not an end-to-end speedup over another database or embedding
+provider. It excludes ingestion, query embedding, external reranking, HTTP, and
+network latency. The synthetic fixture does not establish real-world retrieval
+quality. Workload parameters are positional: documents, chunks per document,
+vector dimensions, and measured pairs. The
+[raw results](benchmarks/rag-retrieval-2026-09-19.json) include source hashes and
+environment details.
+
+## RAG retrieval while other data changes
+
+The lexical index now follows the chunk table's storage generation instead of
+the database-wide revision. Relationship upserts and unrelated table writes
+therefore preserve cached tokenization and posting lists. Chunk writes still
+invalidate the index, including text-only SQL updates.
+
+The [cache-churn harness](../examples/benchmark_rag_churn.rs) compares the working
+tree immediately before these changes with the updated implementation:
+
+```sh
+cargo build --release --locked --example benchmark_rag_churn
+target/release/examples/benchmark_rag_churn 64 16 128 20 /tmp/rag-results.json
+```
+
+Preserve a baseline executable before applying the changes, then run both
+binaries with the same arguments and separate result paths. The optional file
+contains complete canonical results for byte comparison. Each query measures
+four phases: after a no-op chunk text update, an immediate repeat, after an
+unrelated scalar update, and after an idempotent relationship upsert. The
+relationship upsert deliberately preserves endpoints, kind, and weight so
+results remain comparable across all phases; actual relationship content edits
+are covered by correctness tests.
+
+Measurements on 2026-09-19 used an Apple M4 Max (16 CPU cores, 48 GiB), macOS
+27.0 (26A428), Rust 1.97.1, locked dependencies, and CPU release builds. Three
+paired process runs alternated baseline/current order, with 20 queries per
+phase per process. These are medians across the resulting 60 samples per phase:
+
+| Retrieval phase | Before median | After median | Before p95 | After p95 |
+| --- | ---: | ---: | ---: | ---: |
+| After chunk text update (cold) | 7.364 ms | 7.422 ms | 7.808 ms | 8.185 ms |
+| Immediate repeat (warm) | 0.355 ms | 0.352 ms | 0.378 ms | 0.399 ms |
+| After unrelated table update | 7.321 ms | 0.348 ms | 7.676 ms | 0.394 ms |
+| After idempotent relationship upsert | 7.397 ms | 0.367 ms | 7.724 ms | 0.412 ms |
+
+The two non-chunk write phases improved by **21.1×** and **20.2×** at the median:
+cache hits increased from 0/60 to 60/60 in both. Cold and already-warm retrieval
+were essentially unchanged. Every run and phase returned byte-identical
+canonical hits, scores, citations, edges, candidate counts, and context sizes;
+revision and cache-hit telemetry were excluded from that comparison.
+
+The fixture has 1,024 chunks with 128-dimensional vectors, 40 candidates,
+10 selected results, and the same MMR/context limits as the earlier harness.
+Graph expansion is disabled (`max_hops=0`) to isolate cache behavior and preserve
+ranking across versions. These timings do **not** measure the new graph beam's
+quality or speed. They exclude writes, ingestion, provider calls, HTTP, result
+serialization, and persistence. No other project builds or tests ran during
+timing, but desktop background activity was not controlled. This is one
+synthetic local workload, not a general throughput or cross-database claim.
+The [raw report](benchmarks/graph-retrieval-2026-09-19.json) retains all samples,
+workload settings, result fingerprints, and source/binary hashes.

@@ -12,10 +12,77 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- A Connections workspace to browse chunk relationships, inspect citations,
+  preview and ingest documents, and manage directed links with revision checks.
+- Provider-free focused graph exploration across page boundaries through
+  `/neighborhood` and **Explore connections**, with root/depth markers,
+  incoming/outgoing direction, relationship kind and weight filters, and
+  bounded node/edge responses. Kind filtering is available through the API;
+  console type checkboxes only hide drawn links.
+- Hybrid RAG retrieval combines BM25 and vector ranks, graph context, optional
+  Voyage cross-encoder reranking, and diversity-aware context budgets. A bounded
+  chunk-generation-aware lexical cache avoids repeated document tokenization.
+- Source-aware Unicode chunking with paragraph/sentence boundaries, overlap,
+  Markdown heading context, exact source offsets, and a provider-free preview.
+- SQL-visible GraphRAG collections with pinned embedding profiles, atomic
+  document ingestion/replacement/deletion, adjacency and semantic relationships,
+  custom SQL relationship labels, and bounded retrieval with source citations.
+- `vectors update` checks and installs newer stable releases; opt-in watch mode
+  checks periodically using verified installers, managed restarts, and rollback.
+- OpenAI and Voyage AI text embeddings with server-side keys, persistent
+  non-secret settings, bounded batches, timeouts, and provider-response checks.
+- A Data admin workspace and typed administrative API for paged browsing,
+  table creation, document embedding, and individual row edits/deletes guarded
+  by atomic catalog revision checks.
+
+- Browser regression tests for API connection recovery, stale responses,
+  duplicate submissions, vector validation, and large result tables.
+
 ### Changed
+
+- Hybrid `/retrieve` graph expansion merges all frontier proposals before
+  applying each hop's bounded beam, combining path strength with query fit and
+  retaining useful traversal through bridges omitted from final context.
+  `/search` retains its existing vector-seed traversal.
+- Keyword indexes remain cached after relationship edits and unrelated writes;
+  chunk storage changes and reopen invalidate them. Capacity-aware checks bound
+  retained indexes, and precomputed BM25 length factors preserve score arithmetic.
+- Embedding requests use conservative per-input and per-model batch budgets,
+  explicit retrieval roles, and profile checks before provider calls. Graph
+  ingestion skips unchanged documents and validates capacity before embedding.
+- Structured vector searches bypass SQL text construction and parsing while
+  sharing SQL's indexes, exact top-k execution, and CPU/GPU paths. Bulk imports
+  reuse column maps and move text/vector buffers; SQL and search responses are
+  encoded directly on admitted database workers without intermediate JSON trees.
+- Remove repeated column-name allocations from SQL projections and residual
+  vector-search filters; add a reproducible narrow/wide table benchmark.
+- Simplify navigation into Search, Connections, Data, SQL, and Settings. Text search is the
+  default; raw-vector search and SQL remain available alongside browser
+  preferences and effective server settings.
+
+- Web results render one page at a time and expand full vectors or long values
+  on demand. Read-only SQL avoids redundant catalog/schema requests.
+- Embedded console assets negotiate compression and use content-based cache
+  validators, allowing unchanged reloads to return empty 304 responses.
 
 ### Fixed
 
+- Rank API searches by the computed score when a table contains a `distance`
+  column, reject duplicate selected columns, and honor configured response-row
+  limits. Reject schema changes atomically during typed imports so reordered
+  columns cannot silently receive the wrong values.
+- Preserve durable database revisions across WAL recovery and checkpoints so
+  stale administrative edits and deletes stay rejected after a restart.
+- Exclude local output and browser-test artifacts from published crate packages.
+- Keep slow responses from replacing newer table selections or API-token
+  sessions, prevent duplicate SQL submissions from keyboard shortcuts, and
+  invalidate cached schemas on refresh. Connection failures preserve the
+  editor and table list; query errors no longer report a lost connection.
+- Validate vector dimensions, empty components, and numeric/boolean filters
+  before sending a search. Token entry also works when browser storage is
+  disabled and submits with Enter.
+- Keep query controls and summary cards inside tablet layouts; preserve SQL
+  line alignment when statements extend beyond the editor width.
 - Invoke the Windows one-line installer as a script block so its PowerShell
   confirmation and preview options initialize correctly. Smoke tests now run
   the documented download commands, including Windows PowerShell 5.1.

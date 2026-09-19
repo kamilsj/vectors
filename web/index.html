@@ -3,88 +3,73 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="vectors — a SQL-first vector database written in Rust">
-  <title>vectors console</title>
+  <meta name="description" content="Search, manage, and connect your vector data">
+  <title>vectors workspace</title>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
   <div class="app-shell">
     <aside id="app-sidebar" class="sidebar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">
-          <span></span><span></span><span></span><span></span>
-        </div>
-        <div>
-          <strong>vectors</strong>
-          <small>SQL-first vector database</small>
-        </div>
-      </div>
-
+      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div><div><strong>vectors</strong><small>Your data, within reach</small></div></div>
       <nav class="primary-nav" aria-label="Workspace">
-        <button class="nav-item active" data-view="console" type="button">
-          <span class="nav-icon">⌘</span><span>SQL console</span>
-        </button>
-        <button class="nav-item" data-view="search" type="button">
-          <span class="nav-icon">◎</span><span>Vector search</span>
-        </button>
-        <button class="nav-item" data-view="guide" type="button">
-          <span class="nav-icon">?</span><span>Start here</span>
-        </button>
+        <button class="nav-item active" data-view="search" type="button"><span class="nav-icon" aria-hidden="true">⌕</span><span>Search</span></button>
+        <button class="nav-item" data-view="connections" type="button"><span class="nav-icon" aria-hidden="true">⌘</span><span>Connections</span></button>
+        <button class="nav-item" data-view="data" type="button"><span class="nav-icon" aria-hidden="true">▦</span><span>Data</span></button>
+        <button class="nav-item" data-view="console" type="button"><span class="nav-icon" aria-hidden="true">⌘</span><span>SQL</span></button>
+        <button class="nav-item" data-view="settings" type="button"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></button>
       </nav>
-
-      <div class="sidebar-section">
-        <div class="section-heading">
-          <span>Tables</span>
-          <button id="refresh-tables" class="icon-button" type="button" title="Refresh tables">↻</button>
-        </div>
-        <div id="table-list" class="table-list" aria-live="polite">
-          <div class="sidebar-empty">Connect to browse tables</div>
-        </div>
-      </div>
-
-      <div class="sidebar-footer">
-        <button id="connection-button" class="connection" type="button">
-          <span id="status-dot" class="status-dot"></span>
-          <span><strong id="status-label">Connecting</strong><small>localhost</small></span>
-          <span class="connection-arrow">›</span>
-        </button>
-        <div class="version">vectors <span id="app-version">dev</span></div>
-      </div>
+      <div class="sidebar-section"><div class="section-heading"><span>Tables</span><button id="refresh-tables" class="icon-button" type="button" title="Refresh tables" aria-label="Refresh tables">↻</button></div><div id="table-list" class="table-list" aria-live="polite"><div class="sidebar-empty">Connect to browse tables</div></div></div>
+      <div class="sidebar-footer"><button id="connection-button" class="connection" type="button"><span id="status-dot" class="status-dot"></span><span><strong id="status-label" role="status">Connecting</strong><small id="connection-host">localhost</small></span><span class="connection-arrow" aria-hidden="true">›</span></button><div class="version">vectors <span id="app-version">dev</span><span id="connection-latency"></span></div></div>
     </aside>
-
     <main class="workspace">
-      <header class="topbar">
-        <button id="mobile-menu" class="mobile-menu" type="button" aria-label="Toggle navigation" aria-controls="app-sidebar" aria-expanded="false">☰</button>
-        <div>
-          <span class="eyebrow">LOCAL WORKSPACE</span>
-          <h1 id="view-title">SQL console</h1>
-        </div>
-        <div class="topbar-actions">
-          <span class="shortcut-hint"><kbd>Ctrl</kbd><kbd>Enter</kbd> to run</span>
-          <button id="open-token" class="button ghost" type="button">API token</button>
-          <button id="top-guide" class="button ghost" type="button">Help</button>
-        </div>
-      </header>
+      <header class="topbar"><button id="mobile-menu" class="mobile-menu" type="button" aria-label="Toggle navigation" aria-controls="app-sidebar" aria-expanded="false">☰</button><div><span class="eyebrow">WORKSPACE</span><h1 id="view-title">Search</h1></div><div class="topbar-actions"><button id="open-token" class="button ghost" type="button">Connection</button><button id="top-guide" class="button ghost" type="button">Help</button></div></header>
+      <div id="connection-notice" class="connection-notice" role="status" hidden><span id="connection-message"></span><button id="reconnect" class="button ghost compact" type="button">Reconnect</button></div>
 
-      <section id="view-console" class="view active">
-        <section id="quick-start" class="quick-start panel" aria-labelledby="quick-start-title" hidden>
-          <div class="quick-start-copy">
-            <span class="quick-start-badge"><i aria-hidden="true"></i> First query</span>
-            <h2 id="quick-start-title">Find your first neighbor in under a minute.</h2>
-            <p>A complete sample is ready. Create the table, then swap in the hybrid-search example to rank only matching rows.</p>
-            <div class="quick-start-actions">
-              <button class="button primary compact" data-load-example="quickstart" type="button">Focus sample SQL <span aria-hidden="true">→</span></button>
-              <button id="quick-start-guide" class="button ghost compact" type="button">Open tutorial</button>
+      <section id="view-search" class="view active">
+        <div class="workspace-heading"><div><h2>Find the meaning. Keep the context.</h2><p>Search your data with a question or a vector.</p></div><button class="button ghost" type="button" data-go="settings">Embedding settings <span aria-hidden="true">↗</span></button></div>
+        <div id="search-empty" class="empty-workspace panel" hidden><span class="empty-icon" aria-hidden="true">▦</span><h3>A place for your first documents</h3><p>Create a table, choose an embedding model, and add the text you want to search.</p><div class="inline-actions"><button class="button primary" data-go="data" type="button">Add your data</button><button class="button ghost" data-go="guide" type="button">Try an example</button></div></div>
+        <div class="search-layout">
+          <form id="search-form" class="panel search-form" novalidate>
+            <div class="form-section"><div class="form-section-body"><div class="form-row two"><label>Table<select id="search-table" required><option value="">Choose a table</option></select></label><label>Vector column<select id="search-vector-column" required><option value="">Choose a vector</option></select></label></div></div></div>
+            <div class="form-section"><div class="form-section-body">
+              <div class="segmented-control" role="group" aria-label="Search input"><button id="search-mode-text" type="button" aria-pressed="true">Text</button><button id="search-mode-vector" type="button" aria-pressed="false">Vector</button></div>
+              <div id="search-text-fields"><label>What are you looking for?<textarea id="search-text" rows="4" placeholder="e.g. How do I reset an account password?" required></textarea></label><p id="search-provider-note" class="provider-note">Loading embedding settings…</p><p class="privacy-note">Submitted text is sent to your selected embedding provider. Use the same model and dimensions as your documents; existing raw vectors do not carry model information.</p></div>
+              <div id="search-vector-fields" hidden><label>Comma-separated values<textarea id="search-vector" rows="4" placeholder="1.0, 0.0, 0.0"></textarea></label></div>
+              <div id="dimension-hint" class="field-hint">Select a vector column to see its dimensions.</div>
+              <div class="form-row two search-limit-row"><label>Results<input id="search-limit" type="number" min="1" max="1000" value="10" required></label><label>Metric<select id="search-metric"><option value="cosine">Cosine distance</option><option value="l2">Euclidean distance</option><option value="squared_l2">Squared L2</option><option value="dot_product">Dot product</option></select></label></div>
+            </div></div>
+            <details class="search-options"><summary>Filters and returned columns</summary><div class="form-row filter-row"><label>Column<select id="filter-column"><option value="">No filter</option></select></label><label>Operator<select id="filter-operator"><option value="eq">=</option><option value="ne">≠</option><option value="gt">&gt;</option><option value="gte">≥</option><option value="lt">&lt;</option><option value="lte">≤</option></select></label><label>Value<input id="filter-value" placeholder="e.g. support"></label></div><label>Return columns <small>blank for all scalar columns</small><input id="search-select" placeholder="id, title, content"></label></details>
+            <button id="search-submit" class="button primary search-submit" type="submit">Search <span aria-hidden="true">→</span></button>
+          </form>
+          <section class="panel search-results-panel"><div class="panel-header"><div><span class="panel-kicker">RESULTS</span><h2 id="search-results-title">Ready when you are</h2></div></div><div id="search-results" class="results-empty"><div class="search-empty-mark" aria-hidden="true">⌕</div><p>The closest matches will appear here, with their distance and source data.</p></div></section>
+        </div>
+      </section>
+
+      <section id="view-connections" class="view">
+        <div class="workspace-heading"><div><h2>See how your knowledge connects.</h2><p>Explore passages, follow relationships, and retrieve context across documents.</p></div><button id="graph-create-open" class="button primary" type="button">Create collection <span aria-hidden="true">+</span></button></div>
+        <div class="panel graph-workspace">
+          <div class="data-toolbar"><label>Collection<select id="graph-collection"><option value="">Choose a collection</option></select></label><div class="inline-actions"><button id="graph-refresh" type="button" class="button ghost">Refresh graph</button><button id="graph-add-open" type="button" class="button ghost">Add document</button></div></div>
+          <div class="graph-overview"><p id="graph-profile" class="provider-note">Collections keep a fixed embedding model for documents and questions.</p><p id="graph-status" class="inline-status" role="status">Open a collection to explore its connections.</p></div>
+          <div class="graph-mode-bar"><div><span id="graph-mode" class="panel-kicker">ALL PASSAGES</span><p id="graph-focus-title">Browse the collection, or explore a passage’s connections.</p></div><button id="graph-back-pages" type="button" class="button ghost compact" hidden>← Back to all passages</button></div>
+          <form id="graph-neighborhood-controls" class="graph-neighborhood-controls" hidden><div class="graph-neighborhood-fields"><label>Connection depth<select id="graph-neighborhood-hops"><option value="0">Root only</option><option value="1" selected>1 hop</option><option value="2">2 hops</option><option value="3">3 hops</option></select></label><label>Follow relationships<select id="graph-neighborhood-direction"><option value="both">Both directions</option><option value="outgoing">Outgoing</option><option value="incoming">Incoming</option></select></label><label>Minimum weight<input id="graph-neighborhood-min-weight" type="number" min="0" max="1" step="0.05" value="0" required></label><button id="graph-neighborhood-apply" type="submit" class="button ghost compact">Apply exploration filters</button></div><p class="field-hint">Explores this collection across page boundaries. Limited to 100 passages, 500 directed links, and 8 neighbors per passage. Type checkboxes below only hide drawn links. No provider requests.</p></form>
+          <div class="graph-explorer">
+            <div class="graph-stage">
+              <div class="graph-controls"><fieldset class="graph-filters"><legend class="sr-only">Visible relationships</legend><label><input type="checkbox" data-graph-kind="semantic" checked><span class="edge-swatch semantic"></span>Semantic</label><label><input type="checkbox" data-graph-kind="adjacent" checked><span class="edge-swatch adjacent"></span>Adjacent</label><label><input type="checkbox" data-graph-kind="custom" checked><span class="edge-swatch custom"></span>Custom</label></fieldset><div class="graph-zoom" role="group" aria-label="Graph zoom"><button id="graph-zoom-out" class="icon-button" type="button" aria-label="Zoom out graph">−</button><button id="graph-zoom-reset" class="icon-button" type="button" aria-label="Reset graph zoom">1×</button><button id="graph-zoom-in" class="icon-button" type="button" aria-label="Zoom in graph">+</button></div></div>
+              <div id="graph-visual" class="graph-visual"><svg id="graph-canvas" viewBox="0 0 800 460" role="group" aria-label="Document connections"></svg><div id="graph-empty" class="graph-empty"><span aria-hidden="true">⌘</span><h3>A map of your knowledge</h3><p>Create a collection, then add documents to reveal their connections.</p></div></div>
+              <div id="graph-legend" class="graph-legend" aria-label="Document colors"></div>
+              <div class="graph-page-controls"><span id="graph-range">0 passages</span><button id="graph-previous" type="button" class="button ghost compact" disabled>Previous graph page</button><button id="graph-next" type="button" class="button ghost compact" disabled>Next graph page</button></div>
+              <p id="graph-explanation" class="graph-explanation">Colors identify documents. Lines show cosine similarity, neighboring passages, or your own directed links. Proximity on this map is for readability; it does not measure relevance.</p>
+              <details class="graph-accessible-list"><summary>Browse passages as a list <span id="graph-list-count"></span></summary><div id="graph-node-list"></div></details>
             </div>
+            <aside class="graph-detail-panel"><div id="graph-details"><span class="panel-kicker">PASSAGE DETAILS</span><h3>Follow a connection</h3><p>Select a point or a passage from the list to read its source and relationships.</p></div><form id="graph-relationship-form" hidden><h4>Add a directed relationship</h4><label>Link to passage<select id="graph-link-target" required></select></label><div class="form-row two"><label>Relationship name<input id="graph-link-kind" value="related_to" required pattern="[a-z][a-z0-9_]{0,63}" maxlength="64"></label><label>Weight<input id="graph-link-weight" type="number" min="0" max="1" step="0.01" value="1" required></label></div><p class="field-hint">Use a label such as supports or references. Custom links are your annotations, not inferred facts.</p><button id="graph-link-save" class="button ghost compact" type="submit">Add relationship</button></form></aside>
           </div>
-          <ol class="quick-start-steps" aria-label="Quick-start steps">
-            <li><span>01</span><div><strong>Load</strong><small>Create a typed <code>VECTOR(3)</code> table and sample rows.</small></div></li>
-            <li><span>02</span><div><strong>Run</strong><small>Press <kbd>Ctrl</kbd><kbd>Enter</kbd> and check the results.</small></div></li>
-            <li><span>03</span><div><strong>Search</strong><small>Choose “Hybrid similarity search” and run again.</small></div></li>
-          </ol>
-          <button id="dismiss-quick-start" class="quick-start-close" type="button" aria-label="Dismiss quick start" title="Dismiss quick start">×</button>
-        </section>
+        </div>
+        <details id="graph-document-panel" class="panel graph-document-panel"><summary><span>Add or replace a document</span><small>Preview chunks before embedding</small></summary><form id="graph-document-form" class="form-card"><div class="form-row three"><label>Document ID<input id="graph-document-id" required maxlength="256" placeholder="getting-started"></label><label>Title<input id="graph-document-title" placeholder="Getting started"></label><label>Source or URL<input id="graph-document-source" placeholder="https://… or a filename"></label></div><label>Document text<textarea id="graph-document-text" rows="7" required placeholder="Paste the text you want to connect and search."></textarea></label><details class="form-advanced"><summary>Chunking options</summary><div class="form-row three"><label>Characters per chunk<input id="graph-chunk-size" type="number" min="1" max="8000" value="1200" required></label><label>Overlap characters<input id="graph-chunk-overlap" type="number" min="0" max="7999" value="150" required></label><label>Maximum chunks<input id="graph-chunk-count" type="number" min="1" max="256" value="256" required></label></div><p class="field-hint">Limits count Unicode characters. Citation ranges use UTF-8 bytes. Long documents may require smaller uploads.</p></details><p class="privacy-note">Preview does not contact an AI provider. Generate and save sends chunk text with title and heading context to the collection’s embedding provider. Reusing a document ID replaces that document; an unchanged upload with intact chunks uses its existing embeddings.</p><div class="inline-actions"><button id="graph-preview" type="button" class="button ghost">Preview chunks</button><button id="graph-document-save" type="submit" class="button primary">Generate and save document</button></div><p id="graph-document-status" class="inline-status" role="status"></p><div id="graph-chunk-preview" class="graph-chunk-preview"></div></form></details>
+        <section class="panel graph-retrieval"><form id="graph-search-form" class="form-card"><span class="panel-kicker">RETRIEVE CONNECTED CONTEXT</span><h3>Ask across your documents</h3><label>Question<textarea id="graph-question" rows="3" required placeholder="What connects these ideas?"></textarea></label><div class="form-row two"><label>Ranking<select id="graph-reranker"><option value="local">Balanced hybrid · local</option><option value="voyage">Hybrid + Voyage reranking</option></select></label><label>Maximum results<input id="graph-result-limit" type="number" min="1" max="100" value="10" required></label></div><p id="graph-search-privacy" class="privacy-note">Your question is sent to the embedding provider. Local ranking combines vector and lexical evidence on this server.</p><details class="form-advanced"><summary>Context and diversity</summary><div class="form-row three"><label>Diversity (0–1)<input id="graph-diversity" type="number" min="0" max="1" step="0.1" value="0.3" required></label><label>Context budget (bytes)<input id="graph-context-budget" type="number" min="1" max="1048576" step="1" value="24000" required></label><label>Results per document<input id="graph-per-document" type="number" min="1" max="100" value="3" required></label></div><div class="form-row three"><label>Candidate passages<input id="graph-candidates" type="number" min="1" max="100" value="40" required></label><label>Graph hops<input id="graph-hops" type="number" min="0" max="3" value="1" required></label><label>Neighbors per passage<input id="graph-neighbors" type="number" min="1" max="32" value="8" required></label></div><p class="field-hint">Higher diversity favors varied context. The budget bounds returned source text; this retrieves passages and does not generate an answer.</p></details><button id="graph-search-submit" class="button primary" type="submit">Retrieve context <span aria-hidden="true">→</span></button><p id="graph-search-status" class="inline-status" role="status"></p></form><div class="graph-retrieval-results"><div class="panel-header"><div><span class="panel-kicker">SOURCE CONTEXT</span><h3>Evidence you can inspect</h3></div></div><div id="graph-search-results" class="graph-context-results"><p class="empty-workspace">Retrieved passages and their source citations will appear here.</p></div></div></section>
+      </section>
 
+      <section id="view-data" class="view">
+        <div class="workspace-heading"><div><h2>Your data</h2><p>Browse records, add documents, and keep your tables in shape.</p></div><button id="admin-new-table" type="button" class="button primary">Create table <span aria-hidden="true">+</span></button></div>
         <div class="stats-grid" aria-label="Database overview">
           <article class="stat-card accent-a">
             <span class="stat-label">Tables</span>
@@ -108,6 +93,22 @@
           </article>
         </div>
 
+
+        <div class="panel data-browser"><div class="data-toolbar"><label>Table<select id="admin-table"><option value="">Choose a table</option></select></label><div class="inline-actions"><button id="admin-refresh" class="button ghost" type="button">Refresh rows</button><button id="admin-new-row" class="button ghost" type="button">Add row</button><button id="admin-drop-table" class="button danger ghost" type="button">Delete table</button></div></div>
+          <div id="admin-status" class="inline-status" role="status">Choose a table to browse its rows.</div>
+          <div id="admin-rows" class="admin-rows"><div class="empty-workspace"><p>Your tables will appear here.</p></div></div>
+          <nav class="admin-pagination" aria-label="Data pages"><span id="admin-range">0 rows</span><label>Rows per page<select id="admin-page-size"><option value="50">50</option><option value="100">100</option><option value="250">250</option></select></label><button id="admin-previous" class="button ghost compact" type="button" disabled>Previous page</button><button id="admin-next" class="button ghost compact" type="button" disabled>Next page</button></nav>
+        </div>
+        <div id="admin-tools" class="admin-tools" hidden>
+          <details class="panel schema-details"><summary>Table structure <span id="admin-schema-summary"></span></summary><div id="admin-schema"></div></details>
+          <div class="admin-edit-grid">
+            <section class="panel form-card"><div class="card-heading"><div><span class="panel-kicker">RECORD</span><h3 id="admin-editor-title">Add a row</h3></div><button id="admin-clear-selection" class="button ghost compact" type="button">New row</button></div><p id="admin-key-note" class="field-hint">Enter a JSON object with the table's column names.</p><label>Row JSON<textarea id="admin-row-json" class="code-input" rows="9" spellcheck="false">{}</textarea></label><div class="inline-actions"><button id="admin-add-row" type="button" class="button primary">Insert row</button><button id="admin-save-row" type="button" class="button primary" hidden>Save changes</button><button id="admin-delete-row" type="button" class="button danger ghost" hidden>Delete row</button></div><p id="admin-edit-status" class="inline-status" role="status"></p></section>
+            <section class="panel form-card"><span class="panel-kicker">TEXT TO VECTORS</span><h3>Add searchable documents</h3><p>Generate embeddings from a text column, then insert the completed rows together.</p><div class="form-row two"><label>Text source<select id="admin-text-column"><option value="">Choose a text column</option></select></label><label>Vector target<select id="admin-vector-column"><option value="">Choose a vector column</option></select></label></div><label>Documents JSON <small>an array of row objects</small><textarea id="admin-documents-json" class="code-input" rows="7" spellcheck="false" placeholder='[{"id": 1, "title": "First document", "content": "Text to search"}]'></textarea></label><p id="admin-provider-note" class="provider-note"></p><p class="privacy-note">Only the selected text column is sent to your embedding provider. Other values stay on this server.</p><div class="inline-actions"><button id="admin-embed-insert" class="button primary" type="button">Generate and insert</button><button id="admin-clear-documents" class="button ghost" type="button">Clear</button></div><p id="admin-ingest-status" class="inline-status" role="status"></p></section>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-console" class="view"><div class="workspace-heading"><div><h2>SQL, when you need it</h2><p>Run a query or inspect its plan. <kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd> to run.</p></div></div>
         <div class="console-grid">
           <section class="panel editor-panel">
             <div class="panel-header">
@@ -134,11 +135,11 @@
             </div>
             <div class="editor-wrap">
               <div class="line-numbers" id="line-numbers" aria-hidden="true">1</div>
-              <textarea id="sql-editor" spellcheck="false" aria-label="SQL editor"></textarea>
+              <textarea id="sql-editor" spellcheck="false" wrap="off" aria-label="SQL editor"></textarea>
             </div>
             <div class="editor-footer">
               <span>SQL</span>
-              <span id="editor-status">Ready</span>
+              <span id="editor-status" role="status">Ready</span>
             </div>
           </section>
 
@@ -166,110 +167,19 @@
             </div>
           </div>
         </section>
+
       </section>
 
-      <section id="view-search" class="view">
-        <div class="page-intro">
-          <span class="eyebrow">STRUCTURED API</span>
-          <h2>Vector search without building SQL</h2>
-          <p>Choose a vector column, add an optional relational filter, and inspect the exact nearest-neighbor results.</p>
-        </div>
-        <div class="search-layout">
-          <form id="search-form" class="panel search-form">
-            <div class="form-section">
-              <span class="step-number">01</span>
-              <div class="form-section-body">
-                <h3>Search space</h3>
-                <div class="form-row two">
-                  <label>Table<select id="search-table" required><option value="">Choose a table</option></select></label>
-                  <label>Vector column<select id="search-vector-column" required><option value="">Choose a vector</option></select></label>
-                </div>
-              </div>
-            </div>
-            <div class="form-section">
-              <span class="step-number">02</span>
-              <div class="form-section-body">
-                <h3>Query vector</h3>
-                <label>Comma-separated values
-                  <textarea id="search-vector" rows="4" placeholder="1.0, 0.0, 0.0" required></textarea>
-                </label>
-                <div id="dimension-hint" class="field-hint">Select a vector column to see its dimensions.</div>
-                <div class="form-row two">
-                  <label>Metric
-                    <select id="search-metric">
-                      <option value="cosine">Cosine distance</option>
-                      <option value="l2">Euclidean distance</option>
-                      <option value="squared_l2">Squared L2</option>
-                      <option value="dot_product">Dot product</option>
-                    </select>
-                  </label>
-                  <label>Limit<input id="search-limit" type="number" min="1" max="1000" value="10"></label>
-                </div>
-              </div>
-            </div>
-            <div class="form-section">
-              <span class="step-number">03</span>
-              <div class="form-section-body">
-                <h3>Relational filter <small>optional</small></h3>
-                <div class="form-row filter-row">
-                  <label>Column<select id="filter-column"><option value="">No filter</option></select></label>
-                  <label>Operator
-                    <select id="filter-operator">
-                      <option value="eq">=</option><option value="ne">≠</option>
-                      <option value="gt">&gt;</option><option value="gte">≥</option>
-                      <option value="lt">&lt;</option><option value="lte">≤</option>
-                    </select>
-                  </label>
-                  <label>Value<input id="filter-value" placeholder="tech"></label>
-                </div>
-                <label>Return columns <small>comma-separated, blank for all scalar columns</small>
-                  <input id="search-select" placeholder="id, title, category">
-                </label>
-              </div>
-            </div>
-            <button class="button primary search-submit" type="submit">Run vector search <span>→</span></button>
-          </form>
-
-          <section class="panel search-results-panel">
-            <div class="panel-header">
-              <div><span class="panel-kicker">NEAREST NEIGHBORS</span><h2 id="search-results-title">Waiting for a query</h2></div>
-            </div>
-            <div id="search-results" class="results-empty">
-              <div class="search-orbit" aria-hidden="true"><i></i><i></i><i></i><b></b></div>
-              <p>Results are ranked by distance and returned with the number of rows examined.</p>
-            </div>
-          </section>
+      <section id="view-settings" class="view">
+        <div class="workspace-heading"><div><h2>Make it your workspace</h2><p>Connect an embedding provider and tune your browsing experience.</p></div><button id="settings-refresh" type="button" class="button ghost">Refresh settings</button></div>
+        <div class="settings-grid">
+          <form id="settings-embedding-form" class="panel form-card"><span class="panel-kicker">EMBEDDINGS</span><h3>Turn text into vectors</h3><p>Use the same provider and model for your documents and queries.</p><div class="form-row two"><label>Provider<select id="embedding-provider"><option value="openai">OpenAI</option><option value="voyage">Voyage AI</option></select></label><label>Model<select id="embedding-model"></select></label></div><label>Dimensions<input id="embedding-dimensions" type="number" min="1" value="1536" required></label><p id="embedding-dimension-note" class="field-hint"></p><label>Provider API key<input id="embedding-api-key" type="password" autocomplete="off" placeholder="Leave blank to keep the current key"></label><p id="embedding-key-status" class="provider-note">Loading provider settings…</p><label class="checkbox-label"><input id="embedding-clear-key" type="checkbox"> Clear this provider's active key</label><p class="privacy-note">Keys are held in server memory and never saved in this browser. Environment keys return after a server restart.</p><details class="form-advanced"><summary>Request settings</summary><div class="form-row three"><label>Batch size<input id="embedding-batch-size" type="number" min="1" max="128" value="32" required></label><label>Timeout (seconds)<input id="embedding-timeout" type="number" min="1" max="120" value="60" required></label><label>Concurrent requests<input id="embedding-concurrency" type="number" min="1" max="16" value="4" required></label></div></details><div class="inline-actions"><button id="embedding-save" class="button primary" type="submit">Save embedding settings</button></div><p id="embedding-settings-status" class="inline-status" role="status"></p></form>
+          <form id="settings-rerank-form" class="panel form-card"><span class="panel-kicker">OPTIONAL RERANKING</span><h3>A second look at retrieved context</h3><p>Voyage evaluates a question against candidate passages after hybrid retrieval. Enable it per search in Connections.</p><label>Reranking model<select id="rerank-model"><option value="rerank-2.5">rerank-2.5</option><option value="rerank-2.5-lite">rerank-2.5-lite</option></select></label><label>Voyage reranking API key<input id="rerank-api-key" type="password" autocomplete="off" placeholder="Leave blank to keep the current key"></label><p id="rerank-key-status" class="provider-note">Open Settings to load reranking configuration.</p><label class="checkbox-label"><input id="rerank-clear-key" type="checkbox"> Clear the active reranking key</label><p class="privacy-note">A reranked search sends your question and candidate passage context to Voyage. This key stays in server memory and is never saved in this browser. VOYAGE_API_KEY is loaded again after a server restart.</p><div class="form-row two"><label>Reranking timeout (seconds)<input id="rerank-timeout" type="number" min="1" max="120" value="60" required></label><label>Concurrent reranking requests<input id="rerank-concurrency" type="number" min="1" max="16" value="4" required></label></div><button id="rerank-save" class="button primary" type="submit">Save reranking settings</button><p id="rerank-settings-status" class="inline-status" role="status"></p></form>
+          <div class="settings-stack"><form id="settings-browser-form" class="panel form-card"><span class="panel-kicker">THIS BROWSER</span><h3>A comfortable view</h3><label>Default result page size<select id="preference-page-size"><option value="50">50 rows</option><option value="100" selected>100 rows</option><option value="250">250 rows</option></select></label><label>Background refresh<select id="preference-refresh"><option value="0">Off</option><option value="15" selected>Every 15 seconds</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option></select></label><label class="checkbox-label"><input id="preference-compact" type="checkbox"> Compact table rows</label><button class="button ghost" type="submit">Save browser preferences</button><p id="preference-status" class="inline-status" role="status">Saved only in this browser.</p></form><section class="panel form-card"><span class="panel-kicker">SERVER</span><h3>Connection and runtime</h3><p>Runtime values are read only. Restart the server to change its environment settings.</p><div id="server-settings" class="runtime-settings"><p class="field-hint">Open Settings to load server details.</p></div><button id="settings-token" class="button ghost" type="button">Manage API token</button></section></div>
         </div>
       </section>
 
-      <section id="view-guide" class="view">
-        <div class="guide-hero">
-          <div>
-            <span class="eyebrow">START IN FIVE MINUTES</span>
-            <h2>Relational filters meet vector similarity.</h2>
-            <p>vectors keeps the workflow deliberately familiar: define a schema, insert embeddings, and query everything with SQL.</p>
-            <button class="button primary" data-load-example="quickstart" type="button">Load the quickstart <span>→</span></button>
-          </div>
-          <div class="hero-query" aria-label="Example SQL query">
-            <div class="code-dots"><i></i><i></i><i></i></div>
-            <pre><code><span>SELECT</span> id, title,
-  cosine_distance(
-    embedding,
-    ARRAY[1, 0, 0]
-  ) <em>AS</em> distance
-<span>FROM</span> documents
-<span>WHERE</span> category = 'tech'
-<span>ORDER BY</span> distance
-<span>LIMIT</span> 5;</code></pre>
-          </div>
-        </div>
-
-        <div class="concept-grid">
-          <article><span class="concept-number">01</span><h3>Use real SQL</h3><p>Keep identifiers, metadata, filters, aggregates, and embeddings in one query language.</p></article>
-          <article><span class="concept-number">02</span><h3>Store typed vectors</h3><p><code>VECTOR(n)</code> columns enforce dimensions while cached norms accelerate repeated distance calculations.</p></article>
-          <article><span class="concept-number">03</span><h3>Search hybrid</h3><p>Hash-indexed scalar predicates prune candidates before exact vector distance evaluation.</p></article>
-        </div>
-
+      <section id="view-guide" class="view"><div class="workspace-heading"><div><h2>A little help, close at hand</h2><p>Start with sample SQL, or connect a provider and search your own text.</p></div></div><section id="quick-start" class="panel help-start" hidden><h3 id="quick-start-title">New to vectors?</h3><p>The sample creates three documents with small hand-written vectors. Use Vector mode to search it.</p><div class="inline-actions"><button class="button primary" data-load-example="quickstart" type="button">Focus sample SQL</button><button id="quick-start-guide" class="button ghost" type="button">Open tutorial</button><button id="dismiss-quick-start" class="button ghost" type="button">Dismiss quick start</button></div></section>
         <section class="hands-on panel" aria-labelledby="tutorial-title">
           <div class="hands-on-heading">
             <div>
@@ -353,33 +263,25 @@
           </div>
         </section>
 
-        <section class="workflow panel">
-          <div class="workflow-copy">
-            <span class="panel-kicker">CORE WORKFLOW</span>
-            <h2>One engine, three ways in</h2>
-            <p>Embed the Rust library, use the interactive shell, or run the Actix HTTP server and this console.</p>
-          </div>
-          <div class="workflow-list">
-            <div><strong>01</strong><span><b>Model</b><small>CREATE TABLE with VECTOR dimensions</small></span></div>
-            <div><strong>02</strong><span><b>Ingest</b><small>SQL inserts or typed bulk JSON</small></span></div>
-            <div><strong>03</strong><span><b>Query</b><small>Exact hybrid search with standard SQL</small></span></div>
-            <div><strong>04</strong><span><b>Persist</b><small>Fsynced WAL + compact checkpoints</small></span></div>
-          </div>
-        </section>
+
       </section>
     </main>
   </div>
 
+  <dialog id="graph-create-dialog"><form id="graph-create-form" class="form-card"><button class="dialog-close" data-close-dialog="graph-create-dialog" type="button" aria-label="Close create collection">×</button><span class="panel-kicker">NEW COLLECTION</span><h2>Connect a body of knowledge</h2><label>Collection name<input id="graph-create-name" required pattern="[a-z][a-z0-9_]{0,47}" maxlength="48" placeholder="knowledge"></label><p id="graph-create-profile" class="provider-note"></p><p class="field-hint">The collection keeps this embedding model and dimension count. Configure the provider in Settings before adding documents.</p><details class="form-advanced"><summary>Automatic semantic links</summary><div class="form-row two"><label>Neighbors per chunk<input id="graph-create-neighbors" type="number" min="0" max="16" value="3" required></label><label>Minimum cosine similarity<input id="graph-create-threshold" type="number" min="0" max="1" step="0.01" value="0.8" required></label></div></details><p id="graph-create-status" class="inline-status" role="status"></p><div class="dialog-actions"><button class="button ghost" type="button" data-close-dialog="graph-create-dialog">Cancel</button><button id="graph-create-submit" class="button primary" type="submit">Create collection</button></div></form></dialog>
+  <dialog id="admin-create-dialog" class="wide-dialog"><form id="admin-create-form" class="form-card"><button class="dialog-close" data-close-dialog="admin-create-dialog" type="button" aria-label="Close create table">×</button><span class="panel-kicker">NEW TABLE</span><h2>A home for your documents</h2><label>Table name<input id="admin-create-name" required placeholder="documents" maxlength="128"></label><label>Vector dimensions<input id="admin-create-dimensions" type="number" min="1" max="65535" value="1536" required></label><p class="field-hint">Creates id (unique integer), title, content, and embedding columns. Match dimensions to your embedding model.</p><details class="form-advanced"><summary>Custom schema</summary><label>Columns JSON <small>leave blank to use the document schema</small><textarea id="admin-create-schema" class="code-input" rows="6" spellcheck="false" placeholder='[{"name":"id","data_type":"INTEGER","nullable":false,"unique":true}]'></textarea></label></details><p id="admin-create-status" class="inline-status" role="status"></p><div class="dialog-actions"><button type="button" class="button ghost" data-close-dialog="admin-create-dialog">Cancel</button><button id="admin-create-submit" type="submit" class="button primary">Create table</button></div></form></dialog>
+  <dialog id="admin-drop-dialog"><form id="admin-drop-form" class="form-card"><button class="dialog-close" data-close-dialog="admin-drop-dialog" type="button" aria-label="Close delete table">×</button><span class="panel-kicker">DELETE TABLE</span><h2 id="admin-drop-title">Delete this table?</h2><p>This permanently deletes the table and all its rows. Type its exact name to continue.</p><label>Table name confirmation<input id="admin-drop-confirm" autocomplete="off" required></label><p id="admin-drop-status" class="inline-status" role="status"></p><div class="dialog-actions"><button type="button" class="button ghost" data-close-dialog="admin-drop-dialog">Cancel</button><button id="admin-drop-submit" type="submit" class="button danger" disabled>Delete table permanently</button></div></form></dialog>
+  <dialog id="admin-delete-dialog"><form id="admin-delete-form" class="form-card"><span class="panel-kicker">DELETE ROW</span><h2>Delete this row?</h2><p id="admin-delete-description"></p><p id="admin-delete-status" class="inline-status" role="status"></p><div class="dialog-actions"><button type="button" class="button ghost" data-close-dialog="admin-delete-dialog">Cancel</button><button id="admin-delete-confirm" type="submit" class="button danger">Delete selected row</button></div></form></dialog>
   <dialog id="token-dialog">
-    <form method="dialog" class="token-card">
-      <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+    <form id="token-form" method="dialog" class="token-card">
+      <button class="dialog-close" value="cancel" type="button" aria-label="Close">×</button>
       <span class="panel-kicker">AUTHENTICATION</span>
       <h2>Connect to vectors</h2>
       <p>If the server uses <code>VECTORS_API_TOKEN</code>, enter it here. It stays in this browser tab.</p>
       <label>Bearer token<input id="token-input" type="password" autocomplete="off" placeholder="Paste API token"></label>
       <div class="dialog-actions">
         <button id="clear-token" class="button ghost" value="cancel" type="button">Clear token</button>
-        <button id="save-token" class="button primary" value="default" type="button">Save and connect</button>
+        <button id="save-token" class="button primary" value="default" type="submit">Save and connect</button>
       </div>
     </form>
   </dialog>

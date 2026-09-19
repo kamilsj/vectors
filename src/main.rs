@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use vectors::{ComputeConfig, ComputeDevice, Database, ExecutionResult, Value};
 
+mod update_cli;
+
 const HELP: &str = "\
 vectors shell commands
 
@@ -105,6 +107,16 @@ Remove the sample when finished:
 
 fn main() {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "update")
+    {
+        let code = update_cli::run(&arguments[1..]).unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            1
+        });
+        std::process::exit(code);
+    }
     let data_dir = match arguments.as_slice() {
         [argument] if matches!(argument.as_str(), "--version" | "-V") => {
             println!("vectors {}", env!("CARGO_PKG_VERSION"));
@@ -112,7 +124,7 @@ fn main() {
         }
         [argument] if matches!(argument.as_str(), "--help" | "-h") => {
             println!(
-                "vectors {}\n\nUsage: vectors [options]\n\nStarts the interactive SQL shell. SQL statements end with ';'.\n\nOptions:\n      --data-dir PATH   Open or create a durable database in PATH\n  -h, --help            Show this help\n  -V, --version         Show version\n\nInside the shell:\n  .tutorial             Print a copy-ready vector-search walkthrough\n  .help                 List all shell commands\n\nExamples:\n  vectors\n  vectors --data-dir ./vectors-data",
+                "vectors {}\n\nUsage: vectors [options]\n       vectors update [--check | --watch] [options]\n\nStarts the interactive SQL shell. SQL statements end with ';'.\n\nOptions:\n      --data-dir PATH   Open or create a durable database in PATH\n  -h, --help            Show this help\n  -V, --version         Show version\n\nUpdates:\n  vectors update --help Show safe update and automatic-check options\n\nInside the shell:\n  .tutorial             Print a copy-ready vector-search walkthrough\n  .help                 List all shell commands\n\nExamples:\n  vectors\n  vectors --data-dir ./vectors-data",
                 env!("CARGO_PKG_VERSION")
             );
             return;

@@ -221,6 +221,82 @@ A healthy server returns JSON with `"status":"ok"`. Open
 [http://127.0.0.1:8080](http://127.0.0.1:8080) for the web console, or run
 `vectors` and enter `.tutorial` for the interactive SQL lesson.
 
+## Automatic updates
+
+Builds with the updater provide the same commands on Linux, macOS, and Windows:
+
+```sh
+vectors update --check
+vectors update
+vectors update --watch
+```
+
+`--check` reports the installed and latest stable versions without installing
+or restarting anything. `vectors update` installs only a strictly newer stable
+release. `--watch` checks immediately, then every six hours. Use
+`--watch --interval 86400` for daily checks; supported intervals are 60 seconds
+through seven days. Watch mode is opt-in and must remain running. It does not
+register a login task or operating-system service; run it through your service
+manager if it should survive logout or reboot. Stop it to disable automatic
+updates. Restart a long-running watcher after upgrades to load the newest
+updater logic.
+
+On Windows, an update opens a separate PowerShell window and the calling
+`vectors.exe` exits so Windows can replace it. The message in the calling
+terminal means the updater started; the separate window reports the final
+result and remains open for inspection. `--check` runs in the current terminal.
+No machine-wide execution-policy setting is changed.
+
+The updater targets the directory containing the invoked `vectors` binary.
+Use `--install-dir PATH` or `VECTORS_INSTALL_DIR` to select another installation.
+Both installed binaries must report the same stable `X.Y.Z` version. It will
+not downgrade, reinstall the same version, follow prerelease tags, replace
+package-manager symlinks, or ignore a `VECTORS_VERSION` pin. Unset that variable
+to opt a pinned installation into latest-stable updates. Older binaries that
+do not recognize `update` need one upgrade using the installer below first.
+
+Each update resolves one exact release tag, verifies its installer against
+that release's `SHA256SUMS`, then invokes the pinned installer. The installer
+separately verifies its binary archive. The updater keeps a temporary copy of
+the installed executable pair and restores it if installation or final version
+verification fails. Existing installer recovery restores a managed service
+that cannot start. Check the recovery message if a filesystem error prevents
+rollback; retained backups are reported rather than silently discarded.
+Database backups remain the operator's responsibility, especially across
+pre-1.0 releases with potentially changing SQL or storage behavior.
+
+A running installer-managed server uses its recorded bind and storage settings
+and restarts cooperatively. A stopped server remains stopped. Pass `--no-start`
+to replace binaries without restarting a managed server. External service
+managers should use this mode and handle their own restart and health policy.
+The updater never guesses how to stop an unrecognized process.
+
+Provide the existing `VECTORS_API_TOKEN` in the updater environment before an
+authenticated managed restart. Also supply `OPENAI_API_KEY`, `VOYAGE_API_KEY`,
+and any advanced runtime settings needed by the restarted server. These secrets
+are inherited in memory, not written into updater state. Provider keys entered
+only in the web interface disappear when the server restarts; use environment
+keys for unattended operation. Custom installations must also provide their
+existing `VECTORS_STATE_DIR`. Non-secret embedding settings in the durable data
+directory survive the update.
+
+Concurrent updater processes are serialized per installation. On POSIX, a
+forced kill can leave `.vectors-update.lock` in the binary directory. If the
+updater reports this, first verify no updater or installer is running, then
+remove only that lock directory. Normal completion and ordinary failures clean
+it up automatically. Watch mode reports failed checks and waits the configured
+interval before trying again, rather than repeatedly restarting a failed build.
+
+For source-based validation without GitHub downloads:
+
+```sh
+python3 tests/test_updater.py
+```
+
+Windows uses `powershell -NoProfile -File tests/update_windows.ps1`. These
+fixtures exercise version selection, checksum rejection, failure cleanup, and
+upgrade decisions without touching an existing installation.
+
 ## Upgrade or reinstall
 
 The installer is idempotent: run the current installer again to replace the
