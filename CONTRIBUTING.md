@@ -146,6 +146,16 @@ workflow and the installers.
 Release workflows use full action commit hashes; update the adjacent version
 comment when deliberately advancing a pinned action.
 
+Tagged releases test the console in a browser and run the compiled server's
+embedded interface, SQL/vector APIs, chunking, GraphRAG, and durable restart
+checks before publication. The same smoke test runs against installed release
+downloads on every supported platform. Run it locally with an isolated temporary
+database (created and removed by the script):
+
+```sh
+python3 scripts/release_smoke.py --server target/release/vectors-server --expected-version v0.8.0
+```
+
 ## Performance changes
 
 Include a reproducible workload rather than a single elapsed-time claim. Report

@@ -59,6 +59,11 @@ install both binaries for the current user, start a durable server, and open
 the web console when a desktop is available. Releases support Linux x86-64 and
 ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
+[v0.8.0](https://github.com/kamilsj/vectors/releases/tag/v0.8.0) includes the
+GraphRAG engine and the Search, Connections, Data, SQL, and Settings workspaces.
+If you still see the older interface, run the installer below to upgrade the
+server with `--restart` (PowerShell: `-Restart`), then reload the console.
+
 Linux or macOS:
 
 ```sh
@@ -271,7 +276,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.7.0 | in-memory SQL vector database
+vectors 0.8.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```

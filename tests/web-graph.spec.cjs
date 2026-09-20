@@ -150,11 +150,11 @@ test("auth failures surface the connection dialog and graph errors remain visibl
   await page.getByRole("button", { name: "Close", exact: true }).click(); await page.route("**/v1/graph/collections", (route) => reply(route, { error: { code: "database_busy", message: "Graph capacity is busy; try again later" } }, 503)); await page.locator("#graph-refresh").click(); await expect(page.locator("#graph-status")).toContainText("capacity is busy");
 });
 
-test("Connections stays within desktop and mobile viewport widths", async ({ page }) => {
+test("Connections stays within desktop and mobile viewport widths", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1512, height: 1050 }); await workspace(page); await openGraph(page); await selectFirst(page);
-  await page.screenshot({ path: "/private/tmp/vectors-connections-desktop.png", fullPage: true });
+  await page.screenshot({ path: testInfo.outputPath("vectors-connections-desktop.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: "/private/tmp/vectors-connections-mobile.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: testInfo.outputPath("vectors-connections-mobile.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await expect(page.locator("#graph-details")).toContainText("chunk-1");
 });
@@ -271,12 +271,12 @@ test("neighborhood authorization and missing-passage errors preserve a route bac
   await page.locator("#graph-back-pages").click(); await expect(page.locator(".graph-point")).toHaveCount(18);
 });
 
-test("focused graph has readable root and depth labels at desktop and mobile widths", async ({ page }) => {
+test("focused graph has readable root and depth labels at desktop and mobile widths", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1512, height: 1050 }); await workspace(page); await openGraph(page); await selectFirst(page);
   await page.locator("#graph-details").getByRole("button", { name: "Explore connections", exact: true }).click(); await page.locator("#graph-neighborhood-hops").selectOption("2"); await page.locator("#graph-neighborhood-apply").click();
   await expect(page.locator(".graph-point.graph-root text")).toContainText("How retrieval works"); await expect(page.locator(".graph-point.graph-root text")).toContainText("root");
-  await page.screenshot({ path: "/private/tmp/vectors-neighborhood-desktop.png", fullPage: true }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: "/private/tmp/vectors-neighborhood-mobile.png", fullPage: true }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("vectors-neighborhood-desktop.png"), fullPage: true }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: testInfo.outputPath("vectors-neighborhood-mobile.png"), fullPage: true }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.locator(".graph-accessible-list summary").click(); await page.locator(".graph-list-node").last().focus(); await page.keyboard.press("Enter"); await expect(page.locator("#graph-details")).toContainText("2 hops from root");
 });
 
@@ -363,11 +363,11 @@ test("a stale path response after reconnect cannot restore old provenance", asyn
   await expect(page.locator("#graph-seeds")).toHaveValue("12"); await expect(page.locator("#graph-retrieval-direction")).toHaveValue("outgoing");
 });
 
-test("retrieval path details and advanced controls fit desktop and mobile screens", async ({ page }) => {
+test("retrieval path details and advanced controls fit desktop and mobile screens", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1512, height: 1050 }); const fixture = await workspace(page);
   const path = { seed_chunk_id: "chunk-1", edges: [{ from_chunk: "chunk-7", to_chunk: "chunk-1", kind: "supports", weight: .9 }, { from_chunk: "chunk-7", to_chunk: "chunk-13", kind: "references", weight: .75 }] };
   await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
   await openGraph(page); await page.locator("#graph-search-form summary").click(); await page.locator("#graph-hops").fill("2"); await page.locator("#graph-retrieval-direction").selectOption("both"); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
-  await page.locator(".graph-retrieval").screenshot({ path: "/private/tmp/vectors-retrieval-path-desktop.png" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.setViewportSize({ width: 390, height: 844 }); await page.locator(".graph-retrieval").screenshot({ path: "/private/tmp/vectors-retrieval-path-mobile.png", style: ".topbar { visibility: hidden; }" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.locator(".graph-retrieval").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-desktop.png") }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 }); await page.locator(".graph-retrieval").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-mobile.png"), style: ".topbar { visibility: hidden; }" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

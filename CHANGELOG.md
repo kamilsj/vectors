@@ -12,6 +12,14 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## 0.8.0 - 2026-09-20
+
+### Added
+
 - RAG relationship direction, exact-label, and minimum-weight controls in the
   HTTP API, Rust API, Python SDK, and console. Graph-derived hits retain
   snapshot-consistent discovery paths, including omitted bridge identifiers,
@@ -54,6 +62,9 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Changed
 
+- Release builds verify the embedded GraphRAG console, live API, and durable
+  restart before publication and after installation on every supported platform.
+  Browser regression checks also gate publication.
 - BM25 index construction borrows lowercase ASCII tokens and reuses vocabulary
   keys, reducing repeated-word allocations while preserving Unicode scoring
   and bounded-cache fallback behavior.

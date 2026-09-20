@@ -12,6 +12,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  web:
+    name: Verify release console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:web
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -46,6 +55,11 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo test --all-targets --all-features --locked --target ${{ matrix.target }}
       - run: cargo build --release --locked --features gpu --target ${{ matrix.target }}
+      - name: Verify compiled console and GraphRAG API
+        run: >-
+          python scripts/release_smoke.py
+          --server target/${{ matrix.target }}/release/vectors-server${{ runner.os == 'Windows' && '.exe' || '' }}
+          --expected-version ${{ github.ref_name }}
       - name: Verify Unix binaries
         if: runner.os != 'Windows'
         shell: bash
@@ -79,7 +93,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [build, web]
     runs-on: ubuntu-latest
     permissions:
       artifact-metadata: write
@@ -175,6 +189,7 @@ jobs:
           curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$VECTORS_VERSION/install.sh" | sh
           "$VECTORS_INSTALL_DIR/vectors" --version
           "$VECTORS_INSTALL_DIR/vectors-server" --version
+          python scripts/release_smoke.py --server "$VECTORS_INSTALL_DIR/vectors-server" --expected-version "$VECTORS_VERSION"
       - name: Verify Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -188,3 +203,4 @@ jobs:
           & ([scriptblock]::Create((irm "https://github.com/${{ github.repository }}/releases/download/$env:VECTORS_VERSION/install.ps1")))
           & "$env:RUNNER_TEMP\vectors-bin\vectors.exe" --version
           & "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --version
+          python scripts/release_smoke.py --server "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --expected-version "$env:VECTORS_VERSION"
