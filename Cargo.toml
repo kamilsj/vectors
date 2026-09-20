@@ -10,7 +10,7 @@ homepage = "https://github.com/kamilsj/vectors"
 documentation = "https://docs.rs/vectors"
 keywords = ["database", "sql", "vector", "embeddings", "search"]
 categories = ["database-implementations"]
-exclude = ["/output/**", "/node_modules/**", "/playwright-report/**", "/test-results/**", "/.installer-fixture/**"]
+exclude = ["/output/**", "/python/**", "/node_modules/**", "/playwright-report/**", "/test-results/**", "/.installer-fixture/**"]
 
 [features]
 default = []

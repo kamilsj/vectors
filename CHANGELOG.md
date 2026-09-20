@@ -12,6 +12,20 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- RAG relationship direction, exact-label, and minimum-weight controls in the
+  HTTP API, Rust API, Python SDK, and console. Graph-derived hits retain
+  snapshot-consistent discovery paths, including omitted bridge identifiers,
+  with an expandable explanation in the console.
+- Reproducible uv SDK development with a locked environment, package metadata
+  and wheel/source-install checks, Python 3.10/3.14 CI, and a separate
+  `python-v*` release workflow using PyPI trusted publishing.
+- Installable Python SDK with synchronous/asynchronous clients, typed SQL and
+  vector results, bounded generator-based imports with partial-progress errors,
+  embedding and GraphRAG helpers, revision-checked relationship edits, and live
+  server integration tests.
+- Typed `$1`, `$2`, ... SQL parameters for the HTTP execution/intent endpoints
+  and embedded Rust API, with safe value binding, bounded expansion, and
+  existing atomic write, result-limit, and durable recovery guarantees.
 - A Connections workspace to browse chunk relationships, inspect citations,
   preview and ingest documents, and manage directed links with revision checks.
 - Provider-free focused graph exploration across page boundaries through
@@ -40,6 +54,12 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Changed
 
+- BM25 index construction borrows lowercase ASCII tokens and reuses vocabulary
+  keys, reducing repeated-word allocations while preserving Unicode scoring
+  and bounded-cache fallback behavior.
+- Focused graph neighborhoods reuse maintained chunk/document ID indexes
+  instead of allocating full-collection lookup maps for every request. A
+  correctness-checked benchmark measures fixed neighborhoods across corpus sizes.
 - Hybrid `/retrieve` graph expansion merges all frontier proposals before
   applying each hop's bounded beam, combining path strength with query fit and
   retaining useful traversal through bridges omitted from final context.
@@ -67,6 +87,14 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Fixed
 
+- Small browser retrieval budgets now suggest fewer starting passages, leaving
+  room for connected context; explicitly chosen seed counts remain adjustable.
+- A stronger graph route now updates path evidence and depth together, so the
+  displayed connection chain describes the retained retrieval route.
+- Duplicate relationship triples inserted through SQL use their strongest
+  weight consistently in RAG paths and returned graph edges.
+- Accept the documented SQL `<=>` cosine operator in projections, predicates,
+  grouped expressions, and optimized vector top-k plans.
 - Rank API searches by the computed score when a table contains a `distance`
   column, reject duplicate selected columns, and honor configured response-row
   limits. Reject schema changes atomically during typed imports so reordered

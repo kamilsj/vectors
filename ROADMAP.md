@@ -45,7 +45,9 @@ broader CPU and GPU measurements remain necessary before changing device policy.
 - Teach the planner to choose exact or ANN search from candidate count, filter
   selectivity, requested recall, and `LIMIT`.
 - Persist vector indexes with versioning and corruption validation.
-- Add prepared statements and typed parameters for repeated queries.
+- Add reusable prepared statements and parameter-aware plan reuse. Typed `$1`
+  value binding is available in the HTTP API, Rust API, and Python SDK; it still
+  parses the bound SQL and does not yet reuse plans across parameter values.
 - Add explicit host-memory accounting, configurable table/query budgets, and
   backpressure for very large ingestion requests.
 - Add streaming ingestion and partitioned index construction so input size does

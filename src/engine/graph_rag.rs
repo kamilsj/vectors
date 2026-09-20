@@ -90,6 +90,60 @@ pub struct GraphRagRequest {
     pub lexical_weight: f64,
 }
 
+/// Optional relationship policy for graph expansion. Direct hybrid matches
+/// remain eligible independently of this policy.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphRagTraversal {
+    pub direction: GraphNeighborhoodDirection,
+    pub kind: Option<String>,
+    pub min_weight: f64,
+}
+
+impl Default for GraphRagTraversal {
+    fn default() -> Self {
+        Self {
+            direction: GraphNeighborhoodDirection::Outgoing,
+            kind: None,
+            min_weight: 0.0,
+        }
+    }
+}
+
+impl GraphRagTraversal {
+    /// Validate before provider work so malformed filters cannot incur usage.
+    pub fn validate(&self) -> Result<()> {
+        if !self.min_weight.is_finite() || !(0.0..=1.0).contains(&self.min_weight) {
+            return Err(invalid(
+                "RAG minimum relationship weight must be finite and in 0..1",
+            ));
+        }
+        if let Some(kind) = &self.kind {
+            read_edge(&edge_row(&edge(
+                "source".into(),
+                "target".into(),
+                kind,
+                1.0,
+            )))?;
+        }
+        Ok(())
+    }
+
+    fn includes(&self, edge: &GraphEdge) -> bool {
+        self.kind.as_ref().is_none_or(|kind| kind == &edge.kind) && edge.weight >= self.min_weight
+    }
+}
+
+/// One retained discovery route from a hybrid seed to a graph-context hit.
+/// Edges are ordered along the walk but retain their original stored arrows;
+/// incoming exploration walks an edge from its target back to its source.
+/// Intermediate passages need not be included in the final context budget.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct GraphRagPath {
+    pub seed_chunk_id: String,
+    pub edges: Vec<GraphEdge>,
+}
+
 /// Internal reranking material. Deliberately not serializable: vectors stay on
 /// the server while external rerankers receive only the bounded text inputs.
 #[derive(Clone, Debug)]
@@ -99,6 +153,7 @@ pub struct GraphRagCandidate {
     pub fusion_score: f64,
     pub rerank_text: String,
     pub vector: Vector,
+    pub retrieval_path: Option<GraphRagPath>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +183,8 @@ pub struct GraphRagHit {
     pub fusion_score: f64,
     pub rerank_score: Option<f64>,
     pub selection_score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval_path: Option<GraphRagPath>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -190,6 +247,7 @@ impl Database {
             chunks,
             &selected_ids,
             request.max_edges,
+            None,
         )?;
         Ok(GraphBrowseResult {
             collection: info.config.name,
@@ -339,6 +397,7 @@ fn induced_edges(
     chunks: &Table,
     selected: &HashSet<&str>,
     limit: usize,
+    traversal: Option<&GraphRagTraversal>,
 ) -> Result<(Vec<GraphEdge>, bool)> {
     let known = chunks
         .rows
@@ -362,6 +421,9 @@ fn induced_edges(
             .flatten()
         {
             let edge = read_edge(&edge_table.rows[*row_index])?;
+            if traversal.is_some_and(|policy| !policy.includes(&edge)) {
+                continue;
+            }
             if !known.contains(edge.to_chunk.as_str()) {
                 return Err(invalid("graph edge references a missing chunk"));
             }
@@ -371,7 +433,12 @@ fn induced_edges(
                     edge.to_chunk.clone(),
                     edge.kind.clone(),
                 );
-                edges.entry(key).or_insert(edge);
+                edges
+                    .entry(key)
+                    .and_modify(|stored: &mut GraphEdge| {
+                        stored.weight = stored.weight.max(edge.weight);
+                    })
+                    .or_insert(edge);
                 if edges.len() > limit {
                     edges.pop_last();
                     truncated = true;
@@ -399,10 +466,30 @@ struct LexicalCacheEntry {
 }
 static LEXICAL_CACHE: OnceLock<Mutex<VecDeque<LexicalCacheEntry>>> = OnceLock::new();
 
-fn tokens(text: &str) -> impl Iterator<Item = String> + '_ {
+fn token_words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
+}
+
+fn tokens(text: &str) -> impl Iterator<Item = String> + '_ {
+    token_words(text).map(str::to_lowercase)
+}
+
+fn index_tokens(text: &str) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+    token_words(text).map(|word| {
+        // Most source words already are lowercase ASCII. Borrow those until
+        // their frequency is known instead of allocating once per occurrence.
+        // Non-ASCII must retain str::to_lowercase's complete Unicode behavior,
+        // including titlecase letters and multi-character case mappings.
+        if word
+            .bytes()
+            .all(|byte| byte.is_ascii() && !byte.is_ascii_uppercase())
+        {
+            std::borrow::Cow::Borrowed(word)
+        } else {
+            std::borrow::Cow::Owned(word.to_lowercase())
+        }
+    })
 }
 
 impl LexicalIndex {
@@ -418,25 +505,29 @@ impl LexicalIndex {
             let mut length = 0;
             let text = text_at(row, 6)?;
             bounded_text(text, 32 * 1024, false, "stored embedding text")?;
-            for term in tokens(text) {
+            for term in index_tokens(text) {
                 length += 1;
-                if query_terms.is_none_or(|terms| terms.contains(&term)) {
+                if query_terms.is_none_or(|terms| terms.contains(term.as_ref())) {
                     *counts.entry(term).or_insert(0usize) += 1;
                 }
             }
             lengths.push(length);
             for (term, frequency) in counts {
-                if !postings.contains_key(&term) {
-                    bytes = bytes.saturating_add(128 + term.len() * 2);
-                }
                 bytes = bytes.saturating_add(32);
-                if query_terms.is_none() && bytes > LEXICAL_INDEX_BYTES {
-                    return Ok(None);
+                if let Some(existing) = postings.get_mut(term.as_ref()) {
+                    if query_terms.is_none() && bytes > LEXICAL_INDEX_BYTES {
+                        return Ok(None);
+                    }
+                    existing.push((row_index, frequency));
+                } else {
+                    bytes = bytes.saturating_add(128 + term.len() * 2);
+                    if query_terms.is_none() && bytes > LEXICAL_INDEX_BYTES {
+                        return Ok(None);
+                    }
+                    // Own a vocabulary key only once, when it first appears
+                    // anywhere in the collection (or query-only fallback).
+                    postings.insert(term.into_owned(), vec![(row_index, frequency)]);
                 }
-                postings
-                    .entry(term)
-                    .or_default()
-                    .push((row_index, frequency));
             }
         }
         let average_length =
@@ -619,6 +710,17 @@ impl Database {
     /// access is needed while an external reranker is running or during final
     /// diversity selection; all candidate vectors and citations are owned.
     pub fn graph_rag_candidates(&self, request: GraphRagRequest) -> Result<GraphRagSnapshot> {
+        self.graph_rag_candidates_with_traversal(request, GraphRagTraversal::default())
+    }
+
+    /// Retrieve with an explicit direction and relationship filter. The
+    /// default policy preserves the outgoing traversal of `graph_rag_candidates`.
+    pub fn graph_rag_candidates_with_traversal(
+        &self,
+        request: GraphRagRequest,
+        policy: GraphRagTraversal,
+    ) -> Result<GraphRagSnapshot> {
+        policy.validate()?;
         if !(1..=100).contains(&request.candidate_limit)
             || !(1..=20).contains(&request.seed_limit)
             || request.seed_limit > request.candidate_limit
@@ -709,6 +811,7 @@ impl Database {
         let edge_table = table(&catalog, &info.tables.edges)?;
         let (admitted, truncated) = traversal::GraphTraversal {
             request: &request,
+            policy: &policy,
             chunks,
             edges: edge_table,
             lookup: &lookup,
@@ -718,17 +821,18 @@ impl Database {
         }
         .expand(&ranked)?;
         let mut candidates = Vec::with_capacity(admitted.len());
-        for (index, depth, score) in admitted {
-            let row = &chunks.rows[index];
+        for admission in admitted {
+            let row = &chunks.rows[admission.row];
             let Some(Value::Vector(vector)) = row.get(8) else {
                 return Err(invalid("graph chunk embedding is missing"));
             };
             candidates.push(GraphRagCandidate {
-                hit: hit(row, &documents, &request.query, depth)?,
-                lexical_score: score.lexical,
-                fusion_score: score.fusion,
+                hit: hit(row, &documents, &request.query, admission.depth)?,
+                lexical_score: admission.score.lexical,
+                fusion_score: admission.score.fusion,
                 rerank_text: text_at(row, 6)?.into(),
                 vector: vector.clone(),
+                retrieval_path: admission.retrieval_path,
             });
         }
         candidates.sort_by(|left, right| {
@@ -746,6 +850,7 @@ impl Database {
             chunks,
             &selected,
             request.candidate_limit * request.neighbor_limit,
+            Some(&policy),
         )?;
         Ok(GraphRagSnapshot {
             collection: info.config.name,
@@ -921,6 +1026,7 @@ impl GraphRagSnapshot {
                     fusion_score: candidate.fusion_score,
                     rerank_score: rerank_scores.map(|scores| scores[index]),
                     selection_score,
+                    retrieval_path: candidate.retrieval_path,
                 }
             })
             .collect();

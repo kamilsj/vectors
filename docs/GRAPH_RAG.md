@@ -206,6 +206,8 @@ curl http://127.0.0.1:8080/v1/graph/collections/knowledge/retrieve \
     "max_results":10,
     "max_hops":1,
     "neighbor_limit":8,
+    "direction":"outgoing",
+    "min_weight":0,
     "vector_weight":1,
     "lexical_weight":1,
     "reranker":"local",
@@ -220,7 +222,7 @@ The stages are:
 1. Retrieve semantic vector matches and lexical BM25 matches from the collection.
    Lexical matching helps preserve exact identifiers, names, and error codes.
 2. Combine their ranks using weighted reciprocal rank fusion, then expand
-   outgoing relationships with a bounded beam: rank new context by link strength
+   eligible relationships with a bounded beam: rank new context by link strength
    and query relevance, merge proposals from all passages in each hop, and only
    then apply the global candidate-width limit.
 3. Optionally score each query/candidate pair with a Voyage cross-encoder.
@@ -236,10 +238,37 @@ context. Each hop retains at most `candidate_limit` frontier passages, after
 the per-passage `neighbor_limit` is applied. Stable chunk IDs break score ties.
 These bounds make traversal selective, not an exhaustive graph search.
 
+`direction` selects `outgoing` (the default), `incoming`, or `both`. Optional
+`kind` selects one exact stored label, such as `supports` or `semantic`;
+`min_weight` accepts a finite inclusive threshold from 0 to 1. Kind and weight
+are checked before links are combined or consume neighbor slots, and also
+filter returned edges. Direction controls traversal; returned arrows retain
+their stored orientation. Direct vector/BM25 matches remain eligible regardless
+of these relationship filters. For example, add `"direction":"incoming"`,
+`"kind":"references"`, and `"min_weight":0.6` to find context that references
+your strongest matches. This is a retrieval policy, not a document-access filter.
+
 A traversed bridge can be omitted from the candidate pool or final context.
-Returned edges therefore describe links among selected hits, not a complete
-record of the paths explored. These rules apply to `/retrieve`; `/search`
-continues to preserve vector seeds and prioritize adjacent passages.
+The top-level `edges` still describe only links among selected hits. A graph-
+derived hit now also includes `retrieval_path` with `seed_chunk_id` and up to
+three `edges` in traversal order. These preserve the retained route even when
+its starting or intermediate passages are absent from the final context. Walk
+from the seed through either endpoint of each stored edge; an incoming step
+follows its arrow in reverse. The hit's `depth` is the retained route length,
+which can increase when a stronger route replaces an earlier weak one. Direct
+hybrid hits omit `retrieval_path` and keep depth zero. Paths describe discovery,
+not factual inference or every explored alternative.
+
+Path evidence is copied from the same snapshot as the hits before external
+reranking. It contains identifiers and relationships, not extra passage text;
+the UTF-8 context budget still counts only the returned source passages.
+Subsequent graph edits cannot change that response's paths. These rules apply
+to `/retrieve`; `/search` retains its existing vector-seed traversal.
+
+The embedded Rust API retains `graph_rag_candidates(request)` with the outgoing
+default. Use `graph_rag_candidates_with_traversal(request, GraphRagTraversal {
+direction, kind, min_weight })` for an explicit policy. Both synchronous and
+asynchronous Python collection clients accept these same keyword arguments.
 
 `diversity: 0` keeps relevance order; larger values trade relevance for less
 repeated context. The default is `0.3`. `max_context_bytes` counts returned chunk
@@ -263,7 +292,11 @@ including changes through SQL or the typed API. Relationship edits and writes
 to unrelated tables keep it reusable; citation data still comes from the current
 snapshot. Reopening a database starts with a cold cache. Repeated retrieval
 reuses tokenization, posting lists, and precomputed BM25 length factors with
-unchanged scoring arithmetic. The tokenizer uses Unicode word-like terms rather
+unchanged scoring arithmetic. Index construction borrows already-lowercase
+ASCII terms and owns a vocabulary key only once, reducing allocations for
+repeated words. Other terms retain the same Unicode lowercasing, including
+multi-character mappings; oversized-index fallback uses the same normalization.
+The tokenizer uses Unicode word-like terms rather
 than model tokens; this is not language-specific stemming or full linguistic
 analysis. RRF and MMR
 follow the approaches described in the original
@@ -305,6 +338,9 @@ specified in the [Voyage reranker API](https://docs.voyageai.com/reference/reran
 | Returned chunks | 10 | 1–100, no more than candidates or server row limit |
 | Graph hops | 1 | 0–3 |
 | Neighbors per expanded chunk | 8 | 1–32 |
+| Relationship direction | `outgoing` | `outgoing`, `incoming`, `both` |
+| Relationship kind | Any | One exact label: `[a-z][a-z0-9_]{0,63}` |
+| Minimum relationship weight | 0 | Finite value in 0–1, inclusive |
 | Vector / lexical weights | 1 / 1 | Each 0–10; at least one positive |
 | Diversity | 0.3 | 0–1 |
 | Chunks per document | 3 | 1–100 |
@@ -317,6 +353,15 @@ exact query-specific BM25 scoring without caching the full index. Index builds
 run outside the shared cache lock.
 
 ## Explore and edit connections
+
+In **Context and diversity**, retrieval has separate direction, exact-label,
+and minimum-weight controls. Starting passages (seeds) are adjustable; suggested
+seeds decrease with a small candidate budget so connected context has room.
+An explicit seed choice is preserved until **Use suggested seeds** is selected.
+Choosing as many seeds as candidate slots can leave no room for new graph hits.
+Graph-derived results expose **How this passage was found**, with the starting
+seed, original relationship arrows, and links to explore intermediate chunks.
+An identifier for an omitted bridge does not imply that its text was returned.
 
 The console's **Connections** workspace includes collection creation, chunk
 preview, document ingestion, graph browsing, and RAG search. Nodes represent

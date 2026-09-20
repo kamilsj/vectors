@@ -102,6 +102,142 @@ fn query() -> JsonValue {
         "max_results":3,"max_hops":1,"diversity":0.0})
 }
 
+fn traversal_query() -> JsonValue {
+    json!({"text":"ZX419", "candidate_limit":4, "seed_limit":1,
+        "max_results":4, "max_hops":1, "neighbor_limit":1,
+        "vector_weight":0, "diversity":0})
+}
+
+fn add_traversal_link(db: &Database, from: &str, to: &str, kind: &str, weight: f64) {
+    db.graph_upsert_relationship(GraphRelationshipRequest {
+        collection: "notes".into(),
+        expected_revision: db.revision().unwrap(),
+        from_chunk: from.into(),
+        to_chunk: to.into(),
+        kind: kind.into(),
+        weight,
+    })
+    .unwrap();
+}
+
+#[actix_web::test]
+async fn retrieval_incoming_control_discovers_reverse_links_and_preserves_default_direction() {
+    let db = fixture();
+    add_traversal_link(&db, "3:one:0", "3:two:0", "supports", 0.8);
+    let (endpoint, mock) = mock_provider(3, |_, _, _| (200, embedding_response()));
+    let embeddings = configured(&endpoint, Provider::Openai);
+    for direction in [None, Some("incoming"), Some("both")] {
+        let mut request = traversal_query();
+        request["kind"] = json!("supports");
+        if let Some(direction) = direction {
+            request["direction"] = json!(direction);
+        }
+        let (status, result) = call(
+            &db,
+            &embeddings,
+            None,
+            Method::POST,
+            "/v1/graph/collections/notes/retrieve",
+            request,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let hits = result["hits"].as_array().unwrap();
+        let seed = hits.iter().find(|hit| hit["document_id"] == "two").unwrap();
+        assert!(seed.get("retrieval_path").is_none());
+        if direction.is_none() {
+            assert_eq!(hits.len(), 1);
+            assert_eq!(result["edges"], json!([]));
+        } else {
+            assert_eq!(hits.len(), 2);
+            let context = hits.iter().find(|hit| hit["document_id"] == "one").unwrap();
+            assert_eq!(context["depth"], 1);
+            assert_eq!(
+                context["retrieval_path"],
+                json!({
+                    "seed_chunk_id":"3:two:0", "edges":[{
+                        "from_chunk":"3:one:0", "to_chunk":"3:two:0",
+                        "kind":"supports", "weight":0.8
+                    }]
+                })
+            );
+            assert_eq!(result["edges"], context["retrieval_path"]["edges"]);
+        }
+    }
+    mock.join().unwrap();
+}
+
+#[actix_web::test]
+async fn retrieval_filters_relationships_before_neighbor_budget_and_returned_edges() {
+    let db = fixture();
+    add_traversal_link(&db, "3:two:0", "3:one:0", "unwanted", 1.0);
+    add_traversal_link(&db, "3:two:0", "3:one:0", "supports", 0.2);
+    add_traversal_link(&db, "3:two:0", "5:three:0", "supports", 0.8);
+    add_traversal_link(&db, "5:three:0", "3:two:0", "supports", 0.1);
+    let (endpoint, mock) = mock_provider(1, |_, _, _| (200, embedding_response()));
+    let embeddings = configured(&endpoint, Provider::Openai);
+    let mut request = traversal_query();
+    request["kind"] = json!("supports");
+    request["min_weight"] = json!(0.8);
+    let (status, result) = call(
+        &db,
+        &embeddings,
+        None,
+        Method::POST,
+        "/v1/graph/collections/notes/retrieve",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let hits = result["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().any(|hit| hit["document_id"] == "two"));
+    assert!(hits.iter().any(|hit| hit["document_id"] == "three"));
+    assert!(!hits.iter().any(|hit| hit["document_id"] == "one"));
+    assert_eq!(
+        result["edges"],
+        json!([{
+            "from_chunk":"3:two:0", "to_chunk":"5:three:0",
+            "kind":"supports", "weight":0.8
+        }])
+    );
+    mock.join().unwrap();
+}
+
+#[actix_web::test]
+async fn invalid_retrieval_relationship_controls_fail_before_provider_work() {
+    let db = fixture();
+    let embeddings = configured("http://127.0.0.1:1", Provider::Openai);
+    for invalid in [
+        json!({"direction":"sideways"}),
+        json!({"min_weight":-0.1}),
+        json!({"min_weight":1.1}),
+        json!({"kind":""}),
+        json!({"kind":"not-a-label"}),
+        json!({"kind":"UPPER"}),
+        json!({"kind":"a".repeat(65)}),
+    ] {
+        let mut request = traversal_query();
+        for (field, value) in invalid.as_object().unwrap() {
+            request[field] = value.clone();
+        }
+        let (status, result) = call(
+            &db,
+            &embeddings,
+            None,
+            Method::POST,
+            "/v1/graph/collections/notes/retrieve",
+            request,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}: {result}");
+        assert!(!result["error"]["code"]
+            .as_str()
+            .unwrap()
+            .starts_with("embedding_"));
+    }
+}
+
 #[actix_web::test]
 async fn browse_and_relationship_edits_are_provider_free_and_revision_guarded() {
     let db = fixture();

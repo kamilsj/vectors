@@ -14,8 +14,8 @@ pub use neighborhood::{
 #[path = "graph_rag.rs"]
 mod rag;
 pub use rag::{
-    GraphBrowseRequest, GraphBrowseResult, GraphNode, GraphRagCandidate, GraphRagHit,
-    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot,
+    GraphBrowseRequest, GraphBrowseResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagPath,
+    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRagTraversal,
     GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult, GraphRelationshipRequest,
     GraphRelationshipResult,
 };

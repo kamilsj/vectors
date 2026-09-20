@@ -84,14 +84,9 @@ impl Database {
         let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
         let info = collection(&catalog, &request.collection)?;
         let chunks = table(&catalog, &info.tables.chunks)?;
-        let lookup = chunks
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| text_at(row, 0).map(|id| (id, index)))
-            .collect::<Result<HashMap<_, _>>>()?;
+        let lookup = id_index(chunks)?;
         let root = *lookup
-            .get(request.chunk_id.as_str())
+            .get(&UniqueKey::from(&Value::Text(request.chunk_id.clone())))
             .ok_or_else(|| invalid("graph neighborhood root chunk does not exist"))?;
         let edge_table = table(&catalog, &info.tables.edges)?;
         let outgoing = edge_table
@@ -128,7 +123,9 @@ impl Database {
                             continue;
                         }
                         let neighbor = *lookup
-                            .get(text_at(row, *endpoint)?)
+                            .get(&UniqueKey::from(&Value::Text(
+                                text_at(row, *endpoint)?.into(),
+                            )))
                             .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
                         if visited.contains(&neighbor) {
                             continue;
@@ -166,14 +163,13 @@ impl Database {
                 break;
             }
         }
-        let documents = table(&catalog, &info.tables.documents)?
-            .rows
-            .iter()
-            .map(|row| text_at(row, 0).map(|id| (id, row)))
-            .collect::<Result<HashMap<_, _>>>()?;
+        let documents = table(&catalog, &info.tables.documents)?;
+        let document_ids = id_index(documents)?;
         let nodes = selected
             .iter()
-            .map(|(index, depth)| citation_node(&chunks.rows[*index], &documents, *depth))
+            .map(|(index, depth)| {
+                citation_node(&chunks.rows[*index], documents, document_ids, *depth)
+            })
             .collect::<Result<Vec<_>>>()?;
         let mut edges = BoundedEdges::new(request.max_edges);
         // Return the induced eligible directed graph, including cycles and
@@ -186,7 +182,7 @@ impl Database {
                     continue;
                 }
                 let target = *lookup
-                    .get(edge.to_chunk.as_str())
+                    .get(&UniqueKey::from(&Value::Text(edge.to_chunk.clone())))
                     .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
                 if visited.contains(&target) {
                     edges.insert(edge);
@@ -214,13 +210,15 @@ fn rank_neighbors(neighbors: &mut [(usize, f64)], chunks: &Table) {
 
 fn citation_node(
     chunk: &[Value],
-    documents: &HashMap<&str, &Vec<Value>>,
+    documents: &Table,
+    document_ids: &HashMap<UniqueKey, usize>,
     depth: usize,
 ) -> Result<GraphNeighborhoodNode> {
     let document_id = text_at(chunk, 1)?;
-    let document = *documents
-        .get(document_id)
+    let index = document_ids
+        .get(&UniqueKey::from(&Value::Text(document_id.into())))
         .ok_or_else(|| invalid("graph chunk references a missing document"))?;
+    let document = &documents.rows[*index];
     let start_byte = usize_at(chunk, 3)?;
     let end_byte = usize_at(chunk, 4)?;
     let text = text_at(chunk, 5)?;
@@ -243,6 +241,15 @@ fn citation_node(
         },
         depth,
     })
+}
+
+// These maps are maintained atomically by all SQL/typed writes and rebuilt on
+// recovery. Borrow them under the same catalog lock as the graph traversal.
+fn id_index(table: &Table) -> Result<&HashMap<UniqueKey, usize>> {
+    table
+        .unique_keys
+        .get(&0)
+        .ok_or_else(|| invalid("graph unique id index is missing"))
 }
 
 #[derive(Clone, Debug)]

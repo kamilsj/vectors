@@ -279,3 +279,95 @@ test("focused graph has readable root and depth labels at desktop and mobile wid
   await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: "/private/tmp/vectors-neighborhood-mobile.png", fullPage: true }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.locator(".graph-accessible-list summary").click(); await page.locator(".graph-list-node").last().focus(); await page.keyboard.press("Enter"); await expect(page.locator("#graph-details")).toContainText("2 hops from root");
 });
+
+const pathResult = (hits) => ({ collection: "knowledge", revision: 7, hits, edges: [], truncated: false, context_bytes: 700, candidate_count: 18, lexical_cache_hit: false, reranking: { method: "local", model: null, total_tokens: 0 }, embedding_usage: { total_tokens: 4 } });
+const pathHit = (item, path) => ({ ...item, similarity: .82, lexical_score: .2, fusion_score: .024, selection_score: .5, seed: false, depth: path?.edges?.length || 1, ...(path === undefined ? {} : { retrieval_path: path }) });
+async function askGraph(page, question = "How are these passages connected?") {
+  await page.locator("#graph-question").fill(question); await page.locator("#graph-search-submit").click();
+}
+
+test("retrieval sends direction, exact kind and weight with the explicit seed budget", async ({ page }) => {
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").click();
+  await page.locator("#graph-retrieval-direction").selectOption("incoming"); await page.locator("#graph-retrieval-kind").fill("supports"); await page.locator("#graph-retrieval-min-weight").fill("0.65"); await page.locator("#graph-seeds").fill("4");
+  await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
+  expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ direction: "incoming", kind: "supports", min_weight: .65, seed_limit: 4 });
+});
+
+test("small candidate budgets reserve graph context while explicit seeds remain unchanged", async ({ page }) => {
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").click();
+  await page.locator("#graph-candidates").fill("8"); await expect(page.locator("#graph-seeds")).toHaveValue("6"); await page.locator("#graph-result-limit").fill("4"); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
+  expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ candidate_limit: 8, seed_limit: 6 });
+  await page.locator("#graph-seeds").fill("7"); await page.locator("#graph-candidates").fill("4"); await expect(page.locator("#graph-seeds")).toHaveValue("7"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Starting passages must not exceed");
+  expect(fixture.calls.filter((call) => call.path.endsWith("/retrieve"))).toHaveLength(1);
+  await page.locator("#graph-seeds-auto").click(); await expect(page.locator("#graph-seeds")).toHaveValue("3");
+  await page.locator("#graph-seeds").fill("4"); await expect(page.locator("#graph-seed-hint")).toContainText("Every candidate slot is a seed");
+  await page.locator("#graph-candidates").fill("40"); await expect(page.locator("#graph-seeds")).toHaveValue("4");
+});
+
+test("invalid relationship filters and seed limits stop before retrieval", async ({ page }) => {
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").click();
+  await page.locator("#graph-retrieval-kind").fill("Invalid label"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Relationship type must start");
+  await page.locator("#graph-retrieval-kind").fill(""); await page.locator("#graph-retrieval-min-weight").fill("1.2"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Minimum relationship weight");
+  await page.locator("#graph-retrieval-min-weight").fill("0"); await page.locator("#graph-seeds").fill("0"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Starting passages must be a whole number");
+  await page.locator("#graph-seeds").fill("4"); await page.evaluate(() => { const select = document.querySelector("#graph-retrieval-direction"); const option = document.createElement("option"); option.value = "sideways"; select.append(option); select.value = "sideways"; }); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("valid relationship direction");
+  expect(fixture.calls.some((call) => call.path.endsWith("/retrieve"))).toBe(false);
+});
+
+test("legacy retrieval responses omit path explanations and empty kind remains optional", async ({ page }) => {
+  const fixture = await workspace(page); await openGraph(page); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0);
+  const payload = fixture.calls.find((call) => call.path.endsWith("/retrieve")).body;
+  expect(payload).toMatchObject({ direction: "outgoing", min_weight: 0, seed_limit: 12 }); expect(payload).not.toHaveProperty("kind");
+});
+
+test("a two-hop explanation preserves incoming arrows and identifies unreturned bridges", async ({ page }) => {
+  const fixture = await workspace(page);
+  const path = { seed_chunk_id: "chunk-1", edges: [ { from_chunk: "chunk-7", to_chunk: "chunk-1", kind: "supports", weight: .9 }, { from_chunk: "chunk-7", to_chunk: "chunk-13", kind: "references", weight: .75 } ] };
+  await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
+  await openGraph(page); await askGraph(page); await expect(page.locator(".graph-retrieval-path")).toHaveCount(1); await expect(page.locator(".graph-path-steps")).toHaveCount(0);
+  await page.getByText("How this passage was found", { exact: true }).click(); await expect(page.locator(".graph-path-seed")).toContainText("chunk-1");
+  await expect(page.locator(".graph-path-steps > li")).toHaveCount(2); await expect(page.locator(".graph-path-arrow").first()).toHaveText("←"); await expect(page.locator(".graph-path-arrow").last()).toHaveText("→");
+  await expect(page.locator(".graph-path-steps")).toContainText("weight 0.9000 · followed incoming"); await expect(page.locator(".graph-path-steps")).toContainText("Connection identifier · source passage not returned");
+  await page.getByRole("button", { name: "Explore connections for chunk-7", exact: true }).click(); await expect(page.locator(".graph-point.graph-root")).toHaveAttribute("data-chunk", "chunk-7");
+});
+
+test("invalid or disconnected explanations stay bounded and do not claim a path", async ({ page }) => {
+  const fixture = await workspace(page);
+  const edge = { from_chunk: "chunk-1", to_chunk: "chunk-2", kind: "supports", weight: .8 };
+  const paths = [
+    { seed_chunk_id: "chunk-1", edges: [edge] },
+    { seed_chunk_id: "chunk-1", edges: [{ ...edge, from_chunk: "unrelated", to_chunk: "chunk-13" }] },
+    { seed_chunk_id: "chunk-1", edges: Array(4).fill(edge) },
+    { seed_chunk_id: "chunk-1", edges: [{ ...edge, to_chunk: "chunk-13", weight: 1.1 }] },
+  ];
+  await page.route("**/retrieve", (route) => reply(route, pathResult(paths.map((path) => pathHit(fixture.nodes[12], path)))));
+  await openGraph(page); await askGraph(page); await expect(page.locator(".graph-retrieval-path")).toHaveCount(4);
+  for (const summary of await page.locator(".graph-retrieval-path summary").all()) await summary.click();
+  await expect(page.locator(".graph-path-steps")).toHaveCount(0); await expect(page.getByText("The server returned an incomplete connection explanation.", { exact: false })).toHaveCount(4);
+  await expect(page.locator(".graph-hit")).toHaveCount(4);
+});
+
+test("untrusted path identifiers are text and never become HTML or executable links", async ({ page }) => {
+  const fixture = await workspace(page); const hostile = '<img src=x onerror="window.pathXss=1">';
+  const path = { seed_chunk_id: hostile, edges: [{ from_chunk: hostile, to_chunk: "chunk-13", kind: "supports", weight: .8 }] };
+  await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
+  await openGraph(page); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
+  await expect(page.locator(".graph-path-seed code")).toHaveText(hostile); await expect(page.locator(".graph-retrieval-path img, .graph-retrieval-path a")).toHaveCount(0); expect(await page.evaluate(() => window.pathXss)).toBeUndefined();
+});
+
+test("a stale path response after reconnect cannot restore old provenance", async ({ page }) => {
+  const fixture = await workspace(page); const gate = deferred(); let entered = false;
+  await page.route("**/retrieve", async (route) => { entered = true; await gate.promise; await reply(route, pathResult([pathHit(fixture.nodes[12], { seed_chunk_id: "old-private-seed", edges: [{ from_chunk: "old-private-seed", to_chunk: "chunk-13", kind: "supports", weight: 1 }] })])); });
+  await openGraph(page); await askGraph(page); await expect.poll(() => entered).toBe(true);
+  await page.locator("#open-token").click(); await page.locator("#token-input").fill("new-path-session"); await page.locator("#save-token").click(); gate.resolve();
+  await expect(page.locator("#status-label")).toHaveText("Connected"); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0); await expect(page.locator("#graph-search-results")).not.toContainText("old-private-seed");
+  await expect(page.locator("#graph-seeds")).toHaveValue("12"); await expect(page.locator("#graph-retrieval-direction")).toHaveValue("outgoing");
+});
+
+test("retrieval path details and advanced controls fit desktop and mobile screens", async ({ page }) => {
+  await page.setViewportSize({ width: 1512, height: 1050 }); const fixture = await workspace(page);
+  const path = { seed_chunk_id: "chunk-1", edges: [{ from_chunk: "chunk-7", to_chunk: "chunk-1", kind: "supports", weight: .9 }, { from_chunk: "chunk-7", to_chunk: "chunk-13", kind: "references", weight: .75 }] };
+  await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
+  await openGraph(page); await page.locator("#graph-search-form summary").click(); await page.locator("#graph-hops").fill("2"); await page.locator("#graph-retrieval-direction").selectOption("both"); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
+  await page.locator(".graph-retrieval").screenshot({ path: "/private/tmp/vectors-retrieval-path-desktop.png" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 }); await page.locator(".graph-retrieval").screenshot({ path: "/private/tmp/vectors-retrieval-path-mobile.png", style: ".topbar { visibility: hidden; }" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

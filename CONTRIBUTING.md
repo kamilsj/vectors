@@ -51,6 +51,25 @@ recorded baseline, workload controls, and measurement boundaries.
 
 ## Before opening a pull request
 
+Python SDK changes use uv 0.12.10+ and the committed dependency lock:
+
+```sh
+uv sync --project python --locked
+uv run --project python --locked python python/tools/generate_async.py --check
+uv run --project python --locked ruff check python
+uv run --project python --locked python -m unittest discover -s python/tests -v
+uv build python --out-dir python/dist --clear --no-sources
+uv run --project python --locked python python/tools/check_dist.py python/dist --install
+```
+
+Set `VECTORS_TEST_SERVER` to a built `vectors-server` executable to include the
+temporary live-server tests. Edit the synchronous client and regenerate its
+explicit async counterpart with
+`uv run --project python --locked python python/tools/generate_async.py`; both
+variants are checked in. See [the SDK guide](python/README.md) for platform
+instructions and [the release guide](python/PUBLISHING.md) for PyPI publishing.
+Python releases use `python-vX.Y.Z` tags independently of Rust releases.
+
 Run the same core checks as CI:
 
 ```sh

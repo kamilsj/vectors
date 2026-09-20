@@ -3,8 +3,8 @@
 use super::*;
 use crate::{
     GraphBrowseRequest, GraphNeighborhoodDirection, GraphNeighborhoodRequest, GraphRagRequest,
-    GraphRagResult, GraphRagSelection, GraphRelationshipDeleteRequest, GraphRelationshipRequest,
-    RerankingService,
+    GraphRagResult, GraphRagSelection, GraphRagTraversal, GraphRelationshipDeleteRequest,
+    GraphRelationshipRequest, RerankingService,
 };
 
 pub(super) fn configure(config: &mut web::ServiceConfig) {
@@ -230,6 +230,11 @@ struct Retrieve {
     max_hops: usize,
     #[serde(default = "default_neighbor_limit")]
     neighbor_limit: usize,
+    #[serde(default = "retrieval_direction")]
+    direction: GraphNeighborhoodDirection,
+    kind: Option<String>,
+    #[serde(default)]
+    min_weight: f64,
     #[serde(default = "diversity")]
     diversity: f64,
     #[serde(default = "context_limit")]
@@ -263,6 +268,9 @@ fn per_document() -> usize {
 }
 fn weight() -> f64 {
     1.0
+}
+fn retrieval_direction() -> GraphNeighborhoodDirection {
+    GraphNeighborhoodDirection::Outgoing
 }
 
 impl Retrieve {
@@ -332,8 +340,16 @@ async fn retrieve(
     input: web::Json<Retrieve>,
 ) -> Result<HttpResponse, ApiError> {
     authorize(&request, security.as_ref().map(|value| value.get_ref()))?;
-    let input = input.into_inner();
+    let mut input = input.into_inner();
     input.validate(&limits)?;
+    let traversal = GraphRagTraversal {
+        direction: input.direction,
+        kind: input.kind.take(),
+        min_weight: input.min_weight,
+    };
+    traversal
+        .validate()
+        .map_err(|error| ApiError::bad_request("invalid_rag_request", error.to_string()))?;
     let max_edges = limits.max_response_rows;
     let collection = collection.into_inner();
     let database = database.get_ref().clone();
@@ -377,18 +393,21 @@ async fn retrieve(
             .into_iter()
             .next()
             .ok_or_else(|| ApiError::internal("query embedding is missing"))?;
-        let snapshot = database.graph_rag_candidates(GraphRagRequest {
-            collection: state.config.name,
-            expected_profile: state.config.profile,
-            query: normalized_embedding(values)?,
-            query_text,
-            candidate_limit: input.candidate_limit,
-            seed_limit: input.seed_limit,
-            max_hops: input.max_hops,
-            neighbor_limit: input.neighbor_limit,
-            vector_weight: input.vector_weight,
-            lexical_weight: input.lexical_weight,
-        })?;
+        let snapshot = database.graph_rag_candidates_with_traversal(
+            GraphRagRequest {
+                collection: state.config.name,
+                expected_profile: state.config.profile,
+                query: normalized_embedding(values)?,
+                query_text,
+                candidate_limit: input.candidate_limit,
+                seed_limit: input.seed_limit,
+                max_hops: input.max_hops,
+                neighbor_limit: input.neighbor_limit,
+                vector_weight: input.vector_weight,
+                lexical_weight: input.lexical_weight,
+            },
+            traversal,
+        )?;
         Ok::<_, ApiError>((snapshot, generated.usage))
     })
     .await?;

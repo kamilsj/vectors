@@ -87,9 +87,28 @@ thread, capacity, keep-alive, client-header-timeout, and graceful-shutdown
 settings are explicit. `/healthz`, `/readyz`, and `/metrics` remain outside the
 database admission path so an overloaded process is still observable.
 
+The HTTP SQL/intent routes also accept optional JSON `parameters`, mapped to
+typed engine values. Binding runs on the admitted database worker. The SQL
+tokenizer identifies `$N` placeholders and their Unicode-aware source offsets;
+the binder copies all other source bytes unchanged and inserts parenthesized,
+escaped literals. It never performs global string substitution. Invalid,
+missing, unused, or oversized parameters fail before execution. Bound SQL uses
+the same executor and WAL paths as ordinary SQL, including multi-statement
+atomicity and aggregate response-row limits. This currently caches/parses the
+bound SQL, not a parameter-independent prepared plan. The public Rust API
+offers the same binder and `execute_with_parameters`.
+
 ## Catalog and concurrency
 
 ### Document chunks and graph retrieval
+
+Focused neighborhoods borrow maintained unique-ID maps for chunk and document
+lookup under the catalog read lock. They avoid allocating maps of every chunk
+and document per request; SQL updates/deletes and snapshot/WAL reopen maintain
+or rebuild these indexes. Collection profile validation still scans chunk
+profiles, and high-degree traversal can still inspect many incident edges.
+This optimization does not make total neighborhood cost independent of corpus
+size or replace the existing collection/traversal limits.
 
 `chunking::chunk_text` splits Unicode text with source byte offsets and bounded
 overlap. The HTTP graph workflow adds versioned title/heading context, pins the
@@ -117,7 +136,7 @@ model runs inside the graph engine.
 The separate RAG pipeline combines BM25 posting lists and exact vector ranks
 with weighted reciprocal rank fusion, then reserves candidate capacity for graph
 context when the seed budget permits. `/retrieve` uses a query-aware beam over
-indexed outgoing edges: it merges proposals from the whole frontier before
+indexed edges (outgoing by default, optionally incoming or both): it merges proposals from the whole frontier before
 applying each hop's candidate-width cap. Per-source distinct-neighbor limits,
 at most three hops, and a maximum 100-candidate beam bound exploration. Scores
 combine decayed path strength and target cosine/BM25 fit; structural strength
@@ -126,6 +145,17 @@ Later stronger paths can improve candidates, zero-weight edges do not propagate
 retrieval evidence, and stable IDs break ties. Traversed bridges need not appear
 in the bounded candidate pool or final selected context. This is selective
 chunk-graph retrieval, not entity extraction or exhaustive path search.
+
+Retrieval relationship policies validate before provider work and filter kind
+and minimum weight before neighbor deduplication or beam admission. The same
+filters apply to induced result edges; direct hybrid matches remain eligible.
+For each graph candidate, the beam retains one seed and at most three edge-row
+references, then copies the winning route into owned `retrieval_path` evidence
+under the catalog read lock. Score, depth, and path change together when a
+stronger route is found. Original edge direction remains intact when traversing
+incoming links. Only retained paths allocate owned edge strings; omitted bridge
+text is never added outside the context budget. External reranking and final
+selection use this snapshot without rereading a newer graph.
 
 Lexical indexes use catalog identity, collection name, and the chunk embedding
 column's storage generation and row count. Every chunk append or rebuild
@@ -138,6 +168,10 @@ The LRU retains at most three indexes, each checked against a conservative
 uncached query-specific postings; builders tokenize outside the global cache
 lock. BM25 length factors are computed once per indexed row using the same
 arithmetic as the scoring loop.
+Index construction borrows lowercase ASCII tokens during per-chunk counting
+and allocates persistent vocabulary strings only for new terms. Other tokens
+use the previous Unicode lowercasing unchanged. Differential tests compare
+exact BM25 score bits and ranks, including oversized query-only fallback.
 
 The owned candidate snapshot holds vectors, source text, and citations while an
 optional Voyage cross-encoder runs.

@@ -1,5 +1,14 @@
 version: 2
 updates:
+  - package-ecosystem: uv
+    directory: "/python"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      python-dependencies:
+        patterns: ["*"]
   - package-ecosystem: cargo
     directory: "/"
     schedule:

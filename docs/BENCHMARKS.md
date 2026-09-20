@@ -7,6 +7,42 @@ with another database.
 
 ## Run the benchmark
 
+### Focused graph neighborhoods
+
+```sh
+cargo run --release --example benchmark_graph_neighborhood -- 10000 1000 /tmp/neighborhood.json
+```
+
+This workload returns four cited nodes and three directed `supports` edges
+while the collection grows from 100 to 10,000 documents/chunks. Each document
+has one chunk and a three-dimensional vector; vectors are not searched. It
+uses both directions, three hops, eight neighbors per node, a minimum weight
+of 0.5, and caps of 20 nodes/20 edges. Every timed result is checked against an
+untimed result. Compare the optional complete JSON outputs across revisions
+to verify node order, depths, citations, edges, revision, and truncation.
+
+Measured on 2026-09-20 with Apple M4 Max, macOS 27.0 arm64, Rust 1.98.1,
+release profile, default features, CPU policy, and 1,000 repetitions. Setup,
+serialization, HTTP, providers, and vector search are excluded. Before/after
+JSON outputs matched byte for byte. The only neighborhood implementation
+change reuses the maintained chunk/document ID indexes instead of building
+full-collection lookup maps for each request.
+
+| Documents / chunks | Before median / p95 (µs) | After median / p95 (µs) | Median speedup |
+| --- | ---: | ---: | ---: |
+| 100 | 11.00 / 13.92 | 5.92 / 15.75 | 1.86× |
+| 1,000 | 77.50 / 84.13 | 9.46 / 11.71 | 8.19× |
+| 10,000 | 705.75 / 790.08 | 44.42 / 47.75 | 15.89× |
+
+[Recorded measurements and baseline commit](benchmarks/graph-neighborhood-2026-09-20.json).
+These are local microbenchmark observations, not throughput or tail-latency
+guarantees; the smallest workload's p95 did not improve. Collection profile
+validation still scans chunk profiles, and traversal cost depends on incident
+edges. Current collection limits remain enforced. RAG retrieval, ANN recall,
+and larger-than-memory/distributed workloads require separate measurements.
+
+### Exact vector search
+
 ```sh
 cargo run --release --example benchmark_vector_search
 cargo run --release --features gpu --example benchmark_vector_search -- --compute auto
@@ -527,3 +563,47 @@ timing, but desktop background activity was not controlled. This is one
 synthetic local workload, not a general throughput or cross-database claim.
 The [raw report](benchmarks/graph-retrieval-2026-09-19.json) retains all samples,
 workload settings, result fingerprints, and source/binary hashes.
+
+## RAG keyword-index construction
+
+The [lexical-build harness](../examples/benchmark_lexical_build.rs) measures
+complete local retrieval after a chunk write forces a keyword-index rebuild,
+then repeats the same query with that index cached. Index construction now
+borrows lowercase ASCII words during per-chunk counting and allocates persistent
+vocabulary keys only for new terms. Other terms retain the previous Unicode
+lowercasing. Differential tests check exact BM25 scores and rankings, including
+Unicode case expansions and the oversized-vocabulary fallback.
+
+```sh
+cargo build --release --locked --example benchmark_lexical_build
+target/release/examples/benchmark_lexical_build 64 16 128 20 /tmp/rag-results.json
+```
+
+Use the same harness in preserved before/after checkouts and separate canonical
+result files. On 2026-09-20, three paired processes alternated baseline/current
+order, each measuring 20 cold/warm query pairs. Both versions used Rust 1.98.1,
+locked dependencies, CPU release builds, and an Apple M4 Max (16 CPU cores,
+48 GiB), macOS 27.0 (26A428). Medians and p95s pool 60 samples per phase/version:
+
+| Complete local retrieval | Before median | After median | Before p95 | After p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Cold keyword index | 7.584 ms | 5.020 ms | 8.006 ms | 5.366 ms |
+| Reused keyword index | 0.386 ms | 0.374 ms | 0.436 ms | 0.439 ms |
+
+Cold retrieval latency decreased by **33.8%** (1.51× speedup). Cached retrieval
+was essentially unchanged. All six processes produced byte-identical canonical
+hits, scores, citations, edges, candidate counts, and context sizes. Every cold
+query rebuilt the index and every warm query reused it.
+
+The synthetic English corpus contains 64 documents with 16 chunks each and
+128-dimensional vectors. Retrieval uses 40 candidates, 10 results, diversity
+0.3, three chunks per document, and a 24,000-byte context budget. Graph expansion
+is disabled to isolate the lexical rebuild and keep result ranking comparable;
+these measurements do not establish graph-path quality or multilingual speed.
+The timer includes hybrid candidate retrieval and final MMR/context selection,
+but excludes ingestion, invalidation writes, providers, HTTP, serialization,
+and persistence. No concurrent clients or GPU were tested. Other project builds
+and tests were paused during timing; desktop background activity was not
+controlled. The [raw report](benchmarks/rag-lexical-build-2026-09-20.json) includes
+every sample, workload settings, source/binary hashes, and exact-result checks.
+Allocation counts and peak memory were not instrumented.

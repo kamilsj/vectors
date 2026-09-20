@@ -1573,7 +1573,7 @@ async function embedAndInsertDocuments() {
 
 function newGraphState() {
   return { collections: [], collection: "", catalogGeneration: 0, generation: 0, previewGeneration: 0,
-    searchGeneration: 0, busy: false, searchBusy: false, loading: false, notice: "",
+    searchGeneration: 0, seedExplicit: false, busy: false, searchBusy: false, loading: false, notice: "",
     mode: "pages", rootChunk: null, rootLabel: "", pageSelection: null, neighborhoodTruncated: false, offset: 0, limit: 100, total: 0,
     revision: null, nodes: [], edges: [], selected: null, zoom: 1, pan: { x: 0, y: 0 }, dragged: false };
 }
@@ -1587,8 +1587,9 @@ function graphColor(id) {
 function graphPath(suffix = "") { return `/v1/graph/collections/${encodeURIComponent(state.graph.collection)}${suffix}`; }
 function graphCollection() { return state.graph.collections.find((item) => item.config.name === state.graph.collection); }
 function graphLabel(item) {
-  const citation = Number.isInteger(item.ordinal) ? `passage ${item.ordinal + 1}` : `bytes ${item.start_byte}–${item.end_byte}`;
-  return `${item.title || item.document_id} · ${citation}`;
+  const title = item.title || item.document_id || item.chunk_id;
+  const citation = Number.isInteger(item.ordinal) ? `passage ${item.ordinal + 1}` : Number.isInteger(item.start_byte) && Number.isInteger(item.end_byte) ? `bytes ${item.start_byte}–${item.end_byte}` : "";
+  return citation ? `${title} · ${citation}` : title;
 }
 function graphProfileNote() {
   const collection = graphCollection();
@@ -2056,6 +2057,104 @@ async function saveGraphDocument(event) {
     void loadTables({ quiet: true });
   }, "graph-document-status");
 }
+function suggestedGraphSeeds(candidates) {
+  return Math.min(12, Math.max(1, candidates - Math.max(1, Math.floor(candidates / 4))));
+}
+function updateGraphSeedBudget() {
+  const candidates = Number($("#graph-candidates").value);
+  const valid = Number.isInteger(candidates) && candidates >= 1 && candidates <= 100;
+  if (!state.graph.seedExplicit && valid) $("#graph-seeds").value = suggestedGraphSeeds(candidates);
+  const seeds = Number($("#graph-seeds").value);
+  let hint = state.graph.seedExplicit
+    ? "Your seed choice is preserved when the candidate budget changes."
+    : "Suggested seeds adjust with the candidate budget to leave room for connected passages.";
+  if (valid && seeds > candidates) hint += " Lower seeds to fit within the candidate budget before searching.";
+  else if (valid && seeds === candidates && Number($("#graph-hops").value) > 0) hint += " Every candidate slot is a seed; graph expansion cannot add another passage.";
+  $("#graph-seed-hint").textContent = hint;
+}
+function graphRetrievalOptions() {
+  const numeric = (selector) => $(selector).value.trim() ? Number($(selector).value) : NaN;
+  const payload = {
+    candidate_limit: numeric("#graph-candidates"), seed_limit: numeric("#graph-seeds"),
+    max_results: numeric("#graph-result-limit"), max_hops: numeric("#graph-hops"),
+    neighbor_limit: numeric("#graph-neighbors"), diversity: numeric("#graph-diversity"),
+    max_context_bytes: numeric("#graph-context-budget"), max_per_document: numeric("#graph-per-document"),
+    direction: $("#graph-retrieval-direction").value, min_weight: numeric("#graph-retrieval-min-weight"),
+    vector_weight: 1, lexical_weight: 1,
+  };
+  for (const [key, label, min, max] of [["candidate_limit", "Candidate passages", 1, 100], ["seed_limit", "Starting passages", 1, 20], ["max_results", "Maximum results", 1, 100], ["max_hops", "Connection depth", 0, 3], ["neighbor_limit", "Neighbors per passage", 1, 32], ["max_context_bytes", "Context budget", 1, 1048576], ["max_per_document", "Results per document", 1, 100]]) {
+    if (!Number.isInteger(payload[key]) || payload[key] < min || payload[key] > max) throw new Error(`${label} must be a whole number between ${min} and ${max}.`);
+  }
+  if (payload.max_results > payload.candidate_limit) throw new Error("Maximum results must not exceed the candidate passage count.");
+  if (payload.seed_limit > payload.candidate_limit) throw new Error("Starting passages must not exceed the candidate passage count. Lower seeds or use the suggested value.");
+  if (!Number.isFinite(payload.diversity) || payload.diversity < 0 || payload.diversity > 1) throw new Error("Diversity must be between 0 and 1.");
+  if (!Number.isFinite(payload.min_weight) || payload.min_weight < 0 || payload.min_weight > 1) throw new Error("Minimum relationship weight must be between 0 and 1.");
+  if (!["outgoing", "incoming", "both"].includes(payload.direction)) throw new Error("Choose a valid relationship direction.");
+  const kind = $("#graph-retrieval-kind").value.trim();
+  if (kind && !validGraphRelationshipKind(kind)) throw new Error("Relationship type must start with a lowercase letter and use only lowercase letters, digits, or underscores, up to 64 characters.");
+  if (kind) payload.kind = kind;
+  return payload;
+}
+function validGraphRelationshipKind(kind) {
+  return typeof kind === "string" && kind === kind.trim() && /^[a-z][a-z0-9_]{0,63}$/.test(kind);
+}
+function validatedRetrievalPath(hit) {
+  const path = hit.retrieval_path;
+  const validId = (value) => typeof value === "string" && value.trim().length > 0 && !value.includes("\0") && new TextEncoder().encode(value).length <= 1024;
+  if (!path || !validId(path.seed_chunk_id) || !validId(hit.chunk_id) || !Array.isArray(path.edges) || path.edges.length < 1 || path.edges.length > 3) return null;
+  let current = path.seed_chunk_id;
+  const steps = [];
+  for (const edge of path.edges) {
+    if (!edge || !validId(edge.from_chunk) || !validId(edge.to_chunk) || edge.from_chunk === edge.to_chunk
+      || !validGraphRelationshipKind(edge.kind) || typeof edge.weight !== "number" || !Number.isFinite(edge.weight) || edge.weight < 0 || edge.weight > 1) return null;
+    const outgoing = edge.from_chunk === current;
+    if (!outgoing && edge.to_chunk !== current) return null;
+    const next = outgoing ? edge.to_chunk : edge.from_chunk;
+    steps.push({ edge, current, next, outgoing }); current = next;
+  }
+  return current === hit.chunk_id ? { seed: path.seed_chunk_id, steps } : null;
+}
+function renderGraphRetrievalPath(hit, returnedPassages) {
+  if (hit.retrieval_path === undefined || hit.retrieval_path === null) return null;
+  const details = node("details", "graph-retrieval-path");
+  details.append(node("summary", "", "How this passage was found"));
+  const path = validatedRetrievalPath(hit);
+  details.addEventListener("toggle", () => {
+    if (!details.open || details.childElementCount > 1) return;
+    if (!path) { details.append(node("p", "field-hint", "The server returned an incomplete connection explanation. The passage is still available, but this path cannot be shown reliably.")); return; }
+    details.append(node("p", "graph-path-intro", "Connections are listed from the starting seed to this result. Arrows show each stored relationship’s direction, including links followed in reverse."));
+    const seed = node("div", "graph-path-seed"); seed.append(node("strong", "", "Starting seed"), node("code", "", path.seed));
+    const seedPassage = returnedPassages.get(path.seed);
+    seed.append(node("small", "", seedPassage ? graphLabel(seedPassage) : "Identifier only; this source passage was not returned.")); details.append(seed);
+    const list = node("ol", "graph-path-steps");
+    for (const [index, step] of path.steps.entries()) {
+      const item = node("li"); const heading = node("div", "graph-path-edge-label");
+      heading.append(node("strong", "", `${index + 1}. ${step.edge.kind}`), node("span", "", `weight ${formatGraphScore(step.edge.weight)} · followed ${step.outgoing ? "outgoing" : "incoming"}`));
+      const connection = node("div", "graph-path-connection");
+      const identity = (id) => {
+        const target = node("div", "graph-path-node"); target.append(node("code", "", id));
+        target.append(node("small", "", returnedPassages.has(id) ? graphLabel(returnedPassages.get(id)) : "Connection identifier · source passage not returned"));
+        return target;
+      };
+      const arrow = node("span", "graph-path-arrow", step.outgoing ? "→" : "←"); arrow.setAttribute("role", "img"); arrow.setAttribute("aria-label", step.outgoing ? "Stored relationship points right" : "Stored relationship points left");
+      connection.append(identity(step.current), arrow, identity(step.next)); item.append(heading, connection); list.append(item);
+    }
+    details.append(list);
+    const hiddenIds = [...new Set([path.seed, ...path.steps.map((step) => step.next)])].filter((id) => id !== hit.chunk_id && !returnedPassages.has(id));
+    if (hiddenIds.length) {
+      const actions = node("div", "graph-path-actions");
+      for (const id of hiddenIds) {
+        const button = node("button", "button ghost compact", id === path.seed ? "Explore starting seed" : "Explore bridge connection");
+        button.type = "button"; button.dataset.exploreConnections = ""; button.disabled = state.graph.busy;
+        button.setAttribute("aria-label", `Explore connections for ${id}`);
+        button.addEventListener("click", () => void exploreGraphConnections({ chunk_id: id })); actions.append(button);
+      }
+      details.append(actions);
+    }
+  });
+  return details;
+}
+
 async function retrieveGraphContext(event) {
   event.preventDefault();
   const graph = state.graph;
@@ -2068,6 +2167,7 @@ async function retrieveGraphContext(event) {
     if (!text) throw new Error("Enter a question first.");
     const maxBytes = $("#graph-reranker").value === "voyage" ? 7872 : 8191;
     if (text.includes("\0") || new TextEncoder().encode(text).length > maxBytes) throw new Error(`Questions must not contain NUL characters and must fit within ${maxBytes} UTF-8 bytes.`);
+    const options = graphRetrievalOptions();
     const config = await requireGraphProfile();
     if (generation !== state.graph.searchGeneration) throw staleRequest();
     const reranker = $("#graph-reranker").value;
@@ -2076,14 +2176,12 @@ async function retrieveGraphContext(event) {
       if (!settings?.configured) throw new Error("Add a Voyage reranking key in Settings first.");
     }
     if (generation !== state.graph.searchGeneration) throw staleRequest();
-    const payload = { text, candidate_limit: Number($("#graph-candidates").value), seed_limit: 12, max_results: Number($("#graph-result-limit").value), max_hops: Number($("#graph-hops").value), neighbor_limit: Number($("#graph-neighbors").value), reranker, diversity: Number($("#graph-diversity").value), max_context_bytes: Number($("#graph-context-budget").value), max_per_document: Number($("#graph-per-document").value), vector_weight: 1, lexical_weight: 1 };
-    payload.seed_limit = Math.min(payload.seed_limit, payload.candidate_limit);
-    if (payload.max_results > payload.candidate_limit) throw new Error("Maximum results must not exceed the candidate passage count.");
+    const payload = { text, ...options, reranker };
     $("#graph-search-status").textContent = reranker === "voyage" ? "Retrieving candidates, then asking Voyage to rerank their context…" : "Combining vector matches, lexical evidence, and connected passages…";
     const result = await request(graphPath("/retrieve"), { method: "POST", timeout: (config.timeout_seconds + (reranker === "voyage" ? state.reranking.timeout_seconds : 0) + 15) * 1000, body: JSON.stringify(payload) });
     if (generation !== state.graph.searchGeneration) throw staleRequest();
     renderGraphContext(result);
-    $("#graph-search-status").textContent = `${result.hits.length} passages retrieved. Scores rank candidates; they are not confidence or factual certainty.`;
+    $("#graph-search-status").textContent = `${result.hits.length} passage${result.hits.length === 1 ? "" : "s"} retrieved. Scores rank candidates; they are not confidence or factual certainty.`;
   } catch (error) { if (generation === state.graph.searchGeneration) graphError(error, "graph-search-status"); }
   finally { if (generation === state.graph.searchGeneration) { graph.searchBusy = false; updateGraphPaging(); $("#graph-search-results").setAttribute("aria-busy", "false"); } }
 }
@@ -2092,11 +2190,14 @@ function renderGraphContext(result) {
   const method = result.reranking.method === "voyage" ? `Voyage ${result.reranking.model}` : "Local hybrid ranking";
   target.append(node("p", "graph-context-summary", `${method} · ${result.candidate_count} candidates · ${result.context_bytes.toLocaleString()} context bytes${result.truncated ? " · bounded results" : ""}`));
   if (!result.hits.length) { target.append(node("p", "empty-workspace", "No passages fit this query and context budget.")); return; }
+  const returnedPassages = new Map(result.hits.slice(0, 100).map((hit) => [hit.chunk_id, hit]));
   for (const [index, hit] of result.hits.slice(0, 100).entries()) {
     const card = node("article", "graph-hit"); card.append(node("h4", "", `${index + 1}. ${hit.title || hit.document_id}`), graphCitation(hit), node("p", "graph-passage", hit.text));
     const scores = node("div", "graph-scores");
     for (const [label, score] of [["Cosine", hit.similarity], ["Lexical", hit.lexical_score], ["Fusion", hit.fusion_score], ["Rerank", hit.rerank_score], ["Selection", hit.selection_score]]) if (score !== null && score !== undefined) scores.append(node("span", "", `${label} ${formatGraphScore(score)}`));
     card.append(scores, node("p", "field-hint", `${hit.seed ? "Seed passage" : `Connected passage · ${hit.depth} hop${hit.depth === 1 ? "" : "s"}`}`));
+    const explanation = renderGraphRetrievalPath(hit, returnedPassages);
+    if (explanation) card.append(explanation);
     const inspect = node("button", "button ghost compact", "Inspect passage"); inspect.type = "button";
     inspect.addEventListener("click", () => { selectGraphNode(state.graph.nodes.find((item) => item.chunk_id === hit.chunk_id) || hit); $("#graph-details").scrollIntoView({ behavior: "smooth", block: "nearest" }); });
     const explore = node("button", "button ghost compact", "Explore connections"); explore.type = "button"; explore.dataset.exploreConnections = ""; explore.disabled = state.graph.busy;
@@ -2160,6 +2261,11 @@ function bindGraphEvents() {
   $("#graph-document-form").addEventListener("input", () => { state.graph.previewGeneration += 1; clear($("#graph-chunk-preview")); $("#graph-document-status").textContent = ""; });
   $("#graph-preview").addEventListener("click", previewGraphDocument);
   $("#graph-search-form").addEventListener("submit", retrieveGraphContext);
+  $("#graph-candidates").addEventListener("input", updateGraphSeedBudget);
+  $("#graph-hops").addEventListener("input", updateGraphSeedBudget);
+  $("#graph-seeds").addEventListener("input", () => { state.graph.seedExplicit = true; updateGraphSeedBudget(); });
+  $("#graph-seeds-auto").addEventListener("click", () => { state.graph.seedExplicit = false; updateGraphSeedBudget(); });
+  updateGraphSeedBudget();
   $("#graph-reranker").addEventListener("change", () => { $("#graph-search-privacy").textContent = $("#graph-reranker").value === "voyage" ? "Your question is sent to the embedding provider. Voyage reranking also receives your question and candidate passage context, and may incur additional provider charges." : "Your question is sent to the embedding provider. Local ranking combines vector and lexical evidence on this server."; });
   $("#graph-relationship-form").addEventListener("submit", (event) => { event.preventDefault(); void mutateGraphRelationship("POST"); });
   $("#graph-previous").addEventListener("click", () => { if (!state.graph.busy && state.graph.mode === "pages") { state.graph.offset = Math.max(0, state.graph.offset - state.graph.limit); void loadGraph(); } });
@@ -2197,6 +2303,7 @@ function resetGraphSession() {
   $("#rerank-key-status").textContent = "Reconnect to load reranking settings.";
   $("#rerank-settings-status").textContent = settingsUncertain ? "The connection changed while saving settings. The save may still finish; refresh to check the current configuration." : "";
   $("#graph-document-form").reset(); $("#graph-search-form").reset(); $("#graph-create-form").reset(); $("#graph-neighborhood-controls").reset();
+  updateGraphSeedBudget();
   $("#graph-create-dialog").close();
   fillOptions($("#graph-collection"), [], null, "Choose a collection");
   for (const id of ["graph-chunk-preview", "graph-search-results"]) clear($("#" + id));

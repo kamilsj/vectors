@@ -1,20 +1,33 @@
-//! Query-aware, bounded beam expansion of RAG candidates.
+//! Query-aware, bounded beam expansion with snapshot-owned path evidence.
 
 use super::*;
 
-// Source row, discovered depth, and fused retrieval evidence.
-type AdmittedCandidates = Vec<(usize, usize, CandidateScore)>;
+pub(super) struct Admission {
+    pub row: usize,
+    pub depth: usize,
+    pub score: CandidateScore,
+    pub retrieval_path: Option<GraphRagPath>,
+}
+
+// Keep row references in the beam; only admitted paths copy edge strings.
+#[derive(Clone, Copy)]
+struct Trace {
+    seed: usize,
+    edges: [usize; 3],
+    len: usize,
+}
 
 #[derive(Clone, Copy)]
 struct Evidence {
     row: usize,
-    depth: usize,
     score: CandidateScore,
-    path: f64,
+    strength: f64,
+    trace: Trace,
 }
 
 pub(super) struct GraphTraversal<'a> {
     pub request: &'a GraphRagRequest,
+    pub policy: &'a GraphRagTraversal,
     pub chunks: &'a Table,
     pub edges: &'a Table,
     pub lookup: &'a HashMap<&'a str, usize>,
@@ -24,7 +37,7 @@ pub(super) struct GraphTraversal<'a> {
 }
 
 impl GraphTraversal<'_> {
-    pub fn expand(mut self, ranked: &[usize]) -> Result<(AdmittedCandidates, bool)> {
+    pub fn expand(mut self, ranked: &[usize]) -> Result<(Vec<Admission>, bool)> {
         let request = self.request;
         let base_limit = if request.max_hops == 0 {
             request.candidate_limit
@@ -38,75 +51,98 @@ impl GraphTraversal<'_> {
         let mut admitted = ranked
             .iter()
             .take(base_limit)
-            .map(|&row| (row, 0, self.scores[&row]))
+            .map(|&row| Admission {
+                row,
+                depth: 0,
+                score: self.scores[&row],
+                retrieval_path: None,
+            })
             .collect::<Vec<_>>();
         let direct = admitted
             .iter()
             .enumerate()
-            .map(|(position, (row, _, _))| (*row, position))
+            .map(|(position, item)| (item.row, position))
             .collect::<HashMap<_, _>>();
         let mut frontier = admitted
             .iter()
             .take(request.seed_limit)
-            .map(|&(row, depth, score)| Evidence {
-                row,
-                depth,
-                score,
-                path: score.fusion,
+            .map(|item| Evidence {
+                row: item.row,
+                score: item.score,
+                strength: item.score.fusion,
+                trace: Trace {
+                    seed: item.row,
+                    edges: [0; 3],
+                    len: 0,
+                },
             })
             .collect::<Vec<_>>();
         let mut best_path = vec![0.0f64; self.chunks.rows.len()];
         for candidate in &frontier {
-            best_path[candidate.row] = candidate.path;
+            best_path[candidate.row] = candidate.strength;
         }
         let mut context: HashMap<usize, Evidence> = HashMap::new();
         let lexical_max = self.lexical_scores.iter().copied().fold(0.0, f64::max);
-        let edge_index = self
+        let outgoing = self
             .edges
             .indexes
             .values()
             .find(|index| index.column == 1)
             .ok_or_else(|| invalid("graph edge source index is missing"))?;
+        let incoming = self
+            .edges
+            .indexes
+            .values()
+            .find(|index| index.column == 2)
+            .ok_or_else(|| invalid("graph edge target index is missing"))?;
+        let indexes: &[(&HashIndex, usize)] = match self.policy.direction {
+            GraphNeighborhoodDirection::Outgoing => &[(outgoing, 2)],
+            GraphNeighborhoodDirection::Incoming => &[(incoming, 1)],
+            GraphNeighborhoodDirection::Both => &[(outgoing, 2), (incoming, 1)],
+        };
         let mut truncated = false;
-
-        for depth in 0..request.max_hops {
+        for _ in 0..request.max_hops {
             let mut proposals: HashMap<usize, Evidence> = HashMap::new();
             for source in &frontier {
                 let source_id = text_at(&self.chunks.rows[source.row], 0)?;
-                let mut targets: HashMap<usize, f64> = HashMap::new();
-                for index in edge_index
-                    .buckets
-                    .get(&UniqueKey::from(&Value::Text(source_id.into())))
-                    .into_iter()
-                    .flatten()
-                {
-                    let edge = read_edge(&self.edges.rows[*index])?;
-                    let target = *self
-                        .lookup
-                        .get(edge.to_chunk.as_str())
-                        .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
-                    // A zero-weight link conveys no retrieval evidence. It is
-                    // still visible in the provider-free graph explorer.
-                    if edge.weight == 0.0 {
-                        continue;
+                let key = UniqueKey::from(&Value::Text(source_id.into()));
+                let mut targets: HashMap<usize, (f64, usize)> = HashMap::new();
+                for (index, endpoint) in indexes {
+                    for &edge_index in index.buckets.get(&key).into_iter().flatten() {
+                        let row = &self.edges.rows[edge_index];
+                        let edge = read_edge(row)?;
+                        // Filter before coalescing, scoring, or consuming slots.
+                        if !self.policy.includes(&edge) || edge.weight == 0.0 {
+                            continue;
+                        }
+                        let target = *self
+                            .lookup
+                            .get(text_at(row, *endpoint)?)
+                            .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
+                        targets
+                            .entry(target)
+                            .and_modify(|(weight, previous)| {
+                                if edge.weight > *weight
+                                    || (edge.weight == *weight
+                                        && edge_order(row, &self.edges.rows[*previous]).is_lt())
+                                {
+                                    *weight = edge.weight;
+                                    *previous = edge_index;
+                                }
+                            })
+                            .or_insert((edge.weight, edge_index));
                     }
-                    targets
-                        .entry(target)
-                        .and_modify(|weight| {
-                            *weight = weight.max(edge.weight);
-                        })
-                        .or_insert(edge.weight);
                 }
                 let mut neighbors = Vec::with_capacity(targets.len());
-                for (row, weight) in targets {
+                for (row, (weight, edge_index)) in targets {
                     let original = self.scores.get(&row).copied().unwrap_or(CandidateScore {
                         lexical: self.lexical_scores[row],
                         fusion: 0.0,
                     });
-                    // Keep structural path strength separate from query fit:
-                    // a weakly matching bridge may lead to a useful passage.
-                    let path = (source.path * 0.5 * weight).max(original.fusion);
-                    if path <= best_path[row] {
+                    // Separate structural strength from query fit so a weakly
+                    // matching bridge can still lead to useful evidence.
+                    let strength = (source.strength * 0.5 * weight).max(original.fusion);
+                    if strength <= best_path[row] {
                         continue;
                     }
                     let vector_fit = if request.vector_weight > 0.0 {
@@ -130,18 +166,19 @@ impl GraphTraversal<'_> {
                     } else {
                         0.0
                     };
-                    // A soft floor preserves contextual bridges. The query
-                    // signal ranks new context; stable chunk IDs break exact ties.
                     let query_fit = 0.2 + 0.8 * vector_fit.max(lexical_fit);
                     let score = CandidateScore {
                         lexical: original.lexical,
-                        fusion: original.fusion.max(path * query_fit),
+                        fusion: original.fusion.max(strength * query_fit),
                     };
+                    let mut trace = source.trace;
+                    trace.edges[trace.len] = edge_index;
+                    trace.len += 1;
                     neighbors.push(Evidence {
                         row,
-                        depth: depth + 1,
                         score,
-                        path,
+                        strength,
+                        trace,
                     });
                 }
                 truncated |= neighbors.len() > request.neighbor_limit;
@@ -150,30 +187,30 @@ impl GraphTraversal<'_> {
                     proposals
                         .entry(proposal.row)
                         .and_modify(|old| {
-                            if proposal.path > old.path {
+                            if self.preferred(&proposal, old) {
                                 *old = proposal;
                             }
                         })
                         .or_insert(proposal);
                 }
             }
-            // Merge every seed's proposals BEFORE spending the beam budget.
-            // An early seed cannot monopolize the available context slots.
+            // Compare all seeds' proposals before enforcing the global beam cap.
             let mut next = proposals.into_values().collect::<Vec<_>>();
             truncated |= next.len() > request.candidate_limit;
             top_evidence(&mut next, request.candidate_limit, self.chunks);
             for proposal in &next {
-                best_path[proposal.row] = proposal.path;
+                best_path[proposal.row] = proposal.strength;
                 if let Some(&position) = direct.get(&proposal.row) {
-                    admitted[position].2.fusion =
-                        admitted[position].2.fusion.max(proposal.score.fusion);
+                    admitted[position].score.fusion =
+                        admitted[position].score.fusion.max(proposal.score.fusion);
                 } else {
                     context
                         .entry(proposal.row)
                         .and_modify(|old| {
-                            old.depth = old.depth.min(proposal.depth);
-                            old.path = old.path.max(proposal.path);
-                            old.score.fusion = old.score.fusion.max(proposal.score.fusion);
+                            // Score, depth and route must describe the same evidence.
+                            if self.preferred(proposal, old) {
+                                *old = *proposal;
+                            }
                         })
                         .or_insert(*proposal);
                 }
@@ -183,20 +220,26 @@ impl GraphTraversal<'_> {
                 break;
             }
         }
-
         let remaining = request.candidate_limit.saturating_sub(admitted.len());
         let mut context = context.into_values().collect::<Vec<_>>();
         truncated |= context.len() > remaining;
         top_evidence(&mut context, remaining, self.chunks);
-        admitted.extend(
-            context
-                .into_iter()
-                .map(|item| (item.row, item.depth, item.score)),
-        );
-        let mut selected = admitted
-            .iter()
-            .map(|(row, _, _)| *row)
-            .collect::<HashSet<_>>();
+        for item in context {
+            let path = GraphRagPath {
+                seed_chunk_id: text_at(&self.chunks.rows[item.trace.seed], 0)?.into(),
+                edges: item.trace.edges[..item.trace.len]
+                    .iter()
+                    .map(|&index| read_edge(&self.edges.rows[index]))
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            admitted.push(Admission {
+                row: item.row,
+                depth: item.trace.len,
+                score: item.score,
+                retrieval_path: Some(path),
+            });
+        }
+        let mut selected = admitted.iter().map(|item| item.row).collect::<HashSet<_>>();
         for &row in ranked {
             if selected.contains(&row) {
                 continue;
@@ -206,10 +249,46 @@ impl GraphTraversal<'_> {
                 break;
             }
             selected.insert(row);
-            admitted.push((row, 0, self.scores[&row]));
+            admitted.push(Admission {
+                row,
+                depth: 0,
+                score: self.scores[&row],
+                retrieval_path: None,
+            });
         }
         Ok((admitted, truncated))
     }
+
+    fn preferred(&self, next: &Evidence, previous: &Evidence) -> bool {
+        next.strength
+            .total_cmp(&previous.strength)
+            .then_with(|| previous.trace.len.cmp(&next.trace.len))
+            .then_with(|| {
+                compare_sort_values(
+                    &self.chunks.rows[previous.trace.seed][0],
+                    &self.chunks.rows[next.trace.seed][0],
+                )
+            })
+            .then_with(|| {
+                previous.trace.edges[..previous.trace.len]
+                    .iter()
+                    .zip(&next.trace.edges[..next.trace.len])
+                    .map(|(&left, &right)| {
+                        edge_order(&self.edges.rows[left], &self.edges.rows[right])
+                    })
+                    .find(|order| !order.is_eq())
+                    .unwrap_or(Ordering::Equal)
+            })
+            .is_gt()
+    }
+}
+
+fn edge_order(left: &[Value], right: &[Value]) -> Ordering {
+    [1, 2, 3]
+        .into_iter()
+        .map(|column| compare_sort_values(&left[column], &right[column]))
+        .find(|order| !order.is_eq())
+        .unwrap_or(Ordering::Equal)
 }
 
 fn top_evidence(candidates: &mut Vec<Evidence>, limit: usize, chunks: &Table) {
@@ -218,7 +297,7 @@ fn top_evidence(candidates: &mut Vec<Evidence>, limit: usize, chunks: &Table) {
             .score
             .fusion
             .total_cmp(&left.score.fusion)
-            .then_with(|| right.path.total_cmp(&left.path))
+            .then_with(|| right.strength.total_cmp(&left.strength))
             .then_with(|| {
                 compare_sort_values(&chunks.rows[left.row][0], &chunks.rows[right.row][0])
             })

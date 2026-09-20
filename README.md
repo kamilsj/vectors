@@ -20,6 +20,7 @@
   <a href="#try-it-in-two-minutes">Quickstart</a> ·
   <a href="docs/INSTALL.md">Install</a> ·
   <a href="docs/TUTORIAL.md">Tutorial</a> ·
+  <a href="python/README.md">Python SDK</a> ·
   <a href="docs/BENCHMARKS.md">Benchmarks</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="ROADMAP.md">Roadmap</a> ·
@@ -331,6 +332,32 @@ For a fuller first-run path—including the web console, HTTP API, typed bulk
 ingestion, persistence, GPU configuration, and troubleshooting—continue with
 the [guided tutorial](docs/TUTORIAL.md).
 
+## Python SDK
+
+Add the SDK to your uv application with
+`uv add /absolute/path/to/vectors/python`, or use `python -m pip install ./python`
+from this checkout (Python 3.10+). For SDK development, run
+`uv sync --project python --locked` from the repository root.
+The SDK provides `Client` and `AsyncClient`, typed SQL/vector results, generator
+imports bounded by rows and exact JSON bytes, and graph/RAG operations:
+
+```python
+from vectors_sdk import Client
+
+with Client("http://127.0.0.1:8080") as db:
+    results = db.execute(
+        "SELECT id, title FROM documents WHERE category = $1 LIMIT $2",
+        ["tech", 10],
+    )
+    print(results[0].to_dicts())
+```
+
+See the [SDK guide](python/README.md) for bulk ingestion, async applications,
+GraphRAG, bearer tokens, conflict handling, and current scaling limits. SQL
+parameters require the server built from this revision. The SDK is not yet
+published to PyPI. The [release guide](python/PUBLISHING.md) covers the
+`vectors-sdk` distribution, uv builds, and the dedicated Python release workflow.
+
 ## A deliberately small architecture
 
 ```mermaid
@@ -430,6 +457,20 @@ curl http://127.0.0.1:8080/v1/sql \
   -d '{"sql":"SELECT id, title FROM documents ORDER BY id"}'
 ```
 
+Both `/v1/sql` and `/v1/sql/intent` accept optional positional value parameters:
+
+```json
+{"sql":"SELECT id FROM documents ORDER BY embedding <=> $1 LIMIT $2","parameters":[[1,0,0],5]}
+```
+
+Parameters support nulls, booleans, signed 64-bit integers, finite numbers,
+strings, and numeric vectors. `$1` references the first value; repeated
+references work, and every supplied value must be used. Binding preserves
+quoted text and comments, rejects missing/invalid values before execution, and
+keeps existing atomicity and response limits. Parameters cannot replace SQL
+identifiers or fragments. Expanded SQL is limited to 32 MiB and 65,535 inputs.
+Rust callers can use `Database::execute_with_parameters` or `bind_parameters`.
+
 Each query result inside `results` keeps the simple `columns` and `rows` arrays
 and adds stable typed metadata for clients that must not infer a schema from
 returned values:
@@ -527,12 +568,16 @@ calling an embedding or reranking provider.
 
 RAG retrieval combines keyword and vector matches, merges graph candidates from
 all passages in each expansion step, and ranks added context using both link
-strength and query relevance. A passage used to reach another result need not
-appear in the final context. Diversity, per-document, and byte budgets bound the
+strength and query relevance. Retrieval can follow incoming, outgoing, or both
+directions, narrowed by relationship label and weight. **How this passage was
+found** shows the retained path even when a bridge is omitted from the final
+context. Smaller browser candidate budgets suggest fewer starting passages to
+leave room for graph context. Diversity, per-document, and byte budgets bound the
 selection. Optional Voyage cross-encoder reranking scores the query together
 with each candidate; configure its key in **Settings** before choosing that mode.
 The keyword cache survives relationship edits and unrelated writes, while chunk
-storage changes invalidate it. The existing `/search` route retains its simpler
+storage changes invalidate it. Rebuilds reuse repeated word keys and preserve
+the existing Unicode keyword scoring. The existing `/search` route retains its simpler
 vector-seed traversal; `/retrieve` uses this hybrid pipeline.
 
 The graph workflow uses the same configured OpenAI or Voyage provider for

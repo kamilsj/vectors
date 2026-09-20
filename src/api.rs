@@ -4,6 +4,7 @@ mod admin;
 mod embeddings;
 mod graph;
 mod ingest;
+mod parameters;
 mod reranking;
 mod response;
 
@@ -860,6 +861,9 @@ async fn tables(
 #[serde(deny_unknown_fields)]
 pub struct SqlRequest {
     pub sql: String,
+    /// Optional positional `$1`, `$2`, ... values, including numeric vectors.
+    #[serde(default)]
+    pub parameters: Option<Vec<JsonValue>>,
 }
 
 /// Response returned by SQL and ingestion endpoints.
@@ -904,10 +908,11 @@ async fn execute_sql(
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
     }
-    let sql = request.into_inner().sql;
+    let request = request.into_inner();
     let max_response_rows = limits.max_response_rows;
     let database = database.get_ref().clone();
     let body = run_database_task(limiter.as_ref(), move || {
+        let sql = parameters::bind(request)?;
         let results = database.execute_with_row_limit(&sql, max_response_rows)?;
         enforce_response_row_limit(&results, max_response_rows)?;
         response::encode_sql(&results)
@@ -963,9 +968,13 @@ async fn query_intent(
     if request.sql.trim().is_empty() {
         return Err(ApiError::bad_request("empty_sql", "SQL cannot be empty"));
     }
-    let sql = request.into_inner().sql;
+    let request = request.into_inner();
     let database = database.get_ref().clone();
-    let intent = run_database_task(limiter.as_ref(), move || database.query_intent(&sql)).await?;
+    let intent = run_database_task(limiter.as_ref(), move || {
+        let sql = parameters::bind(request)?;
+        database.query_intent(&sql).map_err(ApiError::from)
+    })
+    .await?;
     Ok(web::Json(QueryIntentResponse::from(intent)))
 }
 

@@ -123,6 +123,32 @@ fn exploration_crosses_browse_pages_and_preserves_exact_source_citations() {
 }
 
 #[test]
+fn indexed_neighborhood_survives_compaction_id_edits_and_snapshot_reopen() {
+    let db = database(&["unused", "a", "b", "c"]);
+    relation(&db, "a", "b", "references", 0.8);
+    relation(&db, "b", "c", "supports", 0.9);
+    let expected = db.graph_neighborhood(request("a")).unwrap();
+    db.graph_delete_document("focus", "unused", db.revision().unwrap())
+        .unwrap();
+    let after = db.graph_neighborhood(request("a")).unwrap();
+    assert_eq!(after.nodes, expected.nodes);
+    assert_eq!(after.edges, expected.edges);
+    db.execute("UPDATE graph_focus_chunks SET chunk_id='changed' WHERE chunk_id='1:c:0'; UPDATE graph_focus_edges SET to_chunk='changed' WHERE to_chunk='1:c:0'").unwrap();
+    let changed = db.graph_neighborhood(request("a")).unwrap();
+    assert_eq!(changed.nodes[2].node.chunk_id, "changed");
+    let path = std::env::temp_dir().join(format!(
+        "vectors-neighborhood-indexes-{}.vdb",
+        std::process::id()
+    ));
+    db.save(&path).unwrap();
+    let reopened = Database::open(&path).unwrap();
+    let recovered = reopened.graph_neighborhood(request("a")).unwrap();
+    assert_eq!(recovered.nodes, changed.nodes);
+    assert_eq!(recovered.edges, changed.edges);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn incoming_and_bidirectional_traversal_preserve_original_arrows() {
     let db = database(&["a", "b", "c", "d", "e"]);
     relation(&db, "a", "b", "references", 0.8);

@@ -8,6 +8,83 @@ use serde_json::{json, Value};
 use vectors::{api, Database};
 
 #[actix_web::test]
+async fn sql_parameters_support_vectors_repeated_values_and_intent() {
+    let database = api_database();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(database))
+            .configure(api::configure),
+    )
+    .await;
+    let text = "O'Reilly 雪 '); DROP TABLE documents; --";
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/sql")
+            .set_json(json!({
+                "sql": "INSERT INTO documents VALUES ($1, $2, $2, $3)",
+                "parameters": [1, text, [1, 0, 0]]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = test::call_service(&app, test::TestRequest::post().uri("/v1/sql").set_json(json!({
+        "sql": "SELECT title FROM documents ORDER BY embedding <=> $1 LIMIT $2", "parameters": [[1, 0, 0], 1]
+    })).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["results"][0]["rows"], json!([[text]]));
+    let response = test::call_service(&app, test::TestRequest::post().uri("/v1/sql/intent").set_json(json!({
+        "sql": "SELECT id FROM documents ORDER BY embedding <=> $1 LIMIT $2", "parameters": [[1, 0, 0], 1]
+    })).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(response).await;
+    assert_eq!(body["vector_search"]["optimized"], true);
+}
+
+#[actix_web::test]
+async fn sql_parameters_reject_invalid_inputs_before_writes_and_keep_result_limits() {
+    let database = api_database();
+    let revision = database.revision().unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(database.clone()))
+            .configure(|services| {
+                api::configure_with_limits(services, api::RequestLimits::new(8192, 10, 1).unwrap())
+            }),
+    )
+    .await;
+    for parameters in [
+        json!([]),
+        json!([{}]),
+        json!([[]]),
+        json!([[true]]),
+        json!([18446744073709551615_u64]),
+        json!([1, 2]),
+    ] {
+        let response = test::call_service(&app, test::TestRequest::post().uri("/v1/sql").set_json(json!({
+            "sql": "INSERT INTO documents (id) VALUES (1); SELECT $1", "parameters": parameters
+        })).to_request()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_parameters");
+    }
+    assert_eq!(database.revision().unwrap(), revision);
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/sql")
+            .set_json(json!({
+                "sql": "SELECT $1; SELECT $1", "parameters": [1]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[actix_web::test]
 async fn server_settings_require_auth_and_report_effective_limits_without_secrets() {
     let limits = api::RequestLimits::new(8_192, 17, 83).unwrap();
     let app = test::init_service(

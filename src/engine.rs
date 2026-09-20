@@ -25,10 +25,10 @@ pub use graph::{
     GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentInput,
     GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit, GraphIngestRequest,
     GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
-    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagRequest,
-    GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRelationshipDeleteRequest,
-    GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
-    GraphSearchRequest, GraphSearchResult, GraphTables,
+    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagPath,
+    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRagTraversal,
+    GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult, GraphRelationshipRequest,
+    GraphRelationshipResult, GraphSearchRequest, GraphSearchResult, GraphTables,
 };
 
 /// Logical types supported by the in-memory storage engine.
@@ -744,6 +744,16 @@ impl Database {
     /// WAL append fails, none of the writes in that request become visible.
     pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
         self.execute_inner(sql, None, None)
+    }
+
+    /// Execute SQL with typed `$1`, `$2`, ... value parameters. Binding finishes
+    /// before any statement runs; writes retain the usual atomicity and WAL.
+    pub fn execute_with_parameters(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+    ) -> Result<Vec<ExecutionResult>> {
+        self.execute(&crate::bind_parameters(sql, parameters)?)
     }
 
     /// Execute SQL while bounding every query result before it is materialized.
@@ -3250,6 +3260,7 @@ fn evaluate_group_expression(
                 | BinaryOperator::Multiply
                 | BinaryOperator::Divide
                 | BinaryOperator::Modulo => numeric_binary(&left, &right, op),
+                BinaryOperator::Spaceship => vector_operator(&left, &right, "<=>"),
                 BinaryOperator::Custom(operator) => vector_operator(&left, &right, operator),
                 _ => Err(Error::Unsupported(format!(
                     "operator {op} in HAVING expression"
@@ -3994,6 +4005,10 @@ fn expression_data_type(expression: &Expr, columns: &[Column]) -> Result<Option<
                 | BinaryOperator::Multiply
                 | BinaryOperator::Divide
                 | BinaryOperator::Modulo => numeric_result_type(left, right),
+                BinaryOperator::Spaceship => {
+                    ensure_vector_pair(&left, &right)?;
+                    Ok(Some(DataType::Float))
+                }
                 BinaryOperator::Custom(operator)
                     if matches!(operator.as_str(), "<->" | "<#>" | "<=>") =>
                 {
@@ -4330,6 +4345,11 @@ fn parse_fast_vector_distance(
             };
             (arguments[0], arguments[1], metric)
         }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Spaceship,
+            right,
+        } => (left.as_ref(), right.as_ref(), FastVectorMetric::Cosine),
         Expr::BinaryOp {
             left,
             op: BinaryOperator::Custom(operator),
@@ -5066,6 +5086,7 @@ fn evaluate_binary(
         | BinaryOperator::Multiply
         | BinaryOperator::Divide
         | BinaryOperator::Modulo => numeric_binary(&left, &right, operator),
+        BinaryOperator::Spaceship => vector_operator(&left, &right, "<=>"),
         BinaryOperator::Custom(operator) => vector_operator(&left, &right, operator),
         _ => Err(Error::Unsupported(format!("binary operator {operator}"))),
     }

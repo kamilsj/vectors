@@ -864,3 +864,26 @@ dialog::backdrop { background: rgba(2, 4, 5, .72); backdrop-filter: blur(4px); }
   .graph-point.graph-root circle:not(.graph-hit-target):not(.graph-root-outline) { r: 14px; }
   .graph-point circle.graph-root-outline { r: 21px; }
 }
+
+.graph-seed-guidance { margin: 8px 0 18px; }
+.graph-seed-guidance .field-hint { margin: 0 0 7px; line-height: 1.65; }
+.graph-seed-guidance .button { font-size: 10px; }
+#graph-search-form .form-advanced > label { margin-top: 16px; }
+.graph-retrieval-path { margin-top: 15px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); overflow: hidden; }
+.graph-retrieval-path > summary { cursor: pointer; color: var(--cyan); padding: 12px; font-size: 11px; line-height: 1.6; }
+.graph-retrieval-path > .field-hint, .graph-path-intro { padding: 0 12px 12px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.graph-path-seed { display: grid; gap: 5px; margin: 0 12px 14px; padding: 10px; border-left: 2px solid var(--lime); background: var(--surface); }
+.graph-path-seed strong { font-size: 10px; font-weight: 550; color: var(--lime); }
+.graph-path-seed code, .graph-path-node code { font: 10px/1.6 ui-monospace, monospace; color: var(--text); overflow-wrap: anywhere; }
+.graph-path-seed small, .graph-path-node small { font-size: 9px; line-height: 1.7; color: var(--muted); overflow-wrap: anywhere; }
+.graph-path-steps { list-style: none; padding: 0 12px; margin: 0; }
+.graph-path-steps > li { border-top: 1px solid var(--border); padding: 12px 0; }
+.graph-path-edge-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px; margin-bottom: 9px; font-size: 10px; line-height: 1.6; }
+.graph-path-edge-label strong { font-weight: 550; color: var(--cyan); }
+.graph-path-edge-label span { color: var(--muted); font-size: 9px; }
+.graph-path-connection { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: start; gap: 7px; }
+.graph-path-node { display: grid; min-width: 0; gap: 5px; }
+.graph-path-arrow { color: var(--orange); font-size: 20px; line-height: 1; text-align: center; }
+.graph-path-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
+.graph-path-actions .button { font-size: 10px; }
+@media (max-width: 600px) { .graph-path-edge-label { flex-direction: column; } .graph-path-connection { gap: 5px; grid-template-columns: minmax(0, 1fr) 17px minmax(0, 1fr); } }

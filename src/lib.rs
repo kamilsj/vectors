@@ -13,6 +13,7 @@ mod engine;
 mod error;
 #[cfg(feature = "gpu")]
 mod gpu;
+mod parameters;
 mod reranking;
 mod storage;
 mod vector;
@@ -29,11 +30,12 @@ pub use engine::{
     GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentInput,
     GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit, GraphIngestRequest,
     GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
-    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagRequest,
-    GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRelationshipDeleteRequest,
-    GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
-    GraphSearchRequest, GraphSearchResult, GraphTables,
+    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagPath,
+    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRagTraversal,
+    GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult, GraphRelationshipRequest,
+    GraphRelationshipResult, GraphSearchRequest, GraphSearchResult, GraphTables,
 };
 pub use error::{Error, Result};
+pub use parameters::bind_parameters;
 pub use reranking::RerankingService;
 pub use vector::{Vector, MAX_VECTOR_DIMENSIONS};
