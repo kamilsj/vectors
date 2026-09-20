@@ -440,6 +440,8 @@ The server binds to `127.0.0.1:8080` by default.
 | `GET` | `/v1/tables/{table}/schema` | Typed column metadata |
 | `GET` | `/v1/tables/{table}/indexes` | Scalar index metadata |
 | `POST` | `/v1/tables/{table}/rows` | Typed bulk ingestion and upserts |
+| `GET` / `POST` | `/v1/relationships` | List or create named links between matching scalar fields in different tables |
+| `DELETE` | `/v1/relationships/{name}` | Remove a link definition with revision protection; keep records and indexes |
 | `POST` | `/v1/vector/search` | Structured hybrid vector search |
 | `POST` | `/v1/embeddings/search` | Compatibility alias for `/v1/vector/search` |
 | `POST` | `/v1/graph/chunk` | Preview source-aware chunks and exact embedding inputs |
@@ -564,6 +566,20 @@ response encoding. When it is exhausted, new database requests receive HTTP
 
 ## Documents and GraphRAG
 
+Choose **Data → Create → RAG collection** to name a collection and optionally
+define fields such as `product_id`, `category`, or `published`. The same field
+editor creates ordinary structured tables. Text, integer, decimal, and boolean
+document fields support required and unique constraints and automatic indexes.
+Enter their values alongside each document; they remain real SQL columns and
+appear in the document metadata returned by the API.
+
+Use **Data → Relationships** to connect documents, products, customers, or other
+tables through fields of the same scalar type. A saved link opens a SQL join in
+the existing editor. Links describe matching values; they do not enforce
+foreign keys or automatically extend GraphRAG traversal. See
+[structured data and relationships](docs/STRUCTURED_DATA.md) for complete
+API and SQL examples, including vector-ranked joins.
+
 Open **Connections** to explore chunks and their semantic links, inspect source
 citations, add labeled relationships, and ingest documents with a chunk preview.
 Choose **Explore connections** on a passage or search result to follow incoming,
@@ -590,6 +606,8 @@ document chunks and query embeddings, with a collection-pinned model and
 dimensions. Ingestion preserves original UTF-8 source offsets, skips unchanged
 uploads, and commits documents, chunks, and relationships together. Retrieval
 returns direct matches, related context, relationship weights, and citations.
+Metadata-only edits reuse stored embeddings and relationships without a
+provider call, and retain the keyword cache.
 
 Documents, vectors, and edges are ordinary SQL tables; you can inspect them in
 the Data workspace or add directed relationship labels such as `references`
@@ -727,7 +745,11 @@ numbers are separate and are persisted in snapshot format version 3.
 ## Current limitations
 
 - exact search only; no approximate-nearest-neighbor index yet;
-- no joins, subqueries, window functions, or aggregate `FILTER` clauses;
+- joins currently support two tables with `INNER`/`LEFT JOIN ... ON` scalar
+  equality; no multi-table/aggregate joins, subqueries, window functions, or
+  aggregate `FILTER` clauses; join `EXPLAIN` is not yet supported;
+- named table relationships do not enforce foreign keys; there is no
+  PostgreSQL wire-protocol compatibility;
 - no explicit transaction spanning multiple HTTP requests;
 - checkpoint creation pauses writers while snapshot and WAL reset complete;
   concurrent reads continue;

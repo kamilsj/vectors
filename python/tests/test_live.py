@@ -234,6 +234,59 @@ class LiveSDKTests(unittest.TestCase):
         with self.assertRaises(APIError):
             graph.retrieve("recovery", vector_weight=0)
 
+    def test_structured_collections_and_cross_table_relationships(self):
+        db = self.client
+        info = db.create_collection(
+            "sdk_structured",
+            document_columns=[
+                {"name": "product_id", "data_type": "INTEGER", "nullable": False},
+                {"name": "published", "data_type": "BOOLEAN"},
+            ],
+        )
+        self.assertEqual(info["document_columns"][0]["name"], "product_id")
+        documents = info["tables"]["documents"]
+        db.execute(
+            "CREATE TABLE sdk_products (id INTEGER PRIMARY KEY, name TEXT); "
+            "INSERT INTO sdk_products VALUES (7,'Widget')"
+        )
+        # Provider-free SQL fixture, not a shortcut for normal document ingestion.
+        db.insert(
+            documents,
+            [{"document_id": "manual", "title": "Manual", "source": "docs.md",
+              "text": "Maintain the widget.", "metadata": "{}", "chunking": "{}",
+              "chunk_fingerprint": "", "product_id": 7, "published": False}],
+        )
+        metadata = db.collection("sdk_structured").document("manual")["metadata"]
+        self.assertEqual(metadata, {"product_id": 7, "published": False})
+        before = db.relationships()["revision"]
+        created = db.create_relationship(
+            "manual_product", source_table=documents, source_column="product_id",
+            target_table="sdk_products", target_column="id", expected_revision=before,
+        )
+        self.assertTrue(created["relationship"]["valid"])
+        self.assertEqual(created["revision"], db.relationships()["revision"])
+        rows = db.execute(
+            f"SELECT d.document_id,p.name FROM {documents} d "
+            "LEFT JOIN sdk_products p ON d.product_id=p.id WHERE d.published=$1",
+            [False],
+        )[0].rows
+        self.assertEqual(rows, [["manual", "Widget"]])
+        with self.assertRaises(APIError) as raised:
+            db.delete_relationship("manual_product", expected_revision=before)
+        self.assertEqual(raised.exception.code, "stale_revision")
+
+        async def remove():
+            async with AsyncClient(self.url, token="sdk-test-token") as client:
+                listed = await client.relationships()
+                return await client.delete_relationship(
+                    "manual_product", expected_revision=listed["revision"]
+                )
+
+        removed = asyncio.run(remove())
+        self.assertEqual(removed["revision"], db.relationships()["revision"])
+        self.assertEqual(db.relationships()["relationships"], [])
+        self.assertEqual(db.execute("SELECT name FROM sdk_products")[0].rows, [["Widget"]])
+
 
 if __name__ == "__main__":
     unittest.main()

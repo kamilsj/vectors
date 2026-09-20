@@ -5,8 +5,10 @@ mod embeddings;
 mod graph;
 mod ingest;
 mod parameters;
+mod relationships;
 mod reranking;
 mod response;
+mod schema;
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -307,6 +309,7 @@ fn configure_routes(config: &mut web::ServiceConfig) {
             web::scope("/v1")
                 .configure(admin::configure)
                 .configure(graph::configure)
+                .configure(relationships::configure)
                 .configure(reranking::configure)
                 .route("/settings/server", web::get().to(server_settings))
                 .route(

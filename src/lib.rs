@@ -27,13 +27,14 @@ pub use engine::{
 };
 pub use engine::{
     GraphBrowseRequest, GraphBrowseResult, GraphChunkInput, GraphChunkPreview, GraphCollection,
-    GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentInput,
-    GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit, GraphIngestRequest,
-    GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
-    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagPath,
-    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRagTraversal,
-    GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult, GraphRelationshipRequest,
-    GraphRelationshipResult, GraphSearchRequest, GraphSearchResult, GraphTables,
+    GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentColumn,
+    GraphDocumentInput, GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit,
+    GraphIngestRequest, GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode,
+    GraphNeighborhoodRequest, GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit,
+    GraphRagPath, GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot,
+    GraphRagTraversal, GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult,
+    GraphRelationshipRequest, GraphRelationshipResult, GraphSearchRequest, GraphSearchResult,
+    GraphTables,
 };
 pub use error::{Error, Result};
 pub use parameters::bind_parameters;

@@ -62,6 +62,43 @@ profile, catalog revision, counts, and four managed table names:
 Scalar indexes support document lookup and outgoing/incoming edge lookup.
 Collection creation is atomic; existing table names are never overwritten.
 
+## Add structured document fields
+
+In the console, use **Data → Create → RAG collection** and add optional fields.
+The API accepts the same schema through `document_columns`:
+
+```json
+{
+  "name": "manuals",
+  "document_columns": [
+    {"name": "product_id", "data_type": "INTEGER", "nullable": false},
+    {"name": "category", "data_type": "TEXT"},
+    {"name": "published", "data_type": "BOOLEAN"}
+  ]
+}
+```
+
+Send this body to `POST /v1/graph/collections`, then provide values in each
+document's existing `metadata` object. Up to 32 fields are supported, using
+`TEXT`, `INTEGER`, `DOUBLE`, or `BOOLEAN`; names match
+`[a-z][a-z0-9_]{0,47}` after lowercasing. Built-in document column names are
+reserved. Fields are nullable and non-unique by default; use `nullable: false`
+and/or `unique: true` when appropriate. Missing nullable fields become null.
+Invalid types, missing required fields, and duplicate unique values fail
+before embedding and are checked again at commit.
+
+Declared fields live only in appended, indexed columns of the documents SQL
+table. Undeclared metadata remains JSON. API responses merge both sources, so
+SQL updates to a declared field are immediately reflected in document,
+retrieval, and graph metadata. Existing collections continue to work unchanged.
+Schemas are defined at collection creation; adding fields later is not yet
+exposed as a collection migration API.
+
+Use SQL joins to filter chunks by document fields or link documents to ordinary
+tables. See [structured data and relationships](STRUCTURED_DATA.md). These
+filters are explicit SQL queries; the `/retrieve` endpoint does not yet accept
+custom document-field filters or traverse named cross-table relationships.
+
 ## Preview chunks without calling a provider
 
 ```sh
@@ -141,8 +178,13 @@ Repeating an unchanged upload returns `unchanged: true` without calling the
 provider. A stored corruption fingerprint binds document context to its chunk
 content and vector values; detected SQL edits invalidate this shortcut so an
 upload can repair the chunks. The fingerprint is an integrity check, not an
-authentication mechanism. Changing text, title, source, metadata, or chunking
-settings triggers replacement. Known-invalid inputs and limits are checked
+authentication mechanism. Changing only metadata updates its canonical SQL
+fields and free JSON while preserving chunks, embeddings, edges, and the
+keyword cache. The response reports `embeddings_reused: true` and zero token
+usage; an identical replay also reports `unchanged: true`. This path works
+without provider credentials when the existing chunks pass the integrity check.
+Changing text, title, source, or chunking settings triggers replacement.
+Known-invalid inputs and limits are checked
 before generation, including a conservative allowance for new relationships.
 Provider errors, invalid vectors, or commit errors leave the old document and
 its graph intact. The successful response includes chunk count, directed edges

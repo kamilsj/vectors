@@ -20,15 +20,17 @@ use crate::durable::{PersistentStorage, WalOperation};
 use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
 mod graph;
+mod join;
 pub use graph::{
     GraphBrowseRequest, GraphBrowseResult, GraphChunkInput, GraphChunkPreview, GraphCollection,
-    GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentInput,
-    GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit, GraphIngestRequest,
-    GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
-    GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagPath,
-    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRagTraversal,
-    GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult, GraphRelationshipRequest,
-    GraphRelationshipResult, GraphSearchRequest, GraphSearchResult, GraphTables,
+    GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentColumn,
+    GraphDocumentInput, GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit,
+    GraphIngestRequest, GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode,
+    GraphNeighborhoodRequest, GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit,
+    GraphRagPath, GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot,
+    GraphRagTraversal, GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult,
+    GraphRelationshipRequest, GraphRelationshipResult, GraphSearchRequest, GraphSearchResult,
+    GraphTables,
 };
 
 /// Logical types supported by the in-memory storage engine.
@@ -2461,6 +2463,9 @@ fn run_query(
     };
     validate_select(select)?;
 
+    if select.from.len() == 1 && !select.from[0].joins.is_empty() {
+        return join::run_join_query(catalog, select, query, result_row_limit);
+    }
     let table = match select.from.as_slice() {
         [] => None,
         [from] if from.joins.is_empty() => {
@@ -4866,6 +4871,7 @@ struct EvalContext<'a> {
     columns: &'a [Column],
     row: &'a [Value],
     excluded: Option<&'a [Value]>,
+    joined_row: Option<&'a [Value]>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -4874,6 +4880,7 @@ impl<'a> EvalContext<'a> {
             columns,
             row,
             excluded: None,
+            joined_row: None,
         }
     }
 
@@ -4882,6 +4889,7 @@ impl<'a> EvalContext<'a> {
             columns,
             row,
             excluded: Some(excluded),
+            joined_row: None,
         }
     }
 
@@ -4890,12 +4898,34 @@ impl<'a> EvalContext<'a> {
             columns: &[],
             row: &[],
             excluded: None,
+            joined_row: None,
+        }
+    }
+
+    fn joined(columns: &'a [Column], left: &'a [Value], right: Option<&'a [Value]>) -> Self {
+        Self {
+            columns,
+            row: left,
+            excluded: None,
+            joined_row: right,
+        }
+    }
+
+    fn value(&self, index: usize) -> Value {
+        if index < self.row.len() {
+            self.row[index].clone()
+        } else {
+            // An absent right row represents LEFT JOIN's null-extended row.
+            self.joined_row
+                .and_then(|row| row.get(index - self.row.len()))
+                .cloned()
+                .unwrap_or(Value::Null)
         }
     }
 
     fn column(&self, name: &str) -> Result<Value> {
         let index = find_column(self.columns, name)?;
-        Ok(self.row[index].clone())
+        Ok(self.value(index))
     }
 
     fn compound_column(&self, identifiers: &[Ident]) -> Result<Value> {
@@ -4916,7 +4946,7 @@ impl<'a> EvalContext<'a> {
                 return Ok(excluded[index].clone());
             }
         }
-        Ok(self.row[index].clone())
+        Ok(self.value(index))
     }
 }
 

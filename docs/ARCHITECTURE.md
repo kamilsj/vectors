@@ -117,6 +117,33 @@ Normalized chunks, source documents, configuration, and directed edges are
 stored in four ordinary tables per collection, with scalar indexes for document
 and edge endpoint lookup.
 
+Collections may append up to 32 typed scalar columns to their documents table.
+Declared metadata keys are removed from the free JSON object and stored in
+these indexed columns; all graph readers merge the canonical fields back into
+metadata. Required/type/unique checks run before embedding and at commit.
+Metadata-only edits update the document row, indexes, WAL, and integrity
+fingerprint without changing chunk storage generations, vectors, or edges.
+They therefore retain the lexical cache. Legacy schemas and snapshots remain
+compatible.
+
+Two-table INNER/LEFT equijoins bind column references once and feed borrowed
+row pairs into the shared expression evaluator and bounded candidate sink.
+The right-side maintained HASH index is reused where types match; otherwise
+a temporary hash lookup is built. Mixed INTEGER/DOUBLE keys use the same
+numeric coercion as expression comparison. NULL keys never match; LEFT joins
+produce a null-extended right row only when no pair satisfies ON. WHERE then
+filters the joined row. Ordered joins still scan their matching candidates;
+the existing single-table CPU/GPU vector fast paths are unchanged.
+
+Named cross-table links are definitions in `_vectors_relationships`, with a
+256-definition API bound, schema validation, and database-wide revision checks.
+Definition insertion and missing endpoint HASH indexes share one atomic SQL
+batch and the existing WAL/snapshot machinery. Listing checks endpoint types
+and marks broken links invalid. Deletion removes only the definition. These
+links do not enforce foreign keys or participate automatically in GraphRAG
+traversal. The SQL join path currently excludes aggregate/multi-table joins
+and EXPLAIN; unsupported forms fail explicitly.
+
 The graph engine stages a catalog copy under the write lock. Document replacement
 removes old chunks and all incident edges, adds new rows, and uses the existing
 exact vector top-k executor for cross-document semantic neighbors. Adjacent and

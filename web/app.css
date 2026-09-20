@@ -887,3 +887,55 @@ dialog::backdrop { background: rgba(2, 4, 5, .72); backdrop-filter: blur(4px); }
 .graph-path-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 12px 12px; }
 .graph-path-actions .button { font-size: 10px; }
 @media (max-width: 600px) { .graph-path-edge-label { flex-direction: column; } .graph-path-connection { gap: 5px; grid-template-columns: minmax(0, 1fr) 17px minmax(0, 1fr); } }
+
+/* One field editor serves both document collections and ordinary tables. */
+.create-choices { display: grid; gap: 12px; margin-top: 22px; }
+.create-choice { display: grid; gap: 8px; padding: 18px; border: 1px solid var(--border-bright); border-radius: 9px; text-align: left; background: var(--surface); color: var(--text); cursor: pointer; font-family: inherit; }
+.create-choice:hover, .create-choice:focus-visible { border-color: var(--cyan); background: var(--surface-soft); }
+.create-choice strong { font-size: 14px; font-weight: 550; }
+.create-choice span { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.field-builder { margin: 15px 0; }
+.field-builder-rows { display: grid; gap: 12px; margin-bottom: 12px; }
+.field-builder-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(100px, .9fr) 26px; gap: 10px; padding: 13px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; }
+.field-builder-row > label { min-width: 0; font-size: 10px; }
+.field-builder-row input, .field-builder-row select { margin-top: 6px; min-width: 0; min-height: 36px; font-size: 11px; }
+.field-builder-row > .field-dimensions { grid-column: 1; grid-row: 2; }
+.field-builder-checks { grid-column: 1 / 3; display: flex; gap: 20px; align-items: center; }
+.field-builder-row:has(.field-dimensions:not([hidden])) .field-builder-checks { grid-column: 2; grid-row: 2; flex-wrap: wrap; gap: 8px; }
+.field-builder-checks label, .document-null { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--muted); }
+.field-builder-checks label input { order: -1; }
+.field-builder-checks input[type=checkbox], .document-null input[type=checkbox] { width: 13px; height: 13px; min-height: 13px; margin: 0; accent-color: var(--cyan); }
+.field-remove { grid-column: 3; grid-row: 1; align-self: end; height: 36px; min-width: 26px; color: var(--muted); }
+.collection-provider { margin-top: 18px; padding: 14px 16px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); }
+.collection-provider .provider-note { margin: 0 0 8px; }
+.collection-provider .field-hint { margin-bottom: 0; }
+.document-fields-panel { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 17px; }
+.document-fields-panel h4 { margin: 0 0 6px; font-size: 13px; font-weight: 550; }
+.document-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin-top: 16px; }
+.document-field { min-width: 0; }
+.document-field label { overflow-wrap: anywhere; }
+.document-field label > small { display: block; float: none; color: var(--muted); margin: 4px 0 8px; font-size: 10px; }
+.document-field .document-null { margin-top: 9px; }
+#graph-create-dialog, #admin-create-dialog { width: min(650px, calc(100vw - 30px)); }
+#graph-create-form > p, #admin-create-form > p { font-size: 12px; line-height: 1.7; color: var(--muted); }
+@media (max-width: 600px) { .document-fields { grid-template-columns: 1fr; } .field-builder-row { padding: 10px; gap: 8px; grid-template-columns: minmax(0, 1fr) minmax(85px, .8fr) 24px; } }
+
+.data-relationships { margin-top: 20px; }
+.data-relationships .panel-header h3 { margin: 5px 0 0; font-size: 17px; font-weight: 550; }
+.relationship-intro, #relationships-status { margin: 0; padding: 0 22px 13px; font-size: 11px; line-height: 1.65; }
+.relationship-list { display: grid; gap: 10px; padding: 0 22px 20px; }
+.relationship-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+.relationship-card > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.relationship-card strong { font-size: 12px; font-weight: 550; }
+.relationship-card p { margin: 6px 0; font: 10px/1.7 ui-monospace, monospace; color: var(--muted); }
+.relationship-card small { color: var(--muted-2); font-size: 10px; line-height: 1.6; }
+.relationship-card .relationship-error { color: var(--orange); }
+.relationship-card .inline-actions { flex-shrink: 0; }
+.relationship-endpoints { display: grid; grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 20px; }
+.relationship-endpoints fieldset { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.relationship-endpoints legend { padding: 0 7px; font-size: 11px; color: var(--cyan); }
+.relationship-endpoints label { min-width: 0; margin-bottom: 14px; font-size: 11px; }
+.relationship-endpoints label:last-child { margin-bottom: 0; }
+.relationship-arrow { color: var(--cyan); font-size: 20px; }
+#relationship-dialog { width: min(650px, calc(100vw - 30px)); }
+@media (max-width: 600px) { .data-relationships .panel-header { flex-wrap: wrap; gap: 15px; } .relationship-card { align-items: start; flex-direction: column; } .relationship-endpoints { grid-template-columns: 1fr; gap: 6px; } .relationship-arrow { transform: rotate(90deg); justify-self: center; } .relationship-endpoints fieldset { padding: 14px; } }

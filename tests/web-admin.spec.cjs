@@ -155,6 +155,7 @@ test("creating a table sends a typed schema and opens the new table", async ({ p
   const fixture = await workspace(page);
   await page.locator('.nav-item[data-view="data"]').click();
   await page.locator("#admin-new-table").click();
+  await page.locator("#data-create-table").click();
   await page.locator("#admin-create-name").fill("notes");
   await page.locator("#admin-create-dimensions").fill("3");
   await page.locator("#admin-create-submit").click();

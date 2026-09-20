@@ -755,3 +755,171 @@ async fn graph_routes_require_authentication_and_chunk_preview_obeys_shared_capa
     .await;
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[actix_web::test]
+async fn structured_documents_share_sql_columns_and_reuse_embeddings_for_field_edits() {
+    let database = Database::new();
+    let (endpoint, mock) = mock_provider(1, |_, body, _| {
+        (200, provider_response(&body["input"], 256))
+    });
+    let embeddings = configured(&endpoint, Provider::Voyage);
+    let columns = json!([
+        {"name":"category","data_type":"TEXT","nullable":false},
+        {"name":"priority","data_type":"INTEGER"},
+        {"name":"score","data_type":"DOUBLE"},
+        {"name":"approved","data_type":"BOOLEAN","nullable":false},
+        {"name":"external_id","data_type":"TEXT","unique":true}
+    ]);
+    let (status, created) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections",
+        json!({"name":"notes","document_columns":columns}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["document_columns"].as_array().unwrap().len(), 5);
+    assert_eq!(created["document_columns"][0]["nullable"], false);
+
+    let mut document = first_document();
+    // Required values fail before contacting the provider or changing the catalog.
+    let before = snapshot(&database);
+    let (status, _) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections/notes/documents",
+        document.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(snapshot(&database), before);
+    document["metadata"] = json!({"category":"integration","priority":2,"score":1,
+        "approved":false,"external_id":"one","extra":{"retained":true}});
+    let (status, inserted) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections/notes/documents",
+        document.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{inserted}");
+    assert_eq!(inserted["embeddings_reused"], false);
+    mock.join().unwrap(); // Further embedding requests would fail.
+    let chunks_and_edges = snapshot(&database)[2..].to_vec();
+
+    // Numeric normalization and omitted nullable fields preserve idempotency.
+    let revision = database.revision().unwrap();
+    let (status, replay) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections/notes/documents",
+        document.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["unchanged"], true);
+    assert_eq!(database.revision().unwrap(), revision);
+
+    document["metadata"]["category"] = json!("engineering");
+    document["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("priority");
+    document["expected_revision"] = json!(revision);
+    let (status, updated) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections/notes/documents",
+        document.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["embeddings_reused"], true);
+    assert_eq!(updated["unchanged"], false);
+    assert_eq!(updated["embedding_usage"]["total_tokens"], 0);
+    assert_eq!(snapshot(&database)[2..], chunks_and_edges);
+    let stored = database.graph_document("notes", "one").unwrap().unwrap();
+    assert_eq!(stored.metadata["priority"], JsonValue::Null);
+    assert_eq!(stored.metadata["score"].as_f64(), Some(1.0));
+    assert!(stored.chunks_intact);
+    let (status, sql) = call(&database, &embeddings, Method::POST, "/v1/sql", json!({"sql":
+        "SELECT d.category, d.approved, c.text, cosine_distance(c.embedding, c.embedding) AS distance FROM graph_notes_documents d JOIN graph_notes_chunks c ON c.document_id = d.document_id WHERE d.category = 'engineering' ORDER BY distance LIMIT 2"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{sql}");
+    assert_eq!(sql["results"][0]["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(sql["results"][0]["rows"][0][0], "engineering");
+    assert_eq!(sql["results"][0]["rows"][0][1], false);
+
+    // A SQL field edit is immediately the value returned by graph APIs.
+    database
+        .execute("UPDATE graph_notes_documents SET category = 'sql' WHERE document_id = 'one'")
+        .unwrap();
+    let (status, stored) = call(
+        &database,
+        &embeddings,
+        Method::GET,
+        "/v1/graph/collections/notes/documents/one",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(stored["metadata"]["category"], "sql");
+    assert!(stored["metadata"]["extra"]["retained"].as_bool().unwrap());
+    let before = snapshot(&database);
+    let (status, _) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections/notes/documents",
+        document.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(snapshot(&database), before);
+    document["expected_revision"] = json!(database.revision().unwrap());
+    document["metadata"]["approved"] = json!("false");
+    let (status, _) = call(
+        &database,
+        &embeddings,
+        Method::POST,
+        "/v1/graph/collections/notes/documents",
+        document,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(snapshot(&database), before);
+}
+
+#[actix_web::test]
+async fn invalid_document_schema_does_not_create_partial_collections() {
+    let database = Database::new();
+    let (endpoint, mock) = mock_provider(0, |_, _, _| unreachable!());
+    let embeddings = configured(&endpoint, Provider::Voyage);
+    mock.join().unwrap();
+    for columns in [
+        json!([{"name":"title","data_type":"TEXT"}]),
+        json!([{"name":"tag","data_type":"VECTOR(3)"}]),
+        json!([{"name":"a","data_type":"TEXT"},{"name":"a","data_type":"TEXT"}]),
+        json!([{"name":"a","data_type":"JSON"}]),
+        json!([{"name":"not a field","data_type":"TEXT"}]),
+        json!([{"name":"a","data_type":"TEXT","unknown":true}]),
+    ] {
+        let revision = database.revision().unwrap();
+        let (status, body) = call(
+            &database,
+            &embeddings,
+            Method::POST,
+            "/v1/graph/collections",
+            json!({"name":"notes","document_columns":columns}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(database.graph_collections().unwrap().is_empty());
+        assert_eq!(database.revision().unwrap(), revision);
+    }
+}

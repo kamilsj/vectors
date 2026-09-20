@@ -1,0 +1,905 @@
+{
+  "recorded_at": "2026-09-20T13:17:27.418945+00:00",
+  "description": "Maintained scalar HASH index versus temporary per-query hash construction in the same streaming vector-ranked JOIN executor. This is not a before/after release comparison.",
+  "hardware": {
+    "cpu": "Apple M4 Max",
+    "logical_cpus": 16,
+    "memory_bytes": 51539607552,
+    "os": "27.0",
+    "os_build": "26A428",
+    "architecture": "arm64"
+  },
+  "provenance": {
+    "started_at": "2026-09-20T13:17:22.182827+00:00",
+    "git_head": "8ba355002bca807cf4ce2718d58320211d2034ec",
+    "working_tree": "Uncommitted feature source; hashes identify exact measured Rust sources.",
+    "binary_sha256": "d8a5c90bc0ab9ef0947b6b32909526ef8e58f254db0b9dffd1e3c22c353437b6",
+    "source_sha256": {
+      "Cargo.lock": "e8ecbd6e1e4c802de7e8708889842041326a5e18eac7dfccd861204e0edd7a50",
+      "Cargo.toml": "ea9f7917ed57150670113e3e851393d91a383403f116049f270ae0eb54d3063f",
+      "examples/benchmark_sql_join.rs": "317f7bc26c9de514011c9be7a6dfabce42969c382b2e16fe6879dc2497d56211",
+      "src/api.rs": "d5423e04267d57329b604ab02c09b2b4864690c34ab6b859a97a71dd8f277cd3",
+      "src/api/admin.rs": "3efe7cc34c43a14dbcf49517f550be7bb7fd7efc19961fdb6f22b707afc2335d",
+      "src/api/embeddings.rs": "ea83aede311603fbff7ff1e86c697f8a6d093abf69ce12764e7f18570d75016e",
+      "src/api/graph.rs": "4046df81e7af7d3fde72e49874cac151d09c450b2beab4fd815e9091d8b183eb",
+      "src/api/graph_tests.rs": "54c8165ee69f1e12df2536f7073f66e058d388719616820a29b10446f81af0d9",
+      "src/api/ingest.rs": "2cb41fd465d62f5d3f8a80c8f7b649e1a540115ca8fe3c47a88d651a4373ab80",
+      "src/api/parameters.rs": "7d0bb2ae8f39b944b714cf5b318a11387d56667887ddfafe0fa4511f934d4f06",
+      "src/api/rag.rs": "4bca888c873733558e47e6e5a225a4154ac168c84a0e5de71261216aeb0b8be6",
+      "src/api/rag_tests.rs": "9ccb253dc6317d7826bcf75f5cf5742e2813da1669191bc15c2a0efe7babf1e5",
+      "src/api/relationship_tests.rs": "970d0f40f1bb627c170b58825dc5e1cb000690d4d30811e482e7f714c1598e38",
+      "src/api/relationships.rs": "315df894f95de536c53d979b3d82a161f6cd8a9bc36a2e0216fb00c69d5a29d2",
+      "src/api/reranking.rs": "a4e2cd312c1944e81cce9405f108c89ae9102a2161dd372e326ac63e60b11ae6",
+      "src/api/response.rs": "e97dbe0fe060247b883993d71632e6383a1d6a940aa119a13efd46f31d7cbac6",
+      "src/api/schema.rs": "bf5f776c94f5e15a84603964321c9149fd72328c3a97f13af2379745df408e80",
+      "src/bin/vectors-server.rs": "317491057e3ea8eb42aae71d9bdd0e0f9db6e93582480d7327718804ae65b5b5",
+      "src/chunking.rs": "8a2e97ba752b900e8b817cdfd986aa5f6086bf7f4e7ce694e3f8a559879e8680",
+      "src/compute.rs": "a4c6753d2f2e18c6b40010fbcff24a53716ae0d817326be8820f7031a5980d00",
+      "src/durable.rs": "e724c4338372839a73695c1a6827080fdafde8c1f0d8be031abad5fae251b3df",
+      "src/embedding.rs": "bad9e72e7aa3a0b19abcc70739d5218a497011ed4ef91d3d7e9eaa98ad8d7c16",
+      "src/engine.rs": "477f46b2cff7826b8cae85092d8430764e25ee87d26f85486f8e6c72ecf31cd0",
+      "src/engine/graph.rs": "8ef2efe435c41cb75700c8edebb30bd8c99ddb53bb4cb94ad5e1dfec9b9a488e",
+      "src/engine/graph_neighborhood.rs": "2488b3d8ce35fb10aa0985a79b29c191f3791bd2fff91e1958260245dfb1643e",
+      "src/engine/graph_rag.rs": "2a290750655bb27867b42406299f4abbeec02ae623b7cf281da8325e48251542",
+      "src/engine/graph_traversal.rs": "9540c18ad9249ab506dfe3e74ac8331fc98548044c90d986f78e9f86c6869914",
+      "src/engine/join.rs": "8f3cf74829e3d6a8b4f0aa843d93404be16ab44decc6ffc4c05fafe78e3b0aa0",
+      "src/error.rs": "21a19057b0b846676280375da2d60442f07b9cf20f97b40f6bcd4b3a0f83a35d",
+      "src/gpu.rs": "7a66229fcf9dff9ff23716b37a8880beab0cf3ccdabc0d3f98fe5ced6e38a16e",
+      "src/lib.rs": "69e1501da95034cb86e21fbf0a1f7bf0bc640e240be1173079494b4437be4c59",
+      "src/main.rs": "0f51a47d2173452cc27600b9695535df118da96ed2866f5fb5bfe196b7231627",
+      "src/parameters.rs": "b8a55456af874771b358530e69ff5afd9120e13d700f291c1c0a0f43eb821b0b",
+      "src/reranking.rs": "bd0262bcffe96ae80888fa09f7cac60fb5bbc2469a475a25de8c29677433e59b",
+      "src/storage.rs": "1d56339c7619115947e64428a9b68927a2c8e06447bbda42abf630607452b49b",
+      "src/update_cli.rs": "b60e71f54582557f6f37c4360f0872f3b4fb92b4c6b85d845c57bcd1ac2ca7b0",
+      "src/vector.rs": "a34deefcd3274e3a740299ef87096e7f772c47d64789ffe644fe74f92abac525"
+    },
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cargo_example_fingerprint": {
+      "rustc": 17329007180185699724,
+      "features": "[\"default\", \"gpu\"]",
+      "declared_features": "[\"default\", \"gpu\"]",
+      "target": 803281892292529553,
+      "profile": 5013955251835914682,
+      "path": 11299625279526123757,
+      "deps": [
+        [
+          2145939652136225981,
+          "tokio",
+          false,
+          17741403178226254790
+        ],
+        [
+          2934868905891162512,
+          "sqlparser",
+          false,
+          431519501438693654
+        ],
+        [
+          5330460842384404171,
+          "serde_json",
+          false,
+          18253492227356851608
+        ],
+        [
+          6557439603276904804,
+          "serde",
+          false,
+          6199187313370451598
+        ],
+        [
+          10132282154110531179,
+          "vectors",
+          false,
+          2828590469645077303
+        ],
+        [
+          11742730876020405241,
+          "thiserror",
+          false,
+          4754908711366282789
+        ],
+        [
+          11910974697091955563,
+          "rayon",
+          false,
+          13524417922999716147
+        ],
+        [
+          15452694858287732813,
+          "actix_web",
+          false,
+          10294398204842136435
+        ],
+        [
+          15735613251537484627,
+          "pollster",
+          false,
+          10196393840616856184
+        ],
+        [
+          17313904301704025453,
+          "wgpu",
+          false,
+          4772632737822326535
+        ],
+        [
+          17325453097244291330,
+          "reqwest",
+          false,
+          12725733891956875693
+        ],
+        [
+          18075512308826438882,
+          "bytemuck",
+          false,
+          9557947549173454167
+        ]
+      ],
+      "local": [
+        {
+          "CheckDepInfo": {
+            "dep_info": "release/.fingerprint/vectors-b109d8efd0ecf365/dep-example-benchmark_sql_join",
+            "checksum": false
+          }
+        }
+      ],
+      "rustflags": [],
+      "config": 9396254390672932401,
+      "compile_kind": 0
+    }
+  },
+  "reproduction": {
+    "build": "CARGO_HOME=target/cargo-home CARGO_TARGET_DIR=/private/tmp/vectors-release-check-target cargo build --release --locked --offline --all-features --example benchmark_sql_join",
+    "run": "/private/tmp/vectors-release-check-target/release/examples/benchmark_sql_join 50000 128 20",
+    "process_repetitions": 3,
+    "execution": "Three sequential fresh processes in a coordinated quiet window; each query pair alternates which variant executes first. Exact query texts warmed before timing.",
+    "clock": "std::time::Instant; microseconds",
+    "percentiles": "Sort ascending and select ceil((n-1)*p); aggregates combine 60 samples per variant per phase.",
+    "parse_cache": "Forty warmed query texts fit the 64-entry cache."
+  },
+  "correctness": {
+    "paired_full_query_results_equal": true,
+    "canonical_results_equal_across_all_three_processes": true,
+    "checked": "Column names and types, ordered result values and exact floating point scores, row counts and rows_examined; no tolerance comparison.",
+    "source_hashes_unchanged_after_measurement": true
+  },
+  "limitations": [
+    "Single Apple M4 Max host, CPU backend, in-process execution; no HTTP transport, durable write cost, GPU, concurrent writers or heterogeneous production data.",
+    "Fixture writes, maintained index construction and result JSON serialization are excluded; all execute-time JOIN binding, temporary hash construction, row filtering, cosine scoring, top-k and result allocation are included.",
+    "Both variants use the same newly implemented executor; no claim is made about speed relative to an earlier release, which did not support JOIN.",
+    "Sparse workload probes 64 unique keys from 50,000 right rows; one-to-many probes 64 of 500 keys and examines 6,400 candidate pairs, scoring 4,800 after its boolean filter. Benefits depend on selectivity and scoring cost.",
+    "Deterministic synthetic vectors repeat every 101 rows; tests exercise correctness separately. Measurements are warm-process latency samples, not sustained concurrent throughput."
+  ],
+  "summary": [
+    {
+      "workload": "sparse_unique_keys",
+      "measurements_per_variant": 60,
+      "indexed_median_us": 259.167,
+      "ephemeral_median_us": 3631.0829999999996,
+      "indexed_p95_us": 288.041,
+      "ephemeral_p95_us": 4019.542,
+      "median_ratio_ephemeral_over_indexed": 14.010591626248713,
+      "median_reduction_percent": 92.86254266289149,
+      "rows_examined": 64,
+      "canonical_sha256_each_query": [
+        "6d2eb1199b82f5bcb5d00708caf6cef8fb6b8674882ead28fb164053d167ce6b",
+        "0653c73c1dfc9dfb734c997b2220245ca80d3662675d992ee507899cc932e132",
+        "2ab4a3aa827fab44c980c7c0144bf5b9119d42f685fbddd7878a50a71a1c131c",
+        "b96ed397e9fa5c46bde04c61dd0585edfc28a8a4127add5e4391afd6ce71dabf",
+        "8f8d39c294e47e5731041098f4533ea0b3180460a1c810136f6455fe651bd20f",
+        "b680b46c31454222c37c8e6d4fea02edc1083a6f6a53d3c6c4ae6e2e3e922c52",
+        "ccefdfbbf8cdc193e69443d0083971ac98bd066440df610db3aa1523c84f7311",
+        "4f4ae4d78dd55ed543e906b3bf9b92179debb8a2b6e47193f0adff18d3582bef",
+        "efe7d8e5a5ea7d04eec30bf4ec4f41aae09ad1424f648c82597d39ae01e0051f",
+        "2d1671b4d1064119426c5de224df07a51c119ff60b8c905b7263571d5fbff76d",
+        "578b00e63d777449001a6afc1f22bcb59b1c283e3254962e3bcdbf492b5edea4",
+        "023a0c6e6261cd07f2cd6568c9f103c676343a61255b244d0c52e1478a3f0aca",
+        "73d58c832a1d7b54830da0abc8d88cb01e5ec08ec7f08b19254406c14c551ddf",
+        "ced1396b9a90f842087ae54f825f2c3745674c9c1164556011ba5dca1065ec2a",
+        "13217173ce70fc3bcb0bb057238b435b6d673f4a9ad351aadf1df8aa408baaa8",
+        "167f65ba62a6dade32b23354ea6a3c8230db0340054b1b22f65d631ad853e720",
+        "e3a3f4a9a5e3d4d87e5fbc47b6c068cd7820f0161d597e3587611675be411ab9",
+        "a82fdd860dd348cfc92d828c58446ba75cc0baf1f8eeb38f0794e94d8e68fc40",
+        "e821db19909a405fd1d9b826136f34c15961eddd1cfc314b965045f1f9d8172b",
+        "03ba63f15094b74f8f92a6a77b4ff68a672f6db2ed7a8ba9445edd1d5b1cdf80"
+      ],
+      "canonical_first_query": {
+        "column_types": [
+          "INTEGER",
+          "INTEGER",
+          "DOUBLE"
+        ],
+        "columns": [
+          "topic",
+          "id",
+          "distance"
+        ],
+        "rows": [
+          [
+            0,
+            0,
+            -8.881784197001252e-16
+          ],
+          [
+            13,
+            13,
+            0.091257244348526
+          ],
+          [
+            62,
+            62,
+            0.13668251037597656
+          ],
+          [
+            26,
+            26,
+            0.17981532216072083
+          ],
+          [
+            49,
+            49,
+            0.18111608922481537
+          ],
+          [
+            36,
+            36,
+            0.22492854297161102
+          ],
+          [
+            39,
+            39,
+            0.26586291193962097
+          ],
+          [
+            23,
+            23,
+            0.26808595657348633
+          ],
+          [
+            10,
+            10,
+            0.3105550706386566
+          ],
+          [
+            52,
+            52,
+            0.34957635402679443
+          ]
+        ],
+        "rows_examined": 64
+      }
+    },
+    {
+      "workload": "one_to_many_keys",
+      "measurements_per_variant": 60,
+      "indexed_median_us": 16197.791,
+      "ephemeral_median_us": 17962.166,
+      "indexed_p95_us": 17287.75,
+      "ephemeral_p95_us": 18607.25,
+      "median_ratio_ephemeral_over_indexed": 1.108926890092606,
+      "median_reduction_percent": 9.822729619579295,
+      "rows_examined": 6400,
+      "canonical_sha256_each_query": [
+        "16feda06bf6893eaa28d4bb0ad900769f0a6e3cb55888ef75fcdfbb9d2615f46",
+        "1d2e6b2d6f3ca1a105490864340cb8d29c0d8b14b858add4544d5414c88c7702",
+        "487b14a6dce743a8bf646a97f5c87007f46c8fde41ccf3d6a5ed4a5cc3c865b6",
+        "7193c27c4bad234b8cd0db98f99f61edd79857ef2f14e590422495486832c731",
+        "cd4e71a9f36cb5c251aba72cfbda451497e013b138640802fa69b129cd1625f8",
+        "886fe4cd7d43806b7b3cd5ef6504cbb9de81d39868e192ecc886997a5a9e4ad3",
+        "ea04a01555de5ac9339a53b87b09398db820be124c47a383d5c42fb4bd968da6",
+        "6c0c09d5a15d587ec52ba8bf47fb0887c847beb2dab758daca75710231453d4a",
+        "d665d49a212968c2675874514dce0ab3cd534e0e0093338fc53df7831a8b71da",
+        "c5f66cd17b493159acff48b09a8693b6eb5727c95877c593126f3e85ca65df9f",
+        "600fced6d5c7d7579a8f6f0c2a1216d1fec851b364be003e33b7d53a9da68b45",
+        "7d11fd32ac5a824f2e8ccbc05141b39f56cb25a0ea7ddb3d727f553f7fac05b7",
+        "f8889ca4d89fffd2594dba96817d75b01b23659aee262f67692e795d826586e4",
+        "c7894c47001d1e0e3ee641edfed64820a680456a476e3cd5a1d32c432e8e1648",
+        "34fe9e3771b1968589159eb1a3ad1dd4d959008e27a7629f43ca606e6529fc77",
+        "2ee98ffd581eb8cd35f5c811a2aff21028ec6a4584282799b442f10534b9114e",
+        "75580a888d8abc0032842866eb5135c0832e30dc1ff8262594fa914a3f8fa80a",
+        "a411b2fc2c6b7b4792edf2b82be45ae428b05259a44b3e0cee688ea0d713893e",
+        "6c5b4454c824e2d4db84a3cbdb253eb9be24d01e27febced69e9337fca619895",
+        "d13711dd55617dc9c3c55d7b52367ae865f0897f914ba208e09eb1f4df0713c0"
+      ],
+      "canonical_first_query": {
+        "column_types": [
+          "INTEGER",
+          "INTEGER",
+          "DOUBLE"
+        ],
+        "columns": [
+          "topic",
+          "id",
+          "distance"
+        ],
+        "rows": [
+          [
+            5,
+            505,
+            -8.881784197001252e-16
+          ],
+          [
+            10,
+            1010,
+            -8.881784197001252e-16
+          ],
+          [
+            15,
+            1515,
+            -8.881784197001252e-16
+          ],
+          [
+            25,
+            2525,
+            -8.881784197001252e-16
+          ],
+          [
+            30,
+            3030,
+            -8.881784197001252e-16
+          ],
+          [
+            35,
+            3535,
+            -8.881784197001252e-16
+          ],
+          [
+            45,
+            4545,
+            -8.881784197001252e-16
+          ],
+          [
+            50,
+            5050,
+            -8.881784197001252e-16
+          ],
+          [
+            55,
+            5555,
+            -8.881784197001252e-16
+          ],
+          [
+            4,
+            10504,
+            -8.881784197001252e-16
+          ]
+        ],
+        "rows_examined": 6400
+      }
+    }
+  ],
+  "raw_runs": [
+    {
+      "compute": "cpu",
+      "phases": [
+        {
+          "all_results_identical": true,
+          "dimensions": 128,
+          "ephemeral": {
+            "median_us": 3711.083,
+            "p95_us": 4267.792,
+            "samples_us": [
+              3758.708,
+              3954.3340000000003,
+              3797.5840000000003,
+              4019.542,
+              3527.0420000000004,
+              4267.792,
+              3711.083,
+              3785.833,
+              3272.167,
+              2895.375,
+              3820.25,
+              3636.7909999999997,
+              3652.166,
+              3899.208,
+              3163.1670000000004,
+              3984.667,
+              3193.5840000000003,
+              2988.833,
+              3637.25,
+              3239.708
+            ]
+          },
+          "indexed": {
+            "median_us": 263.083,
+            "p95_us": 329.5,
+            "samples_us": [
+              273.166,
+              286.917,
+              242.042,
+              276.583,
+              262.0,
+              273.959,
+              252.292,
+              262.542,
+              228.292,
+              264.41700000000003,
+              245.458,
+              267.625,
+              329.5,
+              288.041,
+              243.334,
+              283.625,
+              263.083,
+              254.125,
+              227.125,
+              245.792
+            ]
+          },
+          "key_groups": 50000,
+          "metric": "cosine_distance",
+          "probe_keys": 64,
+          "repetitions": 20,
+          "result_limit": 10,
+          "right_rows": 50000,
+          "workload": "sparse_unique_keys",
+          "canonical_sha256_each_query": [
+            "6d2eb1199b82f5bcb5d00708caf6cef8fb6b8674882ead28fb164053d167ce6b",
+            "0653c73c1dfc9dfb734c997b2220245ca80d3662675d992ee507899cc932e132",
+            "2ab4a3aa827fab44c980c7c0144bf5b9119d42f685fbddd7878a50a71a1c131c",
+            "b96ed397e9fa5c46bde04c61dd0585edfc28a8a4127add5e4391afd6ce71dabf",
+            "8f8d39c294e47e5731041098f4533ea0b3180460a1c810136f6455fe651bd20f",
+            "b680b46c31454222c37c8e6d4fea02edc1083a6f6a53d3c6c4ae6e2e3e922c52",
+            "ccefdfbbf8cdc193e69443d0083971ac98bd066440df610db3aa1523c84f7311",
+            "4f4ae4d78dd55ed543e906b3bf9b92179debb8a2b6e47193f0adff18d3582bef",
+            "efe7d8e5a5ea7d04eec30bf4ec4f41aae09ad1424f648c82597d39ae01e0051f",
+            "2d1671b4d1064119426c5de224df07a51c119ff60b8c905b7263571d5fbff76d",
+            "578b00e63d777449001a6afc1f22bcb59b1c283e3254962e3bcdbf492b5edea4",
+            "023a0c6e6261cd07f2cd6568c9f103c676343a61255b244d0c52e1478a3f0aca",
+            "73d58c832a1d7b54830da0abc8d88cb01e5ec08ec7f08b19254406c14c551ddf",
+            "ced1396b9a90f842087ae54f825f2c3745674c9c1164556011ba5dca1065ec2a",
+            "13217173ce70fc3bcb0bb057238b435b6d673f4a9ad351aadf1df8aa408baaa8",
+            "167f65ba62a6dade32b23354ea6a3c8230db0340054b1b22f65d631ad853e720",
+            "e3a3f4a9a5e3d4d87e5fbc47b6c068cd7820f0161d597e3587611675be411ab9",
+            "a82fdd860dd348cfc92d828c58446ba75cc0baf1f8eeb38f0794e94d8e68fc40",
+            "e821db19909a405fd1d9b826136f34c15961eddd1cfc314b965045f1f9d8172b",
+            "03ba63f15094b74f8f92a6a77b4ff68a672f6db2ed7a8ba9445edd1d5b1cdf80"
+          ]
+        },
+        {
+          "all_results_identical": true,
+          "dimensions": 128,
+          "ephemeral": {
+            "median_us": 18002.666,
+            "p95_us": 19550.166,
+            "samples_us": [
+              17962.166,
+              17803.708000000002,
+              17661.958,
+              17901.792,
+              18317.834000000003,
+              17840.291,
+              18002.666,
+              18253.042,
+              18099.417,
+              18360.292,
+              18604.165999999997,
+              17751.834000000003,
+              17625.416,
+              18565.75,
+              17636.167,
+              17810.165999999997,
+              18421.209000000003,
+              18478.084,
+              17517.541,
+              19550.166
+            ]
+          },
+          "indexed": {
+            "median_us": 16197.791,
+            "p95_us": 17287.75,
+            "samples_us": [
+              15880.249999999998,
+              16172.791999999998,
+              16105.375000000002,
+              16045.125,
+              16995.5,
+              16197.791,
+              16517.166999999998,
+              17287.75,
+              16244.207999999999,
+              16108.875000000002,
+              16405.208000000002,
+              16134.833,
+              15900.874999999998,
+              16535.75,
+              15340.541,
+              15957.042000000001,
+              16295.625000000002,
+              16843.125,
+              15774.375,
+              16584.083
+            ]
+          },
+          "key_groups": 500,
+          "metric": "cosine_distance",
+          "probe_keys": 64,
+          "repetitions": 20,
+          "result_limit": 10,
+          "right_rows": 50000,
+          "workload": "one_to_many_keys",
+          "canonical_sha256_each_query": [
+            "16feda06bf6893eaa28d4bb0ad900769f0a6e3cb55888ef75fcdfbb9d2615f46",
+            "1d2e6b2d6f3ca1a105490864340cb8d29c0d8b14b858add4544d5414c88c7702",
+            "487b14a6dce743a8bf646a97f5c87007f46c8fde41ccf3d6a5ed4a5cc3c865b6",
+            "7193c27c4bad234b8cd0db98f99f61edd79857ef2f14e590422495486832c731",
+            "cd4e71a9f36cb5c251aba72cfbda451497e013b138640802fa69b129cd1625f8",
+            "886fe4cd7d43806b7b3cd5ef6504cbb9de81d39868e192ecc886997a5a9e4ad3",
+            "ea04a01555de5ac9339a53b87b09398db820be124c47a383d5c42fb4bd968da6",
+            "6c0c09d5a15d587ec52ba8bf47fb0887c847beb2dab758daca75710231453d4a",
+            "d665d49a212968c2675874514dce0ab3cd534e0e0093338fc53df7831a8b71da",
+            "c5f66cd17b493159acff48b09a8693b6eb5727c95877c593126f3e85ca65df9f",
+            "600fced6d5c7d7579a8f6f0c2a1216d1fec851b364be003e33b7d53a9da68b45",
+            "7d11fd32ac5a824f2e8ccbc05141b39f56cb25a0ea7ddb3d727f553f7fac05b7",
+            "f8889ca4d89fffd2594dba96817d75b01b23659aee262f67692e795d826586e4",
+            "c7894c47001d1e0e3ee641edfed64820a680456a476e3cd5a1d32c432e8e1648",
+            "34fe9e3771b1968589159eb1a3ad1dd4d959008e27a7629f43ca606e6529fc77",
+            "2ee98ffd581eb8cd35f5c811a2aff21028ec6a4584282799b442f10534b9114e",
+            "75580a888d8abc0032842866eb5135c0832e30dc1ff8262594fa914a3f8fa80a",
+            "a411b2fc2c6b7b4792edf2b82be45ae428b05259a44b3e0cee688ea0d713893e",
+            "6c5b4454c824e2d4db84a3cbdb253eb9be24d01e27febced69e9337fca619895",
+            "d13711dd55617dc9c3c55d7b52367ae865f0897f914ba208e09eb1f4df0713c0"
+          ]
+        }
+      ],
+      "profile": "release",
+      "scope": "Complete in-process SELECT JOIN with residual predicate, exact cosine ranking, deterministic tie breaker and LIMIT10. SQL parse caches warmed. Excludes fixture writes/index construction/result serialization; compares maintained right HASH index with per-query temporary hash construction in the same executor."
+    },
+    {
+      "compute": "cpu",
+      "phases": [
+        {
+          "all_results_identical": true,
+          "dimensions": 128,
+          "ephemeral": {
+            "median_us": 3606.0,
+            "p95_us": 4034.625,
+            "samples_us": [
+              3931.5,
+              3629.083,
+              3328.333,
+              4034.625,
+              3774.041,
+              3302.375,
+              3584.958,
+              3273.125,
+              3214.583,
+              3641.0829999999996,
+              3622.4170000000004,
+              3390.625,
+              3289.0,
+              3606.0,
+              3638.167,
+              3904.25,
+              3596.458,
+              3517.708,
+              3732.25,
+              3306.917
+            ]
+          },
+          "indexed": {
+            "median_us": 257.04200000000003,
+            "p95_us": 280.833,
+            "samples_us": [
+              242.667,
+              261.833,
+              237.667,
+              280.58299999999997,
+              247.417,
+              252.20800000000003,
+              243.083,
+              249.83299999999997,
+              225.459,
+              266.541,
+              252.0,
+              259.167,
+              233.416,
+              257.04200000000003,
+              231.54100000000003,
+              280.833,
+              262.45799999999997,
+              275.541,
+              260.25,
+              257.459
+            ]
+          },
+          "key_groups": 50000,
+          "metric": "cosine_distance",
+          "probe_keys": 64,
+          "repetitions": 20,
+          "result_limit": 10,
+          "right_rows": 50000,
+          "workload": "sparse_unique_keys",
+          "canonical_sha256_each_query": [
+            "6d2eb1199b82f5bcb5d00708caf6cef8fb6b8674882ead28fb164053d167ce6b",
+            "0653c73c1dfc9dfb734c997b2220245ca80d3662675d992ee507899cc932e132",
+            "2ab4a3aa827fab44c980c7c0144bf5b9119d42f685fbddd7878a50a71a1c131c",
+            "b96ed397e9fa5c46bde04c61dd0585edfc28a8a4127add5e4391afd6ce71dabf",
+            "8f8d39c294e47e5731041098f4533ea0b3180460a1c810136f6455fe651bd20f",
+            "b680b46c31454222c37c8e6d4fea02edc1083a6f6a53d3c6c4ae6e2e3e922c52",
+            "ccefdfbbf8cdc193e69443d0083971ac98bd066440df610db3aa1523c84f7311",
+            "4f4ae4d78dd55ed543e906b3bf9b92179debb8a2b6e47193f0adff18d3582bef",
+            "efe7d8e5a5ea7d04eec30bf4ec4f41aae09ad1424f648c82597d39ae01e0051f",
+            "2d1671b4d1064119426c5de224df07a51c119ff60b8c905b7263571d5fbff76d",
+            "578b00e63d777449001a6afc1f22bcb59b1c283e3254962e3bcdbf492b5edea4",
+            "023a0c6e6261cd07f2cd6568c9f103c676343a61255b244d0c52e1478a3f0aca",
+            "73d58c832a1d7b54830da0abc8d88cb01e5ec08ec7f08b19254406c14c551ddf",
+            "ced1396b9a90f842087ae54f825f2c3745674c9c1164556011ba5dca1065ec2a",
+            "13217173ce70fc3bcb0bb057238b435b6d673f4a9ad351aadf1df8aa408baaa8",
+            "167f65ba62a6dade32b23354ea6a3c8230db0340054b1b22f65d631ad853e720",
+            "e3a3f4a9a5e3d4d87e5fbc47b6c068cd7820f0161d597e3587611675be411ab9",
+            "a82fdd860dd348cfc92d828c58446ba75cc0baf1f8eeb38f0794e94d8e68fc40",
+            "e821db19909a405fd1d9b826136f34c15961eddd1cfc314b965045f1f9d8172b",
+            "03ba63f15094b74f8f92a6a77b4ff68a672f6db2ed7a8ba9445edd1d5b1cdf80"
+          ]
+        },
+        {
+          "all_results_identical": true,
+          "dimensions": 128,
+          "ephemeral": {
+            "median_us": 18171.75,
+            "p95_us": 18776.792,
+            "samples_us": [
+              18152.292,
+              18386.958,
+              17255.25,
+              17418.5,
+              18171.75,
+              17813.916999999998,
+              18607.25,
+              18244.916999999998,
+              17877.291,
+              18226.083000000002,
+              18409.667,
+              17687.583,
+              17752.084000000003,
+              18363.625,
+              17453.125,
+              18084.416999999998,
+              18566.125,
+              18776.792,
+              18082.083,
+              18316.083
+            ]
+          },
+          "indexed": {
+            "median_us": 16474.5,
+            "p95_us": 17350.416,
+            "samples_us": [
+              16237.708,
+              16581.125,
+              15564.167,
+              15641.333,
+              16337.582999999999,
+              16140.499999999998,
+              16602.709,
+              16936.5,
+              16484.083,
+              16474.5,
+              16959.75,
+              16165.709,
+              16307.540999999997,
+              16627.040999999997,
+              15992.167000000001,
+              16633.875,
+              16276.333,
+              17181.084,
+              15804.458,
+              17350.416
+            ]
+          },
+          "key_groups": 500,
+          "metric": "cosine_distance",
+          "probe_keys": 64,
+          "repetitions": 20,
+          "result_limit": 10,
+          "right_rows": 50000,
+          "workload": "one_to_many_keys",
+          "canonical_sha256_each_query": [
+            "16feda06bf6893eaa28d4bb0ad900769f0a6e3cb55888ef75fcdfbb9d2615f46",
+            "1d2e6b2d6f3ca1a105490864340cb8d29c0d8b14b858add4544d5414c88c7702",
+            "487b14a6dce743a8bf646a97f5c87007f46c8fde41ccf3d6a5ed4a5cc3c865b6",
+            "7193c27c4bad234b8cd0db98f99f61edd79857ef2f14e590422495486832c731",
+            "cd4e71a9f36cb5c251aba72cfbda451497e013b138640802fa69b129cd1625f8",
+            "886fe4cd7d43806b7b3cd5ef6504cbb9de81d39868e192ecc886997a5a9e4ad3",
+            "ea04a01555de5ac9339a53b87b09398db820be124c47a383d5c42fb4bd968da6",
+            "6c0c09d5a15d587ec52ba8bf47fb0887c847beb2dab758daca75710231453d4a",
+            "d665d49a212968c2675874514dce0ab3cd534e0e0093338fc53df7831a8b71da",
+            "c5f66cd17b493159acff48b09a8693b6eb5727c95877c593126f3e85ca65df9f",
+            "600fced6d5c7d7579a8f6f0c2a1216d1fec851b364be003e33b7d53a9da68b45",
+            "7d11fd32ac5a824f2e8ccbc05141b39f56cb25a0ea7ddb3d727f553f7fac05b7",
+            "f8889ca4d89fffd2594dba96817d75b01b23659aee262f67692e795d826586e4",
+            "c7894c47001d1e0e3ee641edfed64820a680456a476e3cd5a1d32c432e8e1648",
+            "34fe9e3771b1968589159eb1a3ad1dd4d959008e27a7629f43ca606e6529fc77",
+            "2ee98ffd581eb8cd35f5c811a2aff21028ec6a4584282799b442f10534b9114e",
+            "75580a888d8abc0032842866eb5135c0832e30dc1ff8262594fa914a3f8fa80a",
+            "a411b2fc2c6b7b4792edf2b82be45ae428b05259a44b3e0cee688ea0d713893e",
+            "6c5b4454c824e2d4db84a3cbdb253eb9be24d01e27febced69e9337fca619895",
+            "d13711dd55617dc9c3c55d7b52367ae865f0897f914ba208e09eb1f4df0713c0"
+          ]
+        }
+      ],
+      "profile": "release",
+      "scope": "Complete in-process SELECT JOIN with residual predicate, exact cosine ranking, deterministic tie breaker and LIMIT10. SQL parse caches warmed. Excludes fixture writes/index construction/result serialization; compares maintained right HASH index with per-query temporary hash construction in the same executor."
+    },
+    {
+      "compute": "cpu",
+      "phases": [
+        {
+          "all_results_identical": true,
+          "dimensions": 128,
+          "ephemeral": {
+            "median_us": 3631.0829999999996,
+            "p95_us": 3856.875,
+            "samples_us": [
+              3452.833,
+              3041.125,
+              3856.875,
+              3518.584,
+              3622.75,
+              3443.917,
+              3381.209,
+              3639.5,
+              3354.708,
+              3652.833,
+              3560.959,
+              3661.792,
+              3744.5,
+              3811.791,
+              3718.083,
+              3796.042,
+              3570.8340000000003,
+              3691.167,
+              3631.0829999999996,
+              3340.625
+            ]
+          },
+          "indexed": {
+            "median_us": 260.542,
+            "p95_us": 302.708,
+            "samples_us": [
+              278.291,
+              250.16699999999997,
+              230.375,
+              264.042,
+              240.083,
+              263.54200000000003,
+              248.792,
+              264.084,
+              235.375,
+              273.959,
+              246.04199999999997,
+              264.875,
+              244.54099999999997,
+              282.0,
+              245.417,
+              277.959,
+              245.125,
+              302.708,
+              233.167,
+              260.542
+            ]
+          },
+          "key_groups": 50000,
+          "metric": "cosine_distance",
+          "probe_keys": 64,
+          "repetitions": 20,
+          "result_limit": 10,
+          "right_rows": 50000,
+          "workload": "sparse_unique_keys",
+          "canonical_sha256_each_query": [
+            "6d2eb1199b82f5bcb5d00708caf6cef8fb6b8674882ead28fb164053d167ce6b",
+            "0653c73c1dfc9dfb734c997b2220245ca80d3662675d992ee507899cc932e132",
+            "2ab4a3aa827fab44c980c7c0144bf5b9119d42f685fbddd7878a50a71a1c131c",
+            "b96ed397e9fa5c46bde04c61dd0585edfc28a8a4127add5e4391afd6ce71dabf",
+            "8f8d39c294e47e5731041098f4533ea0b3180460a1c810136f6455fe651bd20f",
+            "b680b46c31454222c37c8e6d4fea02edc1083a6f6a53d3c6c4ae6e2e3e922c52",
+            "ccefdfbbf8cdc193e69443d0083971ac98bd066440df610db3aa1523c84f7311",
+            "4f4ae4d78dd55ed543e906b3bf9b92179debb8a2b6e47193f0adff18d3582bef",
+            "efe7d8e5a5ea7d04eec30bf4ec4f41aae09ad1424f648c82597d39ae01e0051f",
+            "2d1671b4d1064119426c5de224df07a51c119ff60b8c905b7263571d5fbff76d",
+            "578b00e63d777449001a6afc1f22bcb59b1c283e3254962e3bcdbf492b5edea4",
+            "023a0c6e6261cd07f2cd6568c9f103c676343a61255b244d0c52e1478a3f0aca",
+            "73d58c832a1d7b54830da0abc8d88cb01e5ec08ec7f08b19254406c14c551ddf",
+            "ced1396b9a90f842087ae54f825f2c3745674c9c1164556011ba5dca1065ec2a",
+            "13217173ce70fc3bcb0bb057238b435b6d673f4a9ad351aadf1df8aa408baaa8",
+            "167f65ba62a6dade32b23354ea6a3c8230db0340054b1b22f65d631ad853e720",
+            "e3a3f4a9a5e3d4d87e5fbc47b6c068cd7820f0161d597e3587611675be411ab9",
+            "a82fdd860dd348cfc92d828c58446ba75cc0baf1f8eeb38f0794e94d8e68fc40",
+            "e821db19909a405fd1d9b826136f34c15961eddd1cfc314b965045f1f9d8172b",
+            "03ba63f15094b74f8f92a6a77b4ff68a672f6db2ed7a8ba9445edd1d5b1cdf80"
+          ]
+        },
+        {
+          "all_results_identical": true,
+          "dimensions": 128,
+          "ephemeral": {
+            "median_us": 17619.375,
+            "p95_us": 18465.584,
+            "samples_us": [
+              17510.042,
+              17619.375,
+              17208.791,
+              17261.875,
+              18116.583,
+              17293.0,
+              17875.208,
+              18189.875,
+              17194.958,
+              17899.667,
+              18155.708,
+              17277.416,
+              17854.833,
+              18465.584,
+              17469.875,
+              17452.665999999997,
+              18057.125,
+              18044.833,
+              17550.333000000002,
+              17390.958000000002
+            ]
+          },
+          "indexed": {
+            "median_us": 16093.292,
+            "p95_us": 17406.042,
+            "samples_us": [
+              15533.167000000001,
+              15806.125,
+              15701.334,
+              16102.667000000001,
+              15773.542000000001,
+              15969.750000000002,
+              16268.375000000002,
+              17406.042,
+              16009.041000000001,
+              16093.292,
+              16201.208000000002,
+              15556.666000000001,
+              16016.208,
+              16635.0,
+              15373.417,
+              16396.083,
+              16894.5,
+              16176.166,
+              15556.75,
+              16125.666000000001
+            ]
+          },
+          "key_groups": 500,
+          "metric": "cosine_distance",
+          "probe_keys": 64,
+          "repetitions": 20,
+          "result_limit": 10,
+          "right_rows": 50000,
+          "workload": "one_to_many_keys",
+          "canonical_sha256_each_query": [
+            "16feda06bf6893eaa28d4bb0ad900769f0a6e3cb55888ef75fcdfbb9d2615f46",
+            "1d2e6b2d6f3ca1a105490864340cb8d29c0d8b14b858add4544d5414c88c7702",
+            "487b14a6dce743a8bf646a97f5c87007f46c8fde41ccf3d6a5ed4a5cc3c865b6",
+            "7193c27c4bad234b8cd0db98f99f61edd79857ef2f14e590422495486832c731",
+            "cd4e71a9f36cb5c251aba72cfbda451497e013b138640802fa69b129cd1625f8",
+            "886fe4cd7d43806b7b3cd5ef6504cbb9de81d39868e192ecc886997a5a9e4ad3",
+            "ea04a01555de5ac9339a53b87b09398db820be124c47a383d5c42fb4bd968da6",
+            "6c0c09d5a15d587ec52ba8bf47fb0887c847beb2dab758daca75710231453d4a",
+            "d665d49a212968c2675874514dce0ab3cd534e0e0093338fc53df7831a8b71da",
+            "c5f66cd17b493159acff48b09a8693b6eb5727c95877c593126f3e85ca65df9f",
+            "600fced6d5c7d7579a8f6f0c2a1216d1fec851b364be003e33b7d53a9da68b45",
+            "7d11fd32ac5a824f2e8ccbc05141b39f56cb25a0ea7ddb3d727f553f7fac05b7",
+            "f8889ca4d89fffd2594dba96817d75b01b23659aee262f67692e795d826586e4",
+            "c7894c47001d1e0e3ee641edfed64820a680456a476e3cd5a1d32c432e8e1648",
+            "34fe9e3771b1968589159eb1a3ad1dd4d959008e27a7629f43ca606e6529fc77",
+            "2ee98ffd581eb8cd35f5c811a2aff21028ec6a4584282799b442f10534b9114e",
+            "75580a888d8abc0032842866eb5135c0832e30dc1ff8262594fa914a3f8fa80a",
+            "a411b2fc2c6b7b4792edf2b82be45ae428b05259a44b3e0cee688ea0d713893e",
+            "6c5b4454c824e2d4db84a3cbdb253eb9be24d01e27febced69e9337fca619895",
+            "d13711dd55617dc9c3c55d7b52367ae865f0897f914ba208e09eb1f4df0713c0"
+          ]
+        }
+      ],
+      "profile": "release",
+      "scope": "Complete in-process SELECT JOIN with residual predicate, exact cosine ranking, deterministic tie breaker and LIMIT10. SQL parse caches warmed. Excludes fixture writes/index construction/result serialization; compares maintained right HASH index with per-query temporary hash construction in the same executor."
+    }
+  ]
+}

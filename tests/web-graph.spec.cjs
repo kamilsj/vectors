@@ -75,7 +75,7 @@ test("empty collections can be created without provider generation", async ({ pa
   await expect(page.locator("#graph-empty")).toBeVisible();
   await page.locator("#graph-create-open").click(); await page.locator("#graph-create-name").fill("research"); await page.locator("#graph-create-submit").click();
   await expect(page.locator("#graph-collection")).toHaveValue("research"); await expect(page.locator("#graph-status")).toContainText("Collection created");
-  expect(fixture.calls.find((call) => call.path === "/v1/graph/collections" && call.method === "POST").body).toEqual({ name: "research", semantic_neighbors: 3, semantic_threshold: .8 });
+  expect(fixture.calls.find((call) => call.path === "/v1/graph/collections" && call.method === "POST").body).toEqual({ name: "research", semantic_neighbors: 3, semantic_threshold: .8, document_columns: [] });
   expect(fixture.calls.filter((call) => call.method === "POST" && /\/embeddings$|\/documents$/.test(call.path))).toHaveLength(0);
 });
 

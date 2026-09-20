@@ -135,7 +135,9 @@ collections pin a provider/model/dimension profile.
 from vectors_sdk import Client
 
 with Client(timeout=120) as db:
-    db.create_collection("knowledge", semantic_neighbors=3, semantic_threshold=0.8)
+    db.create_collection("knowledge", semantic_neighbors=3, semantic_threshold=0.8,
+                         document_columns=[{"name": "team", "data_type": "TEXT",
+                                            "nullable": False}])
     graph = db.collection("knowledge")
     graph.ingest("storage-guide", "# Recovery\nCommitted writes are replayed from the WAL.",
                  title="Storage guide", source="handbook/storage.md",
@@ -193,6 +195,42 @@ The graph revision is **database-wide**. Serialize ingestion when loading a
 collection to avoid conflicts during embedding generation. A stale revision
 returns `APIError` with status 409 and code `stale_revision`. Refresh and
 reconcile before retrying; provider work may already have incurred usage.
+
+Declared document fields are canonical indexed SQL columns, merged into the
+metadata returned by document and retrieval APIs. `TEXT`, `INTEGER`, `DOUBLE`,
+and `BOOLEAN` fields support `nullable` and `unique`; missing nullable values
+become null. Metadata-only ingestion updates reuse vectors and chunk links and
+report `embeddings_reused: True` with zero provider token usage.
+
+## Relationships between tables
+
+Connect different kinds of data through matching scalar fields. For example,
+after creating `articles(product_id INTEGER, ...)` and `products(id INTEGER, ...)`:
+
+```python
+links = db.relationships()
+saved = db.create_relationship(
+    "article_product",
+    source_table="articles", source_column="product_id",
+    target_table="products", target_column="id",
+    expected_revision=links["revision"],
+)
+rows = db.execute("""
+    SELECT a.product_id, p.id
+    FROM articles a LEFT JOIN products p ON a.product_id = p.id
+    LIMIT 100
+""")[0]
+print(rows.to_dicts())
+db.delete_relationship("article_product", expected_revision=saved["revision"])
+```
+
+These methods also exist on `AsyncClient`. Creation atomically saves the
+definition and missing lookup indexes; deletion keeps records and indexes.
+Named links do not enforce foreign keys or automatically extend GraphRAG
+traversal. SQL currently supports one scalar equijoin between two tables, with
+INNER/LEFT semantics, scalar filters, vector scores, ordering, and limits;
+aggregate joins, multiple joins, and join explain plans remain unsupported.
+See [structured data and relationships](../docs/STRUCTURED_DATA.md).
 
 ## Async applications
 

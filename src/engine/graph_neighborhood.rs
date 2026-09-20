@@ -234,7 +234,7 @@ fn citation_node(
             title: text_at(document, 1)?.into(),
             source: text_at(document, 2)?.into(),
             text: text.into(),
-            metadata: json_at(document, 4)?,
+            metadata: document_metadata(document, &documents.columns)?,
             start_byte,
             end_byte,
             ordinal: usize_at(chunk, 2)?,

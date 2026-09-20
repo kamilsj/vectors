@@ -1,12 +1,12 @@
 //! Typed, bounded table administration for the browser console.
 
+use super::schema::{decode_columns, normalized_identifier, CreateColumn};
 use super::*;
 use std::collections::HashSet;
 
 const MAX_PAGE_ROWS: usize = 250;
 const DEFAULT_PAGE_ROWS: usize = 50;
 const MAX_ADMIN_COLUMNS: usize = 256;
-const MAX_IDENTIFIER_BYTES: usize = 128;
 
 pub(super) fn configure(config: &mut web::ServiceConfig) {
     config.service(
@@ -50,21 +50,6 @@ struct PageResponse {
 struct CreateTableRequest {
     name: String,
     columns: Vec<CreateColumn>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CreateColumn {
-    name: String,
-    data_type: String,
-    #[serde(default = "default_nullable")]
-    nullable: bool,
-    #[serde(default)]
-    unique: bool,
-}
-
-fn default_nullable() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,39 +146,19 @@ async fn create_table(
     authorize(&http_request, security.as_ref().map(|data| data.get_ref()))?;
     let request = request.into_inner();
     let name = normalized_identifier(&request.name)?;
-    if request.columns.is_empty() || request.columns.len() > MAX_ADMIN_COLUMNS {
-        return Err(ApiError::bad_request(
-            "invalid_columns",
-            format!("a table must contain between 1 and {MAX_ADMIN_COLUMNS} columns"),
-        ));
-    }
-    let mut names = HashSet::new();
-    let definitions = request
-        .columns
+    let columns = decode_columns(request.columns, 1, MAX_ADMIN_COLUMNS)?;
+    let definitions = columns
         .iter()
         .map(|column| {
-            let name = normalized_identifier(&column.name)?;
-            if !names.insert(name.clone()) {
-                return Err(ApiError::bad_request(
-                    "duplicate_column",
-                    format!("column '{name}' appears more than once"),
-                ));
-            }
-            let data_type = parse_admin_type(&column.data_type)?;
-            if column.unique && matches!(data_type, DataType::Vector(_)) {
-                return Err(ApiError::bad_request(
-                    "invalid_unique_column",
-                    "unique admin columns must have a scalar type",
-                ));
-            }
-            Ok(format!(
-                "{} {data_type}{}{}",
-                quote_identifier(&name),
+            format!(
+                "{} {}{}{}",
+                quote_identifier(&column.name),
+                column.data_type,
                 if column.nullable { "" } else { " NOT NULL" },
                 if column.unique { " UNIQUE" } else { "" }
-            ))
+            )
         })
-        .collect::<Result<Vec<_>, ApiError>>()?;
+        .collect::<Vec<_>>();
     let sql = format!(
         "CREATE TABLE {} ({})",
         quote_identifier(&name),
@@ -302,44 +267,6 @@ async fn drop_table(
     })
     .await?;
     Ok(web::Json(SqlResponse::from(results)))
-}
-
-fn normalized_identifier(name: &str) -> Result<String, ApiError> {
-    if name.trim().is_empty()
-        || name.len() > MAX_IDENTIFIER_BYTES
-        || name.chars().any(char::is_control)
-    {
-        return Err(ApiError::bad_request(
-            "invalid_name",
-            format!("names must contain 1–{MAX_IDENTIFIER_BYTES} bytes and no control characters"),
-        ));
-    }
-    Ok(name.to_ascii_lowercase())
-}
-
-fn parse_admin_type(value: &str) -> Result<DataType, ApiError> {
-    let value = value.trim().to_ascii_uppercase();
-    match value.as_str() {
-        "INTEGER" => return Ok(DataType::Integer),
-        "DOUBLE" => return Ok(DataType::Float),
-        "TEXT" => return Ok(DataType::Text),
-        "BOOLEAN" => return Ok(DataType::Boolean),
-        _ => {}
-    }
-    if let Some(dimensions) = value
-        .strip_prefix("VECTOR(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        if let Ok(dimensions) = dimensions.trim().parse::<usize>() {
-            if dimensions > 0 && dimensions <= crate::vector::MAX_VECTOR_DIMENSIONS {
-                return Ok(DataType::Vector(dimensions));
-            }
-        }
-    }
-    Err(ApiError::bad_request(
-        "invalid_data_type",
-        "data_type must be INTEGER, DOUBLE, TEXT, BOOLEAN, or VECTOR(n), with 1–65535 dimensions",
-    ))
 }
 
 fn mutation_schema(

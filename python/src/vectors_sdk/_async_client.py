@@ -146,6 +146,32 @@ class AsyncClient:
     async def indexes(self, table: str) -> dict[str, Any]:
         return await self._request("GET", f"v1/tables/{segment(table)}/indexes", retry=True)
 
+    async def relationships(self) -> dict[str, Any]:
+        """List named scalar links and the revision required to change them."""
+        return await self._request("GET", "v1/relationships", retry=True)
+
+    async def create_relationship(
+        self,
+        name: str,
+        *,
+        source_table: str,
+        source_column: str,
+        target_table: str,
+        target_column: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Link matching fields for SQL joins; this does not enforce a foreign key."""
+        return await self._request("POST", "v1/relationships", body={
+            "name": name, "source_table": source_table, "source_column": source_column,
+            "target_table": target_table, "target_column": target_column,
+            "expected_revision": expected_revision,
+        })
+
+    async def delete_relationship(self, name: str, *, expected_revision: int) -> dict[str, Any]:
+        """Remove a link definition while retaining records and scalar indexes."""
+        return await self._request("DELETE", f"v1/relationships/{segment(name)}",
+                             body={"expected_revision": expected_revision})
+
     async def embedding_settings(self) -> dict[str, Any]:
         return await self._request("GET", "v1/settings/embeddings", retry=True)
 
@@ -274,17 +300,22 @@ class AsyncClient:
         return await self._request("GET", "v1/graph/collections", retry=True)
 
     async def create_collection(
-        self, name: str, *, semantic_neighbors: int = 3, semantic_threshold: float = 0.8
+        self,
+        name: str,
+        *,
+        document_columns: Sequence[Mapping[str, Any]] | None = None,
+        semantic_neighbors: int = 3,
+        semantic_threshold: float = 0.8,
     ) -> dict[str, Any]:
-        return await self._request(
-            "POST",
-            "v1/graph/collections",
-            body={
-                "name": name,
-                "semantic_neighbors": semantic_neighbors,
-                "semantic_threshold": semantic_threshold,
-            },
-        )
+        """Create SQL-backed documents, chunks, and relationships with optional typed fields."""
+        body: dict[str, Any] = {
+            "name": name,
+            "semantic_neighbors": semantic_neighbors,
+            "semantic_threshold": semantic_threshold,
+        }
+        if document_columns is not None:
+            body["document_columns"] = [dict(column) for column in document_columns]
+        return await self._request("POST", "v1/graph/collections", body=body)
 
     def collection(self, name: str) -> AsyncCollection:
         """Return a local handle; no network request or implicit creation."""

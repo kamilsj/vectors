@@ -6,6 +6,18 @@ chunks documents, displays their relationships, and retrieves context with
 optional reranking; see the [GraphRAG guide](GRAPH_RAG.md). Data manages tables
 and rows. SQL keeps the full query editor available. Help contains the tutorial.
 
+**Data → Create** offers RAG collections and structured tables through a shared
+field editor. Collections accept optional typed document fields; the document
+form then shows those fields alongside title, source, and text. **View data**
+opens the underlying documents table, and **Open SQL** prepares a chunks/documents
+join. Metadata-only document edits reuse existing embeddings.
+
+The Data **Relationships** panel links matching scalar fields across tables,
+including collection document fields and ordinary business records. It manages
+named definitions with revision checks and opens their SQL joins. Removing a
+definition preserves records and indexes. See [structured data and
+relationships](STRUCTURED_DATA.md) for the HTTP endpoints and current SQL scope.
+
 ## Connect an embedding provider
 
 1. Open **Settings** and choose OpenAI or Voyage AI.

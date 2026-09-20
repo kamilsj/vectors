@@ -42,6 +42,7 @@ const state = {
   reranking: null,
   rerankingGeneration: 0,
   rerankingBusy: false,
+  relationships: { items: [], revision: null, generation: 0, schemaGeneration: 0, busy: false, loading: false, error: "", sourceSchema: [], targetSchema: [] },
   admin: { table: "", generation: 0, offset: 0, limit: 50, total: 0, revision: null, columns: [], schema: [], rows: [], selected: null, busy: false },
 };
 
@@ -425,6 +426,7 @@ function switchView(view) {
   if (view === "data") {
     populateAdminTables();
     if (state.admin.table && !state.admin.rows.length && !state.admin.busy) void loadAdminRows();
+    if (!state.relationships.busy) void loadRelationships();
   }
 }
 
@@ -961,6 +963,7 @@ function updateProviderNotes() {
   const note = settings && !settings.configured ? `${description}. Add an API key in Settings to use text search.` : description;
   $("#search-provider-note").textContent = note;
   $("#admin-provider-note").textContent = note;
+  updateGraphCreateProfile();
   const match = $("#search-vector-column").selectedOptions[0]?.dataset.type?.match(/VECTOR\((\d+)\)/);
   if (state.searchMode === "text" && match && settings && Number(match[1]) !== settings.dimensions) {
     $("#search-provider-note").textContent = `${description}. This column needs ${match[1]} dimensions; update Settings or choose another column.`;
@@ -1216,6 +1219,11 @@ function updateAdminButtons() {
   }
   $("#admin-row-json").readOnly = state.admin.busy;
   $("#admin-documents-json").readOnly = state.admin.busy;
+  const builder = fieldBuilders.get("admin-create-fields");
+  if (builder) syncFieldBuilder(builder);
+  $("#admin-create-name").disabled = state.admin.busy;
+  $("#admin-create-schema").disabled = state.admin.busy;
+  updateRelationshipControls();
 }
 
 async function selectAdminTable(tableName) {
@@ -1227,6 +1235,7 @@ async function selectAdminTable(tableName) {
   state.activeTable = tableName || null;
   $("#admin-table").value = tableName;
   renderTableList();
+  renderRelationships();
   $("#admin-tools").hidden = !tableName;
   updateAdminButtons();
   if (!tableName) {
@@ -1420,7 +1429,8 @@ async function adminMutation(action, { statusId = "admin-edit-status", closeDial
     if (closeDialog) $("#" + closeDialog).close();
     $("#" + statusId).textContent = message || "Saved.";
     toast(message || "Saved.");
-    void loadTables({ quiet: true, force: true });
+    await Promise.all([loadTables({ quiet: true, force: true }), loadRelationships()]);
+    if (session !== state.session) throw staleRequest();
     if (state.admin.table) await loadAdminRows();
     return true;
   } catch (error) {
@@ -1483,25 +1493,334 @@ async function deleteAdminRow(event) {
   }, { statusId: "admin-delete-status", closeDialog: "admin-delete-dialog" });
 }
 
+function relationshipPayload() {
+  return {
+    name: $("#relationship-name").value.trim().toLowerCase(),
+    source_table: $("#relationship-source-table").value, source_column: $("#relationship-source-column").value,
+    target_table: $("#relationship-target-table").value, target_column: $("#relationship-target-column").value,
+  };
+}
+
+function duplicateRelationship(payload) {
+  return state.relationships.items.some((item) => item.name.toLowerCase() === payload.name ||
+    ["source_table", "source_column", "target_table", "target_column"].every((key) => item[key] === payload[key]));
+}
+
+function updateRelationshipControls() {
+  const current = state.relationships;
+  const editable = Number.isSafeInteger(current.revision) && current.revision >= 0 && !current.loading && !current.error && !state.admin.busy && !state.graph.busy;
+  $("#relationship-new").disabled = current.busy || !editable || state.admin.busy || state.graph.busy;
+  $("#relationships-refresh").disabled = current.busy;
+  $$("#relationship-form input, #relationship-form select, #relationship-form button").forEach((control) => { control.disabled = current.busy; });
+  $("#relationship-source-column").disabled = current.busy || current.schemaLoading || !current.sourceSchema.length;
+  $("#relationship-target-column").disabled = current.busy || current.schemaLoading || !$("#relationship-source-column").value;
+  const payload = relationshipPayload();
+  const duplicate = Boolean(payload.name) && duplicateRelationship(payload);
+  $("#relationship-save").disabled = current.busy || !editable || current.schemaLoading || duplicate;
+  $$('[data-relationship-remove]').forEach((button) => { button.disabled = current.busy || !editable; });
+}
+
+function renderRelationships() {
+  const current = state.relationships;
+  const table = state.admin.table;
+  const items = current.items.filter((item) => !table || item.source_table === table || item.target_table === table);
+  const target = clear($("#relationship-list"));
+  for (const item of items) {
+    const card = node("article", "relationship-card"); card.dataset.relationshipName = item.name;
+    const description = node("div");
+    description.append(node("strong", "", item.name), node("p", "", `${item.source_table}.${item.source_column} → ${item.target_table}.${item.target_column}`));
+    description.append(node("small", item.valid === false ? "relationship-error" : "", item.valid === false ? item.error || "This relationship no longer matches its table structure." : `${item.data_type} · matching values`));
+    const actions = node("div", "inline-actions");
+    const sql = node("button", "button ghost compact", "Open SQL"); sql.type = "button"; sql.dataset.relationshipSql = "";
+    sql.disabled = item.valid === false;
+    sql.addEventListener("click", () => openRelationshipSql(item));
+    const remove = node("button", "button ghost compact", "Remove link"); remove.type = "button"; remove.dataset.relationshipRemove = "";
+    remove.addEventListener("click", () => void removeRelationship(item));
+    actions.append(sql, remove); card.append(description, actions); target.append(card);
+  }
+  if (!items.length && !current.error && !current.loading) target.append(node("p", "field-hint", table ? "No saved relationships for this table yet." : "Choose a table or connect two matching fields."));
+  $("#relationships-status").textContent = [current.error || (current.loading ? "Loading relationships…" : `${items.length} ${items.length === 1 ? "relationship" : "relationships"}${table ? ` involving ${table}` : " across your tables"}.`), current.notice].filter(Boolean).join(" ");
+  updateRelationshipControls();
+}
+
+async function loadRelationships() {
+  const current = state.relationships;
+  const generation = ++current.generation;
+  current.loading = true; renderRelationships();
+  try {
+    const result = await request("/v1/relationships");
+    if (generation !== state.relationships.generation) return false;
+    if (!Array.isArray(result.relationships) || result.relationships.length > 256 || result.relationships.some((item) => !item || ["name", "source_table", "source_column", "target_table", "target_column", "data_type"].some((key) => typeof item[key] !== "string")) || !Number.isSafeInteger(result.revision) || result.revision < 0) throw new Error("The server returned an invalid relationship catalog. Refresh before making changes.");
+    current.items = result.relationships; current.revision = result.revision; current.error = "";
+    return true;
+  } catch (error) {
+    if (generation === state.relationships.generation && !error.stale) {
+      current.revision = null;
+      current.error = error.status === 404 ? "Relationships are unavailable on this server. Update the server to enable them." : `${error.message} Previously loaded links are kept here; refresh before making changes.`;
+      if (error.status === 401) showError(error);
+    }
+    return false;
+  } finally {
+    if (generation === state.relationships.generation) { current.loading = false; renderRelationships(); }
+  }
+}
+
+function openRelationshipSql(item) {
+  const sql = `SELECT s.*, t.*\nFROM ${quoteIdentifier(item.source_table)} AS s\nLEFT JOIN ${quoteIdentifier(item.target_table)} AS t\n  ON s.${quoteIdentifier(item.source_column)} = t.${quoteIdentifier(item.target_column)}\nLIMIT 100;`;
+  setEditor(sql); switchView("console"); $("#sql-editor").focus();
+}
+
+function openRelationshipDialog() {
+  if (state.relationships.busy || state.relationships.error || !Number.isSafeInteger(state.relationships.revision)) return;
+  $("#relationship-form").reset();
+  const tables = state.tables.filter((table) => table.name !== "_vectors_relationships").map((table) => ({ id: table.name }));
+  fillOptions($("#relationship-source-table"), tables, state.admin.table, "Choose a table");
+  fillOptions($("#relationship-target-table"), tables, "", "Choose a table");
+  $("#relationship-status").textContent = "";
+  $("#relationship-dialog").showModal();
+  void loadRelationshipColumns(); $("#relationship-name").focus();
+}
+
+function updateRelationshipTargets(selected = $("#relationship-target-column").value) {
+  const current = state.relationships;
+  const source = current.sourceSchema.find((column) => column.name === $("#relationship-source-column").value);
+  const compatible = current.targetSchema.filter((column) => column.data_type === source?.data_type);
+  fillOptions($("#relationship-target-column"), compatible.map((column) => ({ id: column.name, label: `${column.name} · ${column.data_type}` })), selected, "Choose a matching field");
+  const payload = relationshipPayload();
+  $("#relationship-status").textContent = payload.name && duplicateRelationship(payload) ? "A relationship with this name or these endpoints already exists."
+    : source && $("#relationship-target-table").value && !compatible.length ? `The target table has no ${source.data_type} field. Choose another source field or target table.` : "";
+  updateRelationshipControls();
+}
+
+async function loadRelationshipColumns() {
+  const current = state.relationships;
+  const generation = ++current.schemaGeneration;
+  const source = $("#relationship-source-table").value; const target = $("#relationship-target-table").value;
+  const selected = $("#relationship-source-column").value;
+  const selectedTarget = $("#relationship-target-column").value;
+  current.schemaLoading = true; current.sourceSchema = []; current.targetSchema = [];
+  fillOptions($("#relationship-source-column"), [], "", "Loading fields…");
+  fillOptions($("#relationship-target-column"), [], "", "Choose a matching field");
+  updateRelationshipControls();
+  try {
+    const [sourceSchema, targetSchema] = await Promise.all([source ? loadSchema(source) : [], target ? loadSchema(target) : []]);
+    if (generation !== state.relationships.schemaGeneration || !$("#relationship-dialog").open) return;
+    const scalar = (column) => ["TEXT", "INTEGER", "DOUBLE", "BOOLEAN"].includes(column.data_type);
+    current.sourceSchema = sourceSchema.filter(scalar); current.targetSchema = targetSchema.filter(scalar);
+    fillOptions($("#relationship-source-column"), current.sourceSchema.map((column) => ({ id: column.name, label: `${column.name} · ${column.data_type}` })), selected, "Choose a scalar field");
+    updateRelationshipTargets(selectedTarget);
+  } catch (error) {
+    if (!error.stale && generation === state.relationships.schemaGeneration) {
+      $("#relationship-status").textContent = error.message; showError(error);
+    }
+  } finally {
+    if (generation === state.relationships.schemaGeneration) { current.schemaLoading = false; updateRelationshipControls(); }
+  }
+}
+
+async function relationshipMutation(action) {
+  const current = state.relationships;
+  if (current.busy) return;
+  const session = state.session;
+  current.busy = true; current.generation += 1; updateRelationshipControls();
+  try {
+    if (!Number.isSafeInteger(current.revision) || current.error || current.loading) throw new Error("Refresh relationships before making changes.");
+    const expectedRevision = current.revision;
+    const result = await action(expectedRevision);
+    if (session !== state.session) throw staleRequest();
+    // A link changes only its catalog and indexes. An exact pre-write row
+    // snapshot remains valid; older snapshots still need their conflict guard.
+    const admin = state.admin;
+    if (admin.table && admin.table !== "_vectors_relationships" && admin.revision === expectedRevision && Number.isSafeInteger(result?.revision) && result.revision > expectedRevision) {
+      admin.revision = result.revision;
+      if ($("#admin-status").textContent === `${admin.table} · revision ${expectedRevision}`) $("#admin-status").textContent = `${admin.table} · revision ${result.revision}`;
+      if (admin.selected?.revision === expectedRevision) {
+        admin.selected.revision = result.revision;
+        const key = admin.selected.key;
+        if (key) $("#admin-key-note").textContent = `Identified by ${key.column} = ${String(key.value)}. Changes use revision ${result.revision}.`;
+      }
+    }
+    await loadRelationships();
+    void loadTables({ quiet: true, force: true });
+  } catch (error) {
+    if (!error.stale) {
+      const message = error.code === "stale_revision" ? "The database changed. Your draft is preserved. Refresh links, review the latest values, then save again." : error.message;
+      $("#relationship-status").textContent = message;
+      current.error = message;
+      current.revision = null;
+      renderRelationships(); showError(error);
+    }
+  } finally {
+    if (session === state.session) { current.busy = false; updateRelationshipControls(); }
+  }
+}
+
+async function saveRelationship(event) {
+  event.preventDefault();
+  const payload = relationshipPayload();
+  try {
+    if (!/^[a-z][a-z0-9_]{0,47}$/.test(payload.name)) throw new Error("Use a relationship name with a lowercase letter first, then letters, digits, or underscores (up to 48 characters).");
+    const source = state.relationships.sourceSchema.find((column) => column.name === payload.source_column);
+    const target = state.relationships.targetSchema.find((column) => column.name === payload.target_column);
+    if (state.relationships.schemaLoading || !payload.source_table || !payload.target_table || !source || !target || source.data_type !== target.data_type) throw new Error("Choose source and target fields with the same scalar type.");
+    if (duplicateRelationship(payload)) throw new Error("A relationship with this name or these endpoints already exists.");
+  } catch (error) { $("#relationship-status").textContent = error.message; return; }
+  await relationshipMutation(async (revision) => {
+    $("#relationship-status").textContent = "Saving relationship…";
+    const result = await request("/v1/relationships", { method: "POST", body: JSON.stringify({ ...payload, expected_revision: revision }) });
+    $("#relationship-dialog").close(); toast("Relationship saved. Open SQL to explore matching records.");
+    return result;
+  });
+}
+
+async function removeRelationship(item) {
+  await relationshipMutation(async (revision) => {
+    const result = await request(`/v1/relationships/${encodeURIComponent(item.name)}`, { method: "DELETE", body: JSON.stringify({ expected_revision: revision }) });
+    toast("Link removed. The source and target records are unchanged.");
+    return result;
+  });
+}
+
+function resetRelationshipsSession() {
+  const previous = state.relationships;
+  state.relationships = { items: [], revision: null, generation: previous.generation + 1, schemaGeneration: previous.schemaGeneration + 1,
+    busy: false, loading: false, error: "", sourceSchema: [], targetSchema: [],
+    notice: previous.busy ? "The connection changed during a relationship request. It may still finish on the server; refresh and check before repeating it." : "" };
+  $("#relationship-dialog").close(); $("#relationship-form").reset();
+  fillOptions($("#relationship-source-table"), [], "", "Choose a table");
+  fillOptions($("#relationship-target-table"), [], "", "Choose a table");
+  fillOptions($("#relationship-source-column"), [], "", "Choose a scalar field");
+  fillOptions($("#relationship-target-column"), [], "", "Choose a matching field");
+  $("#relationship-status").textContent = "";
+  renderRelationships();
+}
+
+const DOCUMENT_FIELD_RESERVED = new Set(["document_id", "title", "source", "text", "metadata", "chunking", "chunk_fingerprint"]);
+const fieldBuilders = new Map();
+let fieldRowId = 0;
+
+function validateFieldDefinitions(columns, { documentFields = false } = {}) {
+  const maximum = documentFields ? 32 : 256;
+  if (!Array.isArray(columns) || columns.length > maximum || (!documentFields && !columns.length)) {
+    throw new Error(`Choose ${documentFields ? "up to" : "between 1 and"} ${maximum} fields.`);
+  }
+  const names = new Set();
+  return columns.map((column) => {
+    if (!column || typeof column !== "object" || Array.isArray(column)) throw new Error("Every field must have a name and type.");
+    const name = typeof column.name === "string" ? column.name.trim().toLowerCase() : "";
+    if (!name || /[\u0000-\u001f\u007f]/.test(name) || new TextEncoder().encode(name).length > 128) throw new Error("Field names must contain 1–128 bytes without control characters.");
+    if (documentFields && !/^[a-z][a-z0-9_]{0,47}$/.test(name)) throw new Error("Document field names need a letter first, then lowercase letters, digits, or underscores (up to 48 characters).");
+    if (documentFields && DOCUMENT_FIELD_RESERVED.has(name)) throw new Error(`${name} is reserved for the document. Choose another field name.`);
+    if (names.has(name)) throw new Error(`Duplicate field name: ${name}. Field names are case-insensitive.`);
+    names.add(name);
+    const data_type = typeof column.data_type === "string" ? column.data_type.trim().toUpperCase() : "";
+    const vector = /^VECTOR\((\d+)\)$/.exec(data_type);
+    if (!["TEXT", "INTEGER", "DOUBLE", "BOOLEAN"].includes(data_type) && (!vector || documentFields)) throw new Error(`${name} needs a ${documentFields ? "scalar " : ""}field type: TEXT, INTEGER, DOUBLE, or BOOLEAN${documentFields ? "." : ", or VECTOR(n)."}`);
+    if (vector && (Number(vector[1]) < 1 || Number(vector[1]) > 65535)) throw new Error("Vector dimensions must be between 1 and 65,535.");
+    if (column.nullable !== undefined && typeof column.nullable !== "boolean") throw new Error(`${name}: nullable must be true or false.`);
+    if (column.unique !== undefined && typeof column.unique !== "boolean") throw new Error(`${name}: unique must be true or false.`);
+    const nullable = column.nullable ?? true;
+    const unique = column.unique ?? false;
+    if (vector && unique) throw new Error(`${name}: vector fields cannot be unique.`);
+    return { name, data_type: vector ? `VECTOR(${Number(vector[1])})` : data_type, nullable, unique };
+  });
+}
+
+function mountFieldBuilder(id, columns = [], { documentFields = false } = {}) {
+  const target = clear($("#" + id));
+  const rows = node("div", "field-builder-rows");
+  const empty = node("p", "field-hint", "No extra fields. You can store documents with their title, source, and text.");
+  const add = node("button", "button ghost compact", "Add field");
+  add.type = "button"; add.id = `${id}-add`;
+  const builder = { id, target, rows, empty, add, documentFields };
+  fieldBuilders.set(id, builder);
+  target.append(rows, empty, add);
+  add.addEventListener("click", () => { addFieldRow(builder); target.dataset.dirty = "true"; });
+  for (const column of columns) addFieldRow(builder, column);
+  syncFieldBuilder(builder);
+}
+
+function addFieldRow(builder, column = { name: "", data_type: "TEXT", nullable: true, unique: false }) {
+  const row = node("div", "field-builder-row"); row.dataset.fieldRow = "";
+  const number = ++fieldRowId;
+  const name = node("input"); name.type = "text"; name.value = column.name; name.maxLength = builder.documentFields ? 48 : 128; name.placeholder = "e.g. category"; name.dataset.fieldName = "";
+  const type = node("select"); type.dataset.fieldType = "";
+  for (const choice of ["TEXT", "INTEGER", "DOUBLE", "BOOLEAN", ...(builder.documentFields ? [] : ["VECTOR"])]) {
+    const option = node("option", "", choice); option.value = choice; type.append(option);
+  }
+  const vector = /^VECTOR\((\d+)\)$/.exec(column.data_type);
+  type.value = vector ? "VECTOR" : column.data_type;
+  const dimensions = node("input"); dimensions.type = "number"; dimensions.min = "1"; dimensions.max = "65535"; dimensions.value = vector?.[1] || state.embeddings?.dimensions || 1536; dimensions.dataset.fieldDimensions = "";
+  if (builder.id === "admin-create-fields" && column.name === "embedding") dimensions.id = "admin-create-dimensions";
+  const required = node("input"); required.type = "checkbox"; required.checked = !column.nullable; required.dataset.fieldRequired = "";
+  const unique = node("input"); unique.type = "checkbox"; unique.checked = column.unique; unique.dataset.fieldUnique = "";
+  const controlLabel = (text, control, className = "") => {
+    const label = node("label", className, text);
+    control.id ||= `${builder.id}-${number}-${text.replaceAll(" ", "-").toLowerCase()}`;
+    label.htmlFor = control.id; label.append(control); return label;
+  };
+  const dimensionLabel = controlLabel("Vector dimensions", dimensions, "field-dimensions");
+  const checks = node("div", "field-builder-checks"); checks.append(controlLabel("Required", required), controlLabel("Unique", unique));
+  const remove = node("button", "icon-button field-remove", "×"); remove.type = "button"; remove.dataset.fieldRemove = ""; remove.setAttribute("aria-label", "Remove field");
+  remove.addEventListener("click", () => { row.remove(); builder.target.dataset.dirty = "true"; syncFieldBuilder(builder); });
+  row.append(controlLabel("Field name", name), controlLabel("Type", type), dimensionLabel, checks, remove);
+  row.addEventListener("input", () => { builder.target.dataset.dirty = "true"; });
+  type.addEventListener("change", () => { if (type.value === "VECTOR") unique.checked = false; syncFieldBuilder(builder); });
+  builder.rows.append(row); syncFieldBuilder(builder);
+}
+
+function syncFieldBuilder(builder) {
+  const busy = builder.documentFields ? state.graph.busy : state.admin.busy;
+  const rows = $$('[data-field-row]', builder.rows);
+  builder.empty.hidden = rows.length > 0 || !builder.documentFields;
+  builder.add.disabled = busy || rows.length >= (builder.documentFields ? 32 : 256);
+  for (const row of rows) {
+    $$("input, select, button", row).forEach((element) => { element.disabled = busy; });
+    const vector = $('[data-field-type]', row).value === "VECTOR";
+    $(".field-dimensions", row).hidden = !vector;
+    $('[data-field-dimensions]', row).disabled = busy || !vector;
+    $('[data-field-unique]', row).disabled = busy || vector;
+  }
+}
+
+function readFieldBuilder(id) {
+  const builder = fieldBuilders.get(id);
+  const columns = $$('[data-field-row]', builder.rows).map((row) => {
+    const type = $('[data-field-type]', row).value;
+    return { name: $('[data-field-name]', row).value, data_type: type === "VECTOR" ? `VECTOR(${$('[data-field-dimensions]', row).value})` : type,
+      nullable: !$('[data-field-required]', row).checked, unique: $('[data-field-unique]', row).checked };
+  });
+  return validateFieldDefinitions(columns, builder);
+}
+
+function openCreateTable() {
+  if (state.admin.busy || state.graph.busy) return;
+  $("#data-create-dialog").close();
+  $("#admin-create-status").textContent = "";
+  if (!fieldBuilders.has("admin-create-fields")) {
+    mountFieldBuilder("admin-create-fields", [
+      { name: "id", data_type: "INTEGER", nullable: false, unique: true },
+      { name: "title", data_type: "TEXT", nullable: true, unique: false },
+      { name: "content", data_type: "TEXT", nullable: false, unique: false },
+      { name: "embedding", data_type: `VECTOR(${state.embeddings?.dimensions || 1536})`, nullable: true, unique: false },
+    ]);
+  }
+  $("#admin-create-dialog").showModal();
+  $("#admin-create-name").focus();
+}
+
 async function createAdminTable(event) {
   event.preventDefault();
   if (state.admin.busy) return;
   const created = await adminMutation(async () => {
     const name = $("#admin-create-name").value.trim().toLowerCase();
     if (!name || new TextEncoder().encode(name).length > 128) throw new Error("Enter a table name of at most 128 bytes.");
-    const dimensions = Number($("#admin-create-dimensions").value);
     let columns;
     if ($("#admin-create-schema").value.trim()) {
       try { columns = JSON.parse($("#admin-create-schema").value); } catch { throw new Error("Enter valid JSON for the custom schema."); }
-      if (!Array.isArray(columns) || !columns.length || columns.length > 256) throw new Error("Custom schema must contain between 1 and 256 column objects.");
+      columns = validateFieldDefinitions(columns);
     } else {
-      if (!Number.isInteger(dimensions) || dimensions < 1 || dimensions > 65535) throw new Error("Vector dimensions must be between 1 and 65,535.");
-      columns = [
-        { name: "id", data_type: "INTEGER", nullable: false, unique: true },
-        { name: "title", data_type: "TEXT", nullable: true, unique: false },
-        { name: "content", data_type: "TEXT", nullable: false, unique: false },
-        { name: "embedding", data_type: `VECTOR(${dimensions})`, nullable: true, unique: false },
-      ];
+      columns = readFieldBuilder("admin-create-fields");
     }
     await request("/v1/admin/tables", { method: "POST", body: JSON.stringify({ name, columns }) });
     state.admin.table = name;
@@ -1596,6 +1915,134 @@ function graphProfileNote() {
   $("#graph-profile").textContent = collection
     ? `${embeddingDescription(collection.config.profile)} · fixed collection profile`
     : "Collections keep a fixed embedding model for documents and questions.";
+  for (const id of ["graph-view-data", "graph-open-sql", "graph-add-open"]) $("#" + id).disabled = !collection || state.graph.busy;
+}
+
+function updateGraphCreateProfile() {
+  const settings = state.embeddings;
+  $("#graph-create-profile").textContent = settings
+    ? `${embeddingDescription(settings)} · ${settings.configured ? "provider ready" : "API key needed before embedding"}`
+    : "Embedding settings unavailable. Open Settings before creating a collection.";
+}
+
+function openCreateCollection() {
+  if (state.graph.busy || state.admin.busy) return;
+  $("#data-create-dialog").close();
+  $("#graph-create-status").textContent = "";
+  updateGraphCreateProfile();
+  if (!fieldBuilders.has("graph-create-fields")) mountFieldBuilder("graph-create-fields", [], { documentFields: true });
+  $("#graph-create-dialog").showModal();
+  $("#graph-create-name").focus();
+}
+
+function graphDocumentColumns() {
+  return validateFieldDefinitions(graphCollection()?.document_columns || [], { documentFields: true });
+}
+
+function renderGraphDocumentFields({ reset = false } = {}) {
+  const target = $("#graph-document-fields");
+  let columns;
+  try { columns = graphDocumentColumns(); }
+  catch (error) {
+    clear(target); target.dataset.owner = "";
+    $("#graph-document-fields-panel").hidden = false;
+    target.append(node("p", "inline-status", `Document fields could not be loaded: ${error.message}`));
+    return;
+  }
+  const owner = JSON.stringify([state.graph.collection, columns]);
+  if (!reset && target.dataset.owner === owner) return;
+  clear(target); target.dataset.owner = owner;
+  $("#graph-document-fields-panel").hidden = !columns.length;
+  for (const column of columns) {
+    const item = node("div", "document-field");
+    const label = node("label", "", column.name);
+    const hint = node("small", "", `${column.data_type.toLowerCase()} · ${column.nullable ? "optional" : "required"}${column.unique ? " · unique" : ""}`);
+    const input = node(column.data_type === "BOOLEAN" ? "select" : "input");
+    input.dataset.documentField = column.name;
+    input.id = `graph-document-field-${column.name}`;
+    label.htmlFor = input.id;
+    if (column.data_type === "BOOLEAN") {
+      fillOptions(input, [{ id: "true", label: "True" }, { id: "false", label: "False" }], "", column.nullable ? "No value" : "Choose true or false");
+    } else {
+      input.type = column.data_type === "TEXT" ? "text" : "number";
+      if (input.type === "number") input.step = column.data_type === "INTEGER" ? "1" : "any";
+    }
+    input.required = !column.nullable;
+    label.append(hint, input); item.append(label);
+    if (column.nullable) {
+      const empty = node("label", "document-null", "No value (null)");
+      const checkbox = node("input"); checkbox.type = "checkbox"; checkbox.dataset.documentNull = column.name;
+      checkbox.addEventListener("change", syncGraphDocumentFields);
+      empty.prepend(checkbox); item.append(empty);
+    }
+    target.append(item);
+  }
+  syncGraphDocumentFields();
+}
+
+function syncGraphDocumentFields() {
+  for (const input of $$('[data-document-field]')) {
+    const nullControl = $$('[data-document-null]').find((element) => element.dataset.documentNull === input.dataset.documentField);
+    input.disabled = state.graph.busy || Boolean(nullControl?.checked);
+    if (nullControl) nullControl.disabled = state.graph.busy;
+  }
+}
+
+function readGraphDocumentFields() {
+  const target = $("#graph-document-fields");
+  const columns = graphDocumentColumns();
+  if (target.dataset.owner !== JSON.stringify([state.graph.collection, columns])) throw new Error("Reload this collection before editing its document fields.");
+  return Object.fromEntries(columns.map((column) => {
+    const input = $$('[data-document-field]', target).find((element) => element.dataset.documentField === column.name);
+    const nullControl = $$('[data-document-null]', target).find((element) => element.dataset.documentNull === column.name);
+    if (!input) throw new Error("Reload this collection to load its document fields.");
+    const raw = input.value;
+    if (!nullControl?.checked && input.validity.badInput) throw new Error(`${column.name} must be a valid number, or explicitly choose no value.`);
+    if (nullControl?.checked || !raw.trim()) {
+      if (!column.nullable) throw new Error(`${column.name} is required.`);
+      return [column.name, null];
+    }
+    let value = raw;
+    if (column.data_type === "BOOLEAN") {
+      if (!["true", "false"].includes(raw)) throw new Error(`${column.name} must be true or false.`);
+      value = raw === "true";
+    } else if (column.data_type === "INTEGER" || column.data_type === "DOUBLE") {
+      value = Number(raw);
+      if (!Number.isFinite(value)) throw new Error(`${column.name} must be a finite number.`);
+      if (column.data_type === "INTEGER" && (!/^[+-]?\d+$/.test(raw) || !Number.isSafeInteger(value))) throw new Error(`${column.name} must be an integer represented exactly by this browser (at most 9,007,199,254,740,991 in magnitude).`);
+    }
+    return [column.name, value];
+  }));
+}
+
+function graphTableName(collection, kind) {
+  return collection.tables?.[kind] || `graph_${collection.config.name}_${kind}`;
+}
+
+async function viewGraphData() {
+  const collection = graphCollection();
+  if (!collection || state.graph.busy || state.admin.busy) return;
+  const session = state.session;
+  const name = collection.config.name;
+  await loadTables({ quiet: true, force: true });
+  if (session !== state.session || name !== state.graph.collection || state.graph.busy || state.admin.busy) return;
+  const table = graphTableName(collection, "documents");
+  switchView("data");
+  await selectAdminTable(table);
+}
+
+function openGraphSql() {
+  const collection = graphCollection();
+  if (!collection || state.graph.busy) return;
+  const fields = graphDocumentColumns();
+  const qualified = (alias, name) => `${alias}.${quoteIdentifier(name)}`;
+  const columns = [qualified("c", "chunk_id"), qualified("d", "document_id"), qualified("d", "title"), ...fields.map((column) => qualified("d", column.name)), qualified("c", "text")];
+  const first = fields[0];
+  const filter = first ? `-- Optional scalar filter before LIMIT:\n-- WHERE ${qualified("d", first.name)} = ${{ TEXT: "'value'", INTEGER: "0", DOUBLE: "0.0", BOOLEAN: "TRUE" }[first.data_type]}\n` : "";
+  const sql = `SELECT ${columns.join(",\n       ")}\nFROM ${quoteIdentifier(graphTableName(collection, "chunks"))} AS c\nJOIN ${quoteIdentifier(graphTableName(collection, "documents"))} AS d\n  ON c.${quoteIdentifier("document_id")} = d.${quoteIdentifier("document_id")}\n${filter}-- Optional vector ranking before LIMIT:\n-- ORDER BY cosine_distance(c.${quoteIdentifier("embedding")}, ARRAY[...])\n-- Replace ... with ${Number(collection.config.profile.dimensions)} values from this collection's embedding model.\nLIMIT 100;`;
+  setEditor(sql);
+  switchView("console");
+  $("#sql-editor").focus();
 }
 function graphRevision() {
   if (state.graph.loading) throw new Error("Wait for the current graph to finish loading before making changes.");
@@ -1612,8 +2059,11 @@ function graphError(error, status = "graph-status") {
 function setGraphBusy(busy) {
   state.graph.busy = busy;
   if (busy) { if (!state.graph.loading) state.graph.generation += 1; state.graph.catalogGeneration += 1; }
-  for (const element of $$("#graph-document-form input, #graph-document-form textarea, #graph-document-form button, #graph-relationship-form input, #graph-relationship-form select, #graph-relationship-form button, #graph-create-form input, #graph-create-form button, [data-remove-relationship]")) element.disabled = busy;
+  for (const element of $$("#graph-document-form input, #graph-document-form select, #graph-document-form textarea, #graph-document-form button, #graph-relationship-form input, #graph-relationship-form select, #graph-relationship-form button, #graph-create-form input, #graph-create-form select, #graph-create-form button, [data-remove-relationship]")) element.disabled = busy;
   for (const id of ["graph-collection", "graph-refresh", "graph-create-open", "graph-add-open"]) $("#" + id).disabled = busy;
+  const builder = fieldBuilders.get("graph-create-fields");
+  if (builder) syncFieldBuilder(builder);
+  syncGraphDocumentFields(); graphProfileNote();
   updateGraphPaging();
 }
 function updateGraphPaging() {
@@ -1640,6 +2090,7 @@ async function loadGraphCollections(preferred = null) {
     if (selected !== graph.collection) await selectGraphCollection(selected);
     else {
       graphProfileNote();
+      renderGraphDocumentFields();
       if (selected) await loadGraph();
       else renderGraph();
     }
@@ -1648,6 +2099,7 @@ async function loadGraphCollections(preferred = null) {
 async function selectGraphCollection(name) {
   if (state.graph.busy) return;
   const graph = state.graph;
+  graph.catalogGeneration += 1;
   graph.collection = name;
   graph.generation += 1;
   graph.searchGeneration += 1;
@@ -1661,7 +2113,7 @@ async function selectGraphCollection(name) {
   $("#graph-document-status").textContent = "";
   clear($("#graph-chunk-preview"));
   clear($("#graph-search-results")).append(node("p", "empty-workspace", "Retrieved passages and their source citations will appear here."));
-  graphProfileNote(); renderGraph(); renderGraphDetails(); updateGraphPaging();
+  graphProfileNote(); renderGraphDocumentFields({ reset: true }); renderGraph(); renderGraphDetails(); updateGraphPaging();
   if (name) await loadGraph();
 }
 async function loadGraph() {
@@ -2001,14 +2453,27 @@ async function createGraphCollection(event) {
   return graphMutation(async () => {
     const name = $("#graph-create-name").value.trim();
     if (!/^[a-z][a-z0-9_]{0,47}$/.test(name)) throw new Error("Use a lowercase collection name with letters, digits, and underscores.");
-    const result = await request("/v1/graph/collections", { method: "POST", body: JSON.stringify({ name, semantic_neighbors: Number($("#graph-create-neighbors").value), semantic_threshold: Number($("#graph-create-threshold").value) }) });
+    const document_columns = readFieldBuilder("graph-create-fields");
+    const semantic_neighbors = Number($("#graph-create-neighbors").value);
+    const semantic_threshold = Number($("#graph-create-threshold").value);
+    if (!$("#graph-create-neighbors").value.trim() || !$("#graph-create-threshold").value.trim() || !Number.isInteger(semantic_neighbors) || semantic_neighbors < 0 || semantic_neighbors > 16 || !Number.isFinite(semantic_threshold) || semantic_threshold < 0 || semantic_threshold > 1) throw new Error("Automatic links need 0–16 neighbors and a cosine threshold between 0 and 1.");
+    const session = state.session;
+    const result = await request("/v1/graph/collections", { method: "POST", body: JSON.stringify({ name, semantic_neighbors, semantic_threshold, document_columns }) });
     $("#graph-create-dialog").close();
+    state.graph.collections = [...state.graph.collections.filter((item) => item.config.name !== result.config.name), result];
     state.graph.collection = result.config.name;
+    state.graph.revision = result.revision;
     state.graph.mode = "pages"; state.graph.rootChunk = null; state.graph.rootLabel = ""; state.graph.pageSelection = null;
     state.graph.nodes = []; state.graph.edges = []; state.graph.selected = null; state.graph.offset = 0;
+    renderGraphDocumentFields({ reset: true });
+    switchView("connections");
     await loadGraphCollections(result.config.name);
+    if (session !== state.session) throw staleRequest();
+    await loadTables({ quiet: true, force: true });
+    if (session !== state.session) throw staleRequest();
     $("#graph-status").textContent = "Collection created. Add your first document to connect its passages.";
     $("#graph-document-panel").open = true;
+    $("#graph-document-id").focus();
   }, "graph-create-status");
 }
 function graphDocumentInput() {
@@ -2016,7 +2481,7 @@ function graphDocumentInput() {
   if (!text.trim()) throw new Error("Paste document text first.");
   if (new TextEncoder().encode(text).length > 1048576) throw new Error("Document text exceeds 1 MiB. Split it into smaller documents.");
   const chunking = { max_characters: Number($("#graph-chunk-size").value), overlap_characters: Number($("#graph-chunk-overlap").value), max_chunks: Number($("#graph-chunk-count").value) };
-  if (chunking.overlap_characters >= chunking.max_characters) throw new Error("Overlap must be smaller than the chunk size.");
+  if (!Number.isInteger(chunking.max_characters) || chunking.max_characters < 1 || chunking.max_characters > 8000 || !Number.isInteger(chunking.overlap_characters) || chunking.overlap_characters < 0 || chunking.overlap_characters >= chunking.max_characters || !Number.isInteger(chunking.max_chunks) || chunking.max_chunks < 1 || chunking.max_chunks > 256) throw new Error("Use 1–8,000 characters per chunk, a smaller nonnegative overlap, and 1–256 chunks.");
   return { text, title: $("#graph-document-title").value, chunking };
 }
 async function previewGraphDocument() {
@@ -2046,13 +2511,21 @@ async function requireGraphProfile() {
 async function saveGraphDocument(event) {
   event.preventDefault();
   return graphMutation(async () => {
-    const payload = { ...graphDocumentInput(), id: $("#graph-document-id").value.trim(), source: $("#graph-document-source").value, expected_revision: graphRevision() };
+    const name = state.graph.collection;
+    const session = state.session;
+    if (!graphCollection()) throw new Error("Choose a collection first.");
+    const payload = { ...graphDocumentInput(), id: $("#graph-document-id").value.trim(), source: $("#graph-document-source").value, metadata: readGraphDocumentFields(), expected_revision: graphRevision() };
     if (!payload.id) throw new Error("Enter a stable document ID.");
-    const config = await requireGraphProfile();
-    $("#graph-document-status").textContent = `Generating document embeddings with ${config.model}…`;
-    const result = await request(graphPath("/documents"), { method: "POST", timeout: (config.timeout_seconds + 15) * 1000, body: JSON.stringify(payload) });
+    // The server decides whether text changed. Metadata-only saves and intact
+    // replays need no provider key, so do not block them with query preflight.
+    const config = state.embeddings || await loadEmbeddingSettings().catch((error) => { if (error.stale) throw error; return null; });
+    if (session !== state.session || name !== state.graph.collection) throw staleRequest();
+    $("#graph-document-status").textContent = "Saving document… New or changed text will be embedded; unchanged text reuses its existing vectors.";
+    const result = await request(graphPath("/documents"), { method: "POST", timeout: ((config?.timeout_seconds || 120) + 15) * 1000, body: JSON.stringify(payload) });
     await loadGraph();
+    if (session !== state.session || name !== state.graph.collection) throw staleRequest();
     $("#graph-document-status").textContent = result.unchanged ? "Document unchanged. Its existing embeddings were reused."
+      : result.embeddings_reused ? "Fields updated. Existing embeddings and relationships reused."
       : `${result.replaced ? "Replaced" : "Saved"} document · ${result.chunks} chunks · ${result.edges_created} relationships · ${result.embedding_usage?.total_tokens ?? 0} embedding tokens.`;
     void loadTables({ quiet: true });
   }, "graph-document-status");
@@ -2254,7 +2727,10 @@ function bindGraphEvents() {
   });
   $("#graph-collection").addEventListener("change", (event) => void selectGraphCollection(event.target.value));
   $("#graph-refresh").addEventListener("click", () => { if (!state.graph.busy) { state.graph.notice = ""; void loadGraphCollections(); } });
-  $("#graph-create-open").addEventListener("click", () => { $("#graph-create-status").textContent = ""; $("#graph-create-profile").textContent = embeddingDescription(state.embeddings); $("#graph-create-dialog").showModal(); });
+  $("#graph-create-open").addEventListener("click", openCreateCollection);
+  $("#graph-create-settings").addEventListener("click", () => { $("#graph-create-dialog").close(); switchView("settings"); });
+  $("#graph-view-data").addEventListener("click", () => void viewGraphData());
+  $("#graph-open-sql").addEventListener("click", () => { try { openGraphSql(); } catch (error) { graphError(error); } });
   $("#graph-create-form").addEventListener("submit", createGraphCollection);
   $("#graph-add-open").addEventListener("click", () => { $("#graph-document-panel").open = true; $("#graph-document-id").focus(); $("#graph-document-panel").scrollIntoView({ behavior: "smooth", block: "start" }); });
   $("#graph-document-form").addEventListener("submit", saveGraphDocument);
@@ -2305,6 +2781,11 @@ function resetGraphSession() {
   $("#graph-document-form").reset(); $("#graph-search-form").reset(); $("#graph-create-form").reset(); $("#graph-neighborhood-controls").reset();
   updateGraphSeedBudget();
   $("#graph-create-dialog").close();
+  $("#data-create-dialog").close(); $("#admin-create-dialog").close();
+  fieldBuilders.delete("admin-create-fields"); clear($("#admin-create-fields"));
+  $("#admin-create-form").reset();
+  mountFieldBuilder("graph-create-fields", [], { documentFields: true });
+  renderGraphDocumentFields({ reset: true });
   fillOptions($("#graph-collection"), [], null, "Choose a collection");
   for (const id of ["graph-chunk-preview", "graph-search-results"]) clear($("#" + id));
   for (const id of ["graph-document-status", "graph-search-status", "graph-create-status"]) $("#" + id).textContent = "";
@@ -2343,11 +2824,24 @@ function bindWorkspaceEvents() {
   $("#admin-embed-insert").addEventListener("click", embedAndInsertDocuments);
   $("#admin-clear-documents").addEventListener("click", () => { if (!state.admin.busy) { $("#admin-documents-json").value = ""; $("#admin-ingest-status").textContent = ""; } });
   $("#admin-new-table").addEventListener("click", () => {
-    $("#admin-create-status").textContent = "";
-    $("#admin-create-dimensions").value = state.embeddings?.dimensions || 1536;
-    $("#admin-create-dialog").showModal();
+    if (state.admin.busy || state.graph.busy) return;
+    $("#data-create-dialog").showModal();
   });
+  $("#data-create-collection").addEventListener("click", openCreateCollection);
+  $("#data-create-table").addEventListener("click", openCreateTable);
   $("#admin-create-form").addEventListener("submit", createAdminTable);
+  $("#relationship-new").addEventListener("click", openRelationshipDialog);
+  $("#relationships-refresh").addEventListener("click", () => { state.relationships.notice = ""; void loadRelationships(); });
+  $("#relationship-dialog-refresh").addEventListener("click", async () => {
+    if (state.relationships.busy) return;
+    const session = state.session;
+    if (await loadRelationships() && session === state.session && $("#relationship-dialog").open) { invalidateSchemas(); await loadRelationshipColumns(); }
+  });
+  $("#relationship-form").addEventListener("submit", saveRelationship);
+  $("#relationship-dialog").addEventListener("close", () => { state.relationships.schemaGeneration += 1; });
+  for (const id of ["relationship-source-table", "relationship-target-table"]) $("#" + id).addEventListener("change", () => void loadRelationshipColumns());
+  for (const id of ["relationship-source-column", "relationship-target-column"]) $("#" + id).addEventListener("change", () => updateRelationshipTargets());
+  $("#relationship-name").addEventListener("input", () => updateRelationshipTargets());
   $("#admin-drop-table").addEventListener("click", openDropTable);
   $("#admin-drop-confirm").addEventListener("input", () => { $("#admin-drop-submit").disabled = $("#admin-drop-confirm").value !== state.admin.dropTarget?.table; });
   $("#admin-drop-form").addEventListener("submit", dropAdminTable);
@@ -2421,6 +2915,7 @@ function changeToken(token) {
   clear($("#toast-region"));
   state.session += 1;
   resetGraphSession();
+  resetRelationshipsSession();
   state.embeddingGeneration += 1;
   state.embeddingRequest = null;
   state.embeddings = null;
@@ -2473,6 +2968,7 @@ function changeToken(token) {
   void loadEmbeddingSettings({ form: state.view === "settings" }).catch(() => {});
   if (state.view === "settings") { void loadServerSettings(); void loadRerankingSettings().catch(() => {}); }
   if (state.view === "connections") void loadGraphCollections();
+  if (state.view === "data") void loadRelationships();
 }
 
 async function initialize() {

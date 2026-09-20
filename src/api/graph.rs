@@ -193,6 +193,8 @@ async fn preview_chunks(
 #[serde(deny_unknown_fields)]
 struct CreateCollection {
     name: String,
+    #[serde(default)]
+    document_columns: Vec<super::schema::CreateColumn>,
     #[serde(default = "default_semantic_neighbors")]
     semantic_neighbors: usize,
     #[serde(default = "default_semantic_threshold")]
@@ -216,14 +218,18 @@ async fn create_collection(
     authorize(&request, security.as_ref().map(|value| value.get_ref()))?;
     let profile = graph_profile(embedding_service(embeddings)?.profile()?);
     let input = input.into_inner();
+    let columns = super::schema::decode_columns(input.document_columns, 0, 32)?;
     let database = database.get_ref().clone();
     let body = run_database_task(limiter.as_ref(), move || {
-        encoded(&database.graph_create_collection(GraphCollectionConfig {
-            name: input.name,
-            profile,
-            semantic_neighbors: input.semantic_neighbors,
-            semantic_threshold: input.semantic_threshold,
-        })?)
+        encoded(&database.graph_create_collection_with_columns(
+            GraphCollectionConfig {
+                name: input.name,
+                profile,
+                semantic_neighbors: input.semantic_neighbors,
+                semantic_threshold: input.semantic_threshold,
+            },
+            columns,
+        )?)
     })
     .await?;
     Ok(json_body(body))
@@ -294,6 +300,33 @@ fn validate_document(input: &IngestDocument) -> Result<(), ApiError> {
     Ok(())
 }
 
+struct PendingIngest {
+    state: crate::GraphCollection,
+    input: IngestDocument,
+    preview: ChunkResponse,
+    chunking: JsonValue,
+}
+
+enum PreparedIngest {
+    Complete(Vec<u8>),
+    Generate(Box<PendingIngest>),
+}
+
+fn canonical_document_metadata(
+    metadata: &mut JsonValue,
+    columns: &[crate::GraphDocumentColumn],
+) -> Result<(), ApiError> {
+    let values = metadata.as_object_mut().ok_or_else(|| {
+        ApiError::bad_request("invalid_document", "document metadata must be an object")
+    })?;
+    for column in columns {
+        let value = values.entry(column.name.clone()).or_insert(JsonValue::Null);
+        let data_type = super::schema::parse_type(&column.data_type)?;
+        *value = json_value(json_typed_value(value, &data_type, &column.name, false)?);
+    }
+    Ok(())
+}
+
 async fn ingest_document(
     request: HttpRequest,
     security: Option<web::Data<ApiSecurity>>,
@@ -304,7 +337,7 @@ async fn ingest_document(
     input: web::Json<IngestDocument>,
 ) -> Result<HttpResponse, ApiError> {
     authorize(&request, security.as_ref().map(|value| value.get_ref()))?;
-    let input = input.into_inner();
+    let mut input = input.into_inner();
     let collection = collection.into_inner();
     let database = database.get_ref().clone();
     let prepare_db = database.clone();
@@ -319,6 +352,7 @@ async fn ingest_document(
                 }));
             }
         }
+        canonical_document_metadata(&mut input.metadata, &state.document_columns)?;
         let preview = prepare_chunks(ChunkRequest {
             text: input.text.clone(),
             title: input.title.clone(),
@@ -327,6 +361,41 @@ async fn ingest_document(
         let chunking = serde_json::to_value(input.chunking)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         let old = prepare_db.graph_document(&collection, &input.id)?;
+        if let Some(old) = old.filter(|old| {
+            old.chunks_intact
+                && old.text == input.text
+                && old.title == input.title
+                && old.source == input.source
+                && old.chunking == chunking
+                && old.chunk_count == preview.chunks.len()
+        }) {
+            let actual = prepare_db.revision()?;
+            if actual != state.revision {
+                return Err(ApiError::from(Error::RevisionConflict {
+                    expected: state.revision,
+                    actual,
+                }));
+            }
+            let unchanged = old.metadata == input.metadata;
+            let revision = if unchanged {
+                state.revision
+            } else {
+                prepare_db
+                    .graph_update_document_metadata(
+                        &collection,
+                        &input.id,
+                        input.metadata,
+                        state.revision,
+                    )?
+                    .revision
+            };
+            return Ok::<_, ApiError>(PreparedIngest::Complete(encoded(&serde_json::json!({
+                "collection": state.config.name, "document_id": input.id, "revision": revision,
+                "chunks": old.chunk_count, "edges_created": 0, "replaced": !unchanged,
+                "unchanged": unchanged, "embeddings_reused": true,
+                "embedding_usage": { "total_tokens": 0 }
+            }))?));
+        }
         let validated_revision = prepare_db.graph_check_ingest_capacity(
             &collection,
             &crate::GraphDocumentPreview {
@@ -354,33 +423,24 @@ async fn ingest_document(
                 actual: validated_revision,
             }));
         }
-        let unchanged = old.is_some_and(|old| {
-            old.chunks_intact
-                && old.text == input.text
-                && old.title == input.title
-                && old.source == input.source
-                && old.metadata == input.metadata
-                && old.chunking == chunking
-                && old.chunk_count == preview.chunks.len()
-        });
-        let actual = prepare_db.revision()?;
-        if actual != state.revision {
-            return Err(ApiError::from(Error::RevisionConflict {
-                expected: state.revision,
-                actual,
-            }));
-        }
-        Ok::<_, ApiError>((state, input, preview, chunking, unchanged))
+        Ok::<_, ApiError>(PreparedIngest::Generate(Box::new(PendingIngest {
+            state,
+            input,
+            preview,
+            chunking,
+        })))
     })
     .await?;
-    let (state, input, preview, chunking, unchanged) = prepared;
-    if unchanged {
-        return Ok(json_body(encoded(&serde_json::json!({
-            "collection": state.config.name, "document_id": input.id, "revision": state.revision,
-            "chunks": preview.chunks.len(), "edges_created": 0, "replaced": false, "unchanged": true,
-            "embedding_usage": { "total_tokens": 0 }
-        }))?));
-    }
+    let pending = match prepared {
+        PreparedIngest::Complete(body) => return Ok(json_body(body)),
+        PreparedIngest::Generate(pending) => pending,
+    };
+    let PendingIngest {
+        state,
+        input,
+        preview,
+        chunking,
+    } = *pending;
     let service = embedding_service(embeddings)?;
     let generated = service
         .generate(GenerateRequest::pinned(
@@ -437,6 +497,7 @@ async fn ingest_document(
         let mut response =
             serde_json::to_value(result).map_err(|error| ApiError::internal(error.to_string()))?;
         response["unchanged"] = JsonValue::Bool(false);
+        response["embeddings_reused"] = JsonValue::Bool(false);
         response["embedding_usage"] = serde_json::to_value(generated.usage)
             .map_err(|error| ApiError::internal(error.to_string()))?;
         encoded(&response)

@@ -143,9 +143,11 @@ def check_assets(api):
         "/": ["Connections", 'id="view-connections"', 'id="graph-canvas"',
               'id="graph-search-form"', 'id="graph-seeds"',
               'id="graph-retrieval-direction"', 'id="graph-retrieval-kind"',
-              'id="graph-retrieval-min-weight"'],
-        "/assets/app.js": ["retrieval_path", "graph-retrieval-direction", "/retrieve"],
-        "/assets/app.css": [".graph-workspace", ".graph-retrieval-path"],
+              'id="graph-retrieval-min-weight"', 'id="graph-document-fields"',
+              'id="relationship-dialog"'],
+        "/assets/app.js": ["retrieval_path", "graph-retrieval-direction", "/retrieve",
+                           "document_columns", "/relationships"],
+        "/assets/app.css": [".graph-workspace", ".graph-retrieval-path", ".relationship-card"],
     }.items():
         asset = api.request(path, authenticated=False)
         require(isinstance(asset, str), f"{path}: expected a text asset")
@@ -186,8 +188,12 @@ def check_apis(api):
         covered = end
     require(covered == len(source_bytes), "chunk preview omitted the end of the source")
 
-    created = api.request("/v1/graph/collections", {"name": "release_smoke", "semantic_neighbors": 0})
+    created = api.request("/v1/graph/collections", {
+        "name": "release_smoke", "semantic_neighbors": 0,
+        "document_columns": [{"name": "record_id", "data_type": "INTEGER", "nullable": False}],
+    })
     require(created["config"]["name"] == "release_smoke", "graph collection creation failed")
+    require(created["document_columns"][0]["name"] == "record_id", "document schema was not created")
     browse = api.request("/v1/graph/collections/release_smoke/graph?limit=2")
     require(browse["nodes"] == [] and browse["edges"] == [], "new graph collection was not empty")
     retrieved = api.request("/v1/graph/collections/release_smoke/retrieve", {
@@ -197,6 +203,32 @@ def check_apis(api):
             "empty graph retrieval should succeed without provider usage")
     api.request("/v1/graph/collections/release_smoke/retrieve",
                 {"text": "Release check", "min_weight": 2}, status=400)
+
+    # Synthetic source-only fixture: no embeddings or provider calls.
+    api.request("/v1/tables/graph_release_smoke_documents/rows", {"rows": [{
+        "document_id": "manual", "title": "Manual", "source": "fixture", "text": "Release",
+        "metadata": "{}", "chunking": "{}", "chunk_fingerprint": "", "record_id": 1,
+    }]})
+    revision = api.request("/v1/relationships")["revision"]
+    relationship = api.request("/v1/relationships", {
+        "name": "release_record", "source_table": "graph_release_smoke_documents",
+        "source_column": "record_id", "target_table": "release_smoke", "target_column": "id",
+        "expected_revision": revision,
+    })
+    require(relationship["relationship"]["valid"], "cross-table relationship was not saved")
+    check_relationship_join(api)
+
+
+def check_relationship_join(api):
+    links = api.request("/v1/relationships")
+    require(len(links["relationships"]) == 1 and links["relationships"][0]["valid"],
+            "relationship catalog is incomplete or invalid")
+    document = api.request("/v1/graph/collections/release_smoke/documents/manual")
+    require(document["metadata"]["record_id"] == 1, "typed document metadata was lost")
+    result = sql(api, "SELECT d.document_id,r.title,cosine_distance(r.embedding,ARRAY[1,0,0]) AS distance "
+                 "FROM graph_release_smoke_documents d LEFT JOIN release_smoke r ON d.record_id=r.id "
+                 "ORDER BY distance LIMIT 1")[0]
+    require(result["rows"] == [["manual", "Release ✓", 0.0]], "vector-ranked SQL join returned wrong data")
 
 
 def run(binary, expected_version, timeout):
@@ -215,7 +247,8 @@ def run(binary, expected_version, timeout):
             collection = api.request("/v1/graph/collections/release_smoke")
             require(collection["config"]["name"] == "release_smoke" and collection["chunk_count"] == 0,
                     "graph collection did not survive restart")
-    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, restart")
+            check_relationship_join(api)
+    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, typed fields, relationships, joins, restart")
 
 
 def main():

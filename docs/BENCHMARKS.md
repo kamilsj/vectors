@@ -607,3 +607,45 @@ and tests were paused during timing; desktop background activity was not
 controlled. The [raw report](benchmarks/rag-lexical-build-2026-09-20.json) includes
 every sample, workload settings, source/binary hashes, and exact-result checks.
 Allocation counts and peak memory were not instrumented.
+
+## Vector-ranked SQL joins
+
+The [JOIN harness](../examples/benchmark_sql_join.rs) compares a maintained
+scalar HASH index with a temporary hash table built during each query. Both
+use the same streaming JOIN executor, residual boolean filter, exact cosine
+ranking, deterministic tie breaker, and `LIMIT 10`.
+
+```sh
+cargo build --release --locked --all-features --example benchmark_sql_join
+target/release/examples/benchmark_sql_join 50000 128 20
+```
+
+Measurements on 2026-09-20 used Rust 1.98.1, locked dependencies, an Apple
+M4 Max (16 CPU cores, 48 GiB), and macOS 27.0 (26A428). The release executable
+included GPU support, with CPU execution explicitly selected. Three fresh
+processes each measured 20 query pairs, alternating which variant ran first.
+Exact query texts were warmed in the parse cache. Medians and p95s combine
+60 samples per variant:
+
+| JOIN workload | Temporary hash median / p95 | Maintained index median / p95 |
+| --- | ---: | ---: |
+| 64 matching rows among 50,000 | 3.631 / 4.020 ms | 0.259 / 0.288 ms |
+| 6,400 matching pairs, 4,800 vector scores | 17.962 / 18.607 ms | 16.198 / 17.288 ms |
+
+The selective workload was 14.01× faster with the maintained index. The
+one-to-many workload spent more time scoring vectors and improved by 9.82%.
+Both fixtures use 128-dimensional vectors and 64 probe keys; the second has
+500 key groups in the right table. Every pair returned identical columns,
+types, ordered values, scores, and rows-examined counts. Canonical results
+also matched across all three processes.
+
+Timing includes complete in-process query execution and result allocation.
+Fixture insertion, maintained-index creation, output serialization, HTTP,
+persistence, and provider calls are excluded. The vectors are deterministic
+and repeat every 101 rows. This compares index choices within the new executor;
+earlier releases did not support JOIN. It is a single-host synthetic workload,
+with no concurrent clients, and does not establish general throughput or
+cross-database performance. Measurements ran in a coordinated quiet window;
+desktop background activity was not controlled. The
+[raw report](benchmarks/sql-joins-2026-09-20.json) includes every timing sample,
+result fingerprints, and exact measured source and executable hashes.

@@ -26,6 +26,8 @@ const MAX_EDGES: usize = MAX_CHUNKS * 34;
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_VECTOR_ELEMENTS: usize = 32 * 1024 * 1024;
 const MAX_COLLECTION_TEXT_BYTES: usize = 64 * 1024 * 1024;
+const DOCUMENT_BASE_COLUMNS: usize = 7;
+const MAX_DOCUMENT_COLUMNS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphEmbeddingProfile {
@@ -59,6 +61,16 @@ pub struct GraphCollection {
     pub chunk_count: usize,
     pub edge_count: usize,
     pub tables: GraphTables,
+    pub document_columns: Vec<GraphDocumentColumn>,
+}
+
+/// One canonical SQL-backed field supplied through document metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphDocumentColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub unique: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -212,13 +224,26 @@ impl Database {
     /// Create four ordinary SQL tables with an immutable embedding profile.
     pub fn graph_create_collection(
         &self,
+        config: GraphCollectionConfig,
+    ) -> Result<GraphCollection> {
+        self.graph_create_collection_with_columns(config, Vec::new())
+    }
+
+    /// Append at most 32 indexed scalar columns to the existing document table.
+    /// Their canonical values are supplied and returned through metadata.
+    pub fn graph_create_collection_with_columns(
+        &self,
         mut config: GraphCollectionConfig,
+        document_columns: Vec<Column>,
     ) -> Result<GraphCollection> {
         config.name = collection_name(&config.name)?;
         validate_config(&config)?;
+        validate_document_columns(&document_columns)?;
         let (mut info, revision) = self.graph_transaction(None, |catalog, wal| {
             let tables = table_names(&config.name);
-            for (name, columns, indexes) in schemas(&tables, config.profile.dimensions) {
+            for (name, columns, indexes) in
+                schemas_with_columns(&tables, config.profile.dimensions, &document_columns)
+            {
                 if catalog.tables.contains_key(&name) {
                     return Err(Error::TableAlreadyExists(name));
                 }
@@ -227,9 +252,10 @@ impl Database {
                         .iter()
                         .map(|column| {
                             format!(
-                                "{} {} NOT NULL{}",
+                                "{} {}{}{}",
                                 quote(&column.name),
                                 column.data_type,
+                                if column.nullable { "" } else { " NOT NULL" },
                                 if column.unique { " UNIQUE" } else { "" }
                             )
                         })
@@ -322,6 +348,88 @@ impl Database {
         Ok(catalog.revision)
     }
 
+    /// Replace metadata without changing chunks, vectors, or relationships.
+    /// This uses the same revision guard and durable transaction as ingestion.
+    pub fn graph_update_document_metadata(
+        &self,
+        collection_name: &str,
+        id: &str,
+        metadata: JsonValue,
+        expected_revision: u64,
+    ) -> Result<GraphIngestResult> {
+        bounded_text(id, 512, false, "document id")?;
+        validate_metadata(&metadata)?;
+        let (mut result, revision) =
+            self.graph_transaction(Some(expected_revision), |catalog, wal| {
+                let info = collection(catalog, collection_name)?;
+                let document = read_document(catalog, &info.tables, id)?
+                    .ok_or_else(|| invalid("graph document does not exist"))?;
+                if !document.chunks_intact {
+                    return Err(invalid(
+                        "stored document chunks changed; reingest before updating metadata",
+                    ));
+                }
+                let documents = table(catalog, &info.tables.documents)?;
+                let (free, fields) = document_fields(documents, id, &metadata)?;
+                let position = documents
+                    .rows
+                    .iter()
+                    .position(|row| matches!(row.first(), Some(Value::Text(value)) if value == id))
+                    .ok_or_else(|| invalid("graph document does not exist"))?;
+                let mut row = documents.rows[position].clone();
+                row[4] = Value::Text(free.to_string());
+                row.truncate(DOCUMENT_BASE_COLUMNS);
+                row.extend(fields);
+                let mut chunks = table(catalog, &info.tables.chunks)?
+                    .rows
+                    .iter()
+                    .filter(|chunk| matches!(chunk.get(1), Some(Value::Text(value)) if value == id))
+                    .collect::<Vec<_>>();
+                chunks.sort_by_key(|chunk| match chunk.get(2) {
+                    Some(Value::Integer(ordinal)) => *ordinal,
+                    _ => -1,
+                });
+                row[6] = Value::Text(chunk_fingerprint(&row[..6], &chunks));
+                if let Some(wal) = wal {
+                    let assignments = std::iter::once(4)
+                        .chain(std::iter::once(6))
+                        .chain(DOCUMENT_BASE_COLUMNS..row.len())
+                        .map(|index| {
+                            format!(
+                                "{}={}",
+                                quote(&documents.columns[index].name),
+                                sql_value(&row[index])
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    wal.push_str(&format!(
+                        "UPDATE {} SET {assignments} WHERE document_id={};",
+                        quote(&info.tables.documents),
+                        literal(id)
+                    ));
+                }
+                let documents = catalog
+                    .tables
+                    .get_mut(&info.tables.documents)
+                    .ok_or_else(|| Error::TableNotFound(info.tables.documents.clone()))?;
+                validate_row(&documents.columns, &row)?;
+                documents.rows[position] = row;
+                rebuild_relational_indexes(documents);
+                validate_text_capacity(catalog, &info.tables)?;
+                Ok(GraphIngestResult {
+                    collection: info.config.name,
+                    document_id: id.into(),
+                    revision: 0,
+                    chunks: document.chunk_count,
+                    edges_created: 0,
+                    replaced: true,
+                })
+            })?;
+        result.revision = revision;
+        Ok(result)
+    }
+
     /// Replace one document and every incident edge in a single durable commit.
     /// Provider work must finish before this call; a stale revision fails before
     /// graph generation or mutation. Similarity edges express cosine proximity,
@@ -379,17 +487,23 @@ impl Database {
                         ]
                     })
                     .collect();
+                let (metadata, field_values) = document_fields(
+                    table(catalog, &info.tables.documents)?,
+                    &document.id,
+                    &document.metadata,
+                )?;
                 let mut document_row = vec![
                     Value::Text(document.id.clone()),
                     Value::Text(document.title.clone()),
                     Value::Text(document.source.clone()),
                     Value::Text(document.text.clone()),
-                    Value::Text(document.metadata.to_string()),
+                    Value::Text(metadata.to_string()),
                     Value::Text(document.chunking.to_string()),
                 ];
                 let fingerprint =
                     chunk_fingerprint(&document_row, &rows.iter().collect::<Vec<_>>());
                 document_row.push(Value::Text(fingerprint));
+                document_row.extend(field_values);
                 insert(catalog, &info.tables.documents, vec![document_row], wal)?;
                 let mut edges = Vec::new();
                 for ordinal in 1..document.chunks.len() {
@@ -554,9 +668,13 @@ impl Database {
             let chunk = &chunks.rows[*chunk_lookup
                 .get(id.as_str())
                 .ok_or_else(|| invalid("graph edge references a missing chunk"))?];
-            result
-                .hits
-                .push(hit(chunk, &document_lookup, &request.query, depth)?);
+            result.hits.push(hit(
+                chunk,
+                &document_lookup,
+                &documents.columns,
+                &request.query,
+                depth,
+            )?);
             if depth >= request.max_hops {
                 continue;
             }
@@ -836,6 +954,139 @@ fn schemas(names: &GraphTables, dimensions: usize) -> Vec<(String, Vec<Column>, 
         ),
     ]
 }
+fn schemas_with_columns(
+    names: &GraphTables,
+    dimensions: usize,
+    document_columns: &[Column],
+) -> Vec<(String, Vec<Column>, Vec<usize>)> {
+    let mut schema = schemas(names, dimensions);
+    schema[1]
+        .2
+        .extend(DOCUMENT_BASE_COLUMNS..DOCUMENT_BASE_COLUMNS + document_columns.len());
+    schema[1].1.extend_from_slice(document_columns);
+    schema
+}
+
+fn validate_document_columns(columns: &[Column]) -> Result<()> {
+    if columns.len() > MAX_DOCUMENT_COLUMNS {
+        return Err(invalid(
+            "a graph collection supports at most 32 custom document columns",
+        ));
+    }
+    let mut names = HashSet::from([
+        "document_id",
+        "title",
+        "source",
+        "text",
+        "metadata",
+        "chunking",
+        "chunk_fingerprint",
+    ]);
+    for column in columns {
+        if column.name.is_empty()
+            || column.name.len() > 48
+            || !column.name.as_bytes()[0].is_ascii_lowercase()
+            || !column
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(invalid("document column names must start with a lowercase ASCII letter and contain at most 48 lowercase ASCII letters, digits, or underscores"));
+        }
+        if !names.insert(&column.name) {
+            return Err(Error::DuplicateColumn(column.name.clone()));
+        }
+        if matches!(column.data_type, DataType::Vector(_)) {
+            return Err(invalid(
+                "custom document columns support TEXT, INTEGER, DOUBLE, and BOOLEAN",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_metadata(metadata: &JsonValue) -> Result<()> {
+    if !metadata.is_object() || metadata.to_string().len() > 65536 {
+        return Err(invalid(
+            "metadata must be a JSON object of at most 65536 bytes",
+        ));
+    }
+    Ok(())
+}
+
+// Strip declared keys from the free-form JSON. SQL columns are the sole stored
+// source for these values; nullable missing fields deliberately become NULL.
+fn document_fields(
+    table: &Table,
+    id: &str,
+    metadata: &JsonValue,
+) -> Result<(JsonValue, Vec<Value>)> {
+    validate_metadata(metadata)?;
+    let mut free = metadata.as_object().unwrap().clone();
+    let mut values = Vec::with_capacity(table.columns.len().saturating_sub(DOCUMENT_BASE_COLUMNS));
+    for (index, column) in table.columns.iter().enumerate().skip(DOCUMENT_BASE_COLUMNS) {
+        let input = free.remove(&column.name).unwrap_or(JsonValue::Null);
+        let value = if input.is_null() {
+            if !column.nullable {
+                return Err(Error::NullViolation(column.name.clone()));
+            }
+            Value::Null
+        } else {
+            match (&column.data_type, &input) {
+                (DataType::Text, JsonValue::String(value)) if !value.contains('\0') => {
+                    Value::Text(value.clone())
+                }
+                (DataType::Integer, JsonValue::Number(value)) if value.as_i64().is_some() => {
+                    Value::Integer(value.as_i64().unwrap())
+                }
+                (DataType::Float, JsonValue::Number(value))
+                    if value.as_f64().is_some_and(f64::is_finite) =>
+                {
+                    Value::Float(value.as_f64().unwrap())
+                }
+                (DataType::Boolean, JsonValue::Bool(value)) => Value::Boolean(*value),
+                _ => {
+                    return Err(invalid(&format!(
+                        "metadata field '{}' must match {}",
+                        column.name, column.data_type
+                    )))
+                }
+            }
+        };
+        if column.unique && !matches!(value, Value::Null) {
+            let key = UniqueKey::from(&value);
+            let existing = table
+                .unique_keys
+                .get(&index)
+                .and_then(|keys| keys.get(&key));
+            if existing.is_some_and(|row| !matches!(table.rows[*row].first(), Some(Value::Text(existing_id)) if existing_id == id)) {
+                return Err(Error::UniqueViolation(column.name.clone()));
+            }
+        }
+        values.push(value);
+    }
+    Ok((JsonValue::Object(free), values))
+}
+
+fn document_metadata(row: &[Value], columns: &[Column]) -> Result<JsonValue> {
+    let mut metadata = json_at(row, 4)?;
+    let object = metadata.as_object_mut().unwrap();
+    for (index, column) in columns.iter().enumerate().skip(DOCUMENT_BASE_COLUMNS) {
+        let value = match (row.get(index), &column.data_type) {
+            (Some(Value::Null), _) if column.nullable => JsonValue::Null,
+            (Some(Value::Text(value)), DataType::Text) => JsonValue::String(value.clone()),
+            (Some(Value::Integer(value)), DataType::Integer) => JsonValue::from(*value),
+            (Some(Value::Float(value)), DataType::Float) if value.is_finite() => {
+                JsonValue::from(*value)
+            }
+            (Some(Value::Boolean(value)), DataType::Boolean) => JsonValue::from(*value),
+            _ => return Err(invalid("graph document contains an invalid custom field")),
+        };
+        object.insert(column.name.clone(), value);
+    }
+    Ok(metadata)
+}
+
 fn table<'a>(catalog: &'a Catalog, name: &str) -> Result<&'a Table> {
     catalog
         .tables
@@ -872,6 +1123,11 @@ fn check_ingest_capacity(
     info: &GraphCollection,
     document: &GraphDocumentPreview<'_>,
 ) -> Result<()> {
+    let (metadata, fields) = document_fields(
+        table(catalog, &info.tables.documents)?,
+        document.id,
+        document.metadata,
+    )?;
     let chunks = table(catalog, &info.tables.chunks)?;
     let (replaced_ids, replaced_count) = document_chunk_ids(catalog, &info.tables, document.id)?;
     let remaining_chunks = chunks.rows.len().saturating_sub(replaced_count);
@@ -908,7 +1164,8 @@ fn check_ingest_capacity(
         bytes = bytes.saturating_add(value.len());
     }
     bytes = bytes
-        .saturating_add(document.metadata.to_string().len())
+        .saturating_add(metadata.to_string().len())
+        .saturating_add(row_text_bytes(&fields))
         .saturating_add(document.chunking.to_string().len())
         .saturating_add(16);
     let profile_bytes = profile_key(&info.config.profile)?.len();
@@ -1008,7 +1265,15 @@ fn collection(catalog: &Catalog, name: &str) -> Result<GraphCollection> {
         semantic_threshold: number_at(row, 6)?,
     };
     validate_config(&config)?;
-    for (name, columns, indexes) in schemas(&tables, config.profile.dimensions) {
+    let document_table = table(catalog, &tables.documents)?;
+    let document_columns = document_table
+        .columns
+        .get(DOCUMENT_BASE_COLUMNS..)
+        .ok_or_else(|| invalid("graph document schema is missing required columns"))?;
+    validate_document_columns(document_columns)?;
+    for (name, columns, indexes) in
+        schemas_with_columns(&tables, config.profile.dimensions, document_columns)
+    {
         let table = table(catalog, &name)?;
         if table.columns != columns
             || indexes
@@ -1038,6 +1303,15 @@ fn collection(catalog: &Catalog, name: &str) -> Result<GraphCollection> {
         document_count: table(catalog, &tables.documents)?.rows.len(),
         chunk_count: chunks.rows.len(),
         edge_count: table(catalog, &tables.edges)?.rows.len(),
+        document_columns: document_columns
+            .iter()
+            .map(|column| GraphDocumentColumn {
+                name: column.name.clone(),
+                data_type: column.data_type.to_string(),
+                nullable: column.nullable,
+                unique: column.unique,
+            })
+            .collect(),
         tables,
     })
 }
@@ -1046,7 +1320,8 @@ fn read_document(
     tables: &GraphTables,
     id: &str,
 ) -> Result<Option<GraphDocument>> {
-    let document = table(catalog, &tables.documents)?
+    let document_table = table(catalog, &tables.documents)?;
+    let document = document_table
         .rows
         .iter()
         .find(|row| matches!(row.first(), Some(Value::Text(value)) if value == id));
@@ -1066,7 +1341,7 @@ fn read_document(
                 title: text_at(row, 1)?.into(),
                 source: text_at(row, 2)?.into(),
                 text: text_at(row, 3)?.into(),
-                metadata: json_at(row, 4)?,
+                metadata: document_metadata(row, &document_table.columns)?,
                 chunking: json_at(row, 5)?,
                 chunk_count: chunks.len(),
                 chunks_intact: !chunks.is_empty()
@@ -1364,6 +1639,7 @@ fn document_chunk_ids(
 fn hit(
     chunk: &[Value],
     documents: &HashMap<&str, &Vec<Value>>,
+    document_columns: &[Column],
     query: &Vector,
     depth: usize,
 ) -> Result<GraphHit> {
@@ -1389,7 +1665,7 @@ fn hit(
         title: text_at(document, 1)?.into(),
         source: text_at(document, 2)?.into(),
         text: text.into(),
-        metadata: json_at(document, 4)?,
+        metadata: document_metadata(document, document_columns)?,
         start_byte,
         end_byte,
         similarity,

@@ -236,7 +236,7 @@ impl Database {
             .into_iter()
             .skip(request.offset)
             .take(request.limit)
-            .map(|chunk| node(chunk, &document_lookup))
+            .map(|chunk| node(chunk, &document_lookup, &documents.columns))
             .collect::<Result<Vec<_>>>()?;
         let selected_ids = nodes
             .iter()
@@ -366,7 +366,11 @@ fn remove_relationship(
     Ok(removed)
 }
 
-fn node(chunk: &[Value], documents: &HashMap<&str, &Vec<Value>>) -> Result<GraphNode> {
+fn node(
+    chunk: &[Value],
+    documents: &HashMap<&str, &Vec<Value>>,
+    document_columns: &[Column],
+) -> Result<GraphNode> {
     let document_id = text_at(chunk, 1)?;
     let document = *documents
         .get(document_id)
@@ -385,7 +389,7 @@ fn node(chunk: &[Value], documents: &HashMap<&str, &Vec<Value>>) -> Result<Graph
         title: text_at(document, 1)?.into(),
         source: text_at(document, 2)?.into(),
         text: text.into(),
-        metadata: json_at(document, 4)?,
+        metadata: document_metadata(document, document_columns)?,
         start_byte,
         end_byte,
         ordinal: usize_at(chunk, 2)?,
@@ -755,7 +759,8 @@ impl Database {
             .enumerate()
             .map(|(index, row)| text_at(row, 0).map(|id| (id, index)))
             .collect::<Result<HashMap<_, _>>>()?;
-        let documents = table(&catalog, &info.tables.documents)?
+        let document_table = table(&catalog, &info.tables.documents)?;
+        let documents = document_table
             .rows
             .iter()
             .map(|row| text_at(row, 0).map(|id| (id, row)))
@@ -827,7 +832,13 @@ impl Database {
                 return Err(invalid("graph chunk embedding is missing"));
             };
             candidates.push(GraphRagCandidate {
-                hit: hit(row, &documents, &request.query, admission.depth)?,
+                hit: hit(
+                    row,
+                    &documents,
+                    &document_table.columns,
+                    &request.query,
+                    admission.depth,
+                )?,
                 lexical_score: admission.score.lexical,
                 fusion_score: admission.score.fusion,
                 rerank_text: text_at(row, 6)?.into(),

@@ -65,6 +65,27 @@ class SDKTests(unittest.TestCase):
         )
         self.assertTrue(client._http.is_closed)
 
+    def test_collection_columns_and_scalar_relationships_share_one_client(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(200, json={"revision": 7, "relationships": []})
+
+        columns = [{"name": "product_id", "data_type": "INTEGER", "nullable": False}]
+        with Client(transport=httpx.MockTransport(handler)) as client:
+            client.create_collection("manuals", document_columns=columns)
+            revision = client.relationships()["revision"]
+            client.create_relationship("about_product", source_table="graph_manuals_documents",
+                                       source_column="product_id", target_table="products",
+                                       target_column="id", expected_revision=revision)
+            client.delete_relationship("about_product", expected_revision=8)
+        self.assertEqual(json.loads(calls[0].content)["document_columns"], columns)
+        self.assertEqual(calls[1].method, "GET")
+        self.assertEqual(json.loads(calls[2].content)["expected_revision"], 7)
+        self.assertEqual(calls[3].url.path, "/v1/relationships/about_product")
+        self.assertEqual(json.loads(calls[3].content), {"expected_revision": 8})
+
     def test_insert_consumes_generator_lazily_and_reports_progress(self):
         consumed, requests = [], []
 

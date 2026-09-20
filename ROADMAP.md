@@ -63,7 +63,8 @@ HTTP body alone does not satisfy it.
 
 - Add background checkpoint/WAL rotation so snapshot I/O no longer excludes
   writers; preserve the current concurrent-read and crash-ordering guarantees.
-- Add joins and subqueries needed for richer hybrid retrieval.
+- Extend the implemented two-table INNER/LEFT scalar joins with planning,
+  aggregate/multi-table joins, and subqueries for richer hybrid retrieval.
 - Expand metrics with latency and result-size histograms; add request tracing,
   cancellation, and per-query CPU and memory limits.
 - Move eligible GPU top-k reduction onto the device only when benchmarks show

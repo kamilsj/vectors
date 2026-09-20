@@ -12,9 +12,28 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- Typed document fields for RAG collections, with required/unique constraints,
+  maintained scalar indexes, and one shared visual field editor for collections
+  and ordinary SQL tables. Declared metadata lives in canonical SQL columns.
+- Two-table SQL `INNER JOIN` and `LEFT JOIN` on scalar equality, including
+  vector ranking, aliases, filters, and bounded results. Joins reuse existing
+  hash indexes or build a temporary lookup and stream matching row pairs.
+- Named relationships between different tables through Data, the HTTP API,
+  and synchronous/asynchronous Python clients. Links match compatible fields,
+  create lookup indexes atomically, and open a ready-to-edit SQL join.
+
 ### Changed
 
+- Metadata-only document edits reuse existing embeddings, chunk relationships,
+  and keyword indexes, with zero embedding usage and revision protection.
+- Data creation offers RAG documents or structured tables through the existing
+  workflows; collection fields are editable alongside document text.
+
 ### Fixed
+
+- Preserve the newly created table selection while the Data catalog refreshes.
+- Keep row and relationship revisions consistent after the console's own
+  writes, preserving drafts and conflict protection against external changes.
 
 ## 0.8.0 - 2026-09-20
 
