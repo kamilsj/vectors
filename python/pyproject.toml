@@ -30,7 +30,7 @@ Documentation = "https://github.com/kamilsj/vectors/blob/main/python/README.md"
 Issues = "https://github.com/kamilsj/vectors/issues"
 
 [dependency-groups]
-dev = ["packaging>=24,<27", "ruff>=0.15.1,<0.16", "twine>=6.2,<7"]
+dev = ["packaging>=24,<27", "ruff>=0.15.1,<0.17", "twine>=6.2,<8"]
 
 [tool.uv]
 required-version = ">=0.12.10"
