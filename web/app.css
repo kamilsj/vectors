@@ -812,6 +812,13 @@ dialog::backdrop { background: rgba(2, 4, 5, .72); backdrop-filter: blur(4px); }
 .graph-retrieval { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); margin-top: 20px; overflow: hidden; }
 .graph-retrieval-results { border-left: 1px solid var(--border); min-width: 0; }
 .graph-retrieval-results h3 { margin: 6px 0 0; font-size: 17px; font-weight: 550; }
+.graph-document-filters { display: grid; gap: 12px; margin: 14px 0; }
+.graph-filter-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.graph-filter-row label { min-width: 0; font-size: 10px; }
+.graph-filter-row input, .graph-filter-row select { min-width: 0; margin-top: 6px; font-size: 11px; }
+.graph-filter-remove { justify-self: end; align-self: end; }
+.graph-filter-summary, .graph-applied-filters { overflow-wrap: anywhere; }
+.graph-filter-summary { margin: 14px 0; }
 .graph-context-results { padding: 0 20px 20px; max-height: 850px; overflow: auto; }
 .graph-context-summary { color: var(--cyan); font-size: 11px; line-height: 1.7; padding: 4px 0 12px; }
 .graph-hit { padding: 18px 0; border-top: 1px solid var(--border); }

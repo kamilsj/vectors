@@ -1,4 +1,5 @@
-//! Measure complete vector-ranked joins with and without a maintained scalar index.
+//! Measure complete vector-ranked joins with maintained HASH/PRIMARY KEY lookups
+//! and temporary per-query hash construction, checking identical results.
 //! Run: cargo run --release --example benchmark_sql_join -- 50000 128 20
 //! Fixture writes, index creation and output serialization are excluded.
 use serde_json::json;
@@ -57,12 +58,20 @@ fn run(
     repetitions: usize,
     groups: usize,
     phase: &str,
+    join_column: &str,
 ) -> serde_json::Value {
     let db = Database::new_with_compute(ComputeConfig {
         device: ComputeDevice::Cpu,
         ..ComputeConfig::default()
     });
-    db.execute(&format!("CREATE TABLE probes (topic INTEGER PRIMARY KEY); CREATE TABLE indexed_rows (id INTEGER PRIMARY KEY,topic INTEGER,published BOOLEAN,embedding VECTOR({dimensions})); CREATE TABLE ephemeral_rows (id INTEGER PRIMARY KEY,topic INTEGER,published BOOLEAN,embedding VECTOR({dimensions}));")).unwrap();
+    // The primary-key phase gives only one copy a maintained unique lookup;
+    // both copies contain exactly the same values and result ordering.
+    let ephemeral_key = if join_column == "id" {
+        "NOT NULL"
+    } else {
+        "PRIMARY KEY"
+    };
+    db.execute(&format!("CREATE TABLE probes (topic INTEGER PRIMARY KEY); CREATE TABLE indexed_rows (id INTEGER PRIMARY KEY,topic INTEGER,published BOOLEAN,embedding VECTOR({dimensions})); CREATE TABLE ephemeral_rows (id INTEGER {ephemeral_key},topic INTEGER,published BOOLEAN,embedding VECTOR({dimensions}));")).unwrap();
     db.insert_rows(
         "probes",
         (0..64).map(|id| vec![Value::Integer(id)]).collect(),
@@ -85,10 +94,12 @@ fn run(
         db.insert_rows("ephemeral_rows", batch, InsertConflict::Fail)
             .unwrap();
     }
-    db.execute("CREATE INDEX corpus_topic ON indexed_rows USING HASH (topic)")
-        .unwrap();
+    if join_column == "topic" {
+        db.execute("CREATE INDEX corpus_topic ON indexed_rows USING HASH (topic)")
+            .unwrap();
+    }
     let make_sql = |table: &str, iteration: usize| {
-        format!("SELECT p.topic,r.id,cosine_distance(r.embedding,ARRAY[{}]) AS distance FROM probes p JOIN {table} r ON p.topic=r.topic WHERE r.published=true ORDER BY distance,r.id LIMIT 10",vector(iteration,dimensions).as_slice().iter().map(|v|format!("{v:?}")).collect::<Vec<_>>().join(","))
+        format!("SELECT p.topic,r.id,cosine_distance(r.embedding,ARRAY[{}]) AS distance FROM probes p JOIN {table} r ON p.topic=r.{join_column} WHERE r.published=true ORDER BY distance,r.id LIMIT 10",vector(iteration,dimensions).as_slice().iter().map(|v|format!("{v:?}")).collect::<Vec<_>>().join(","))
     };
     // Prime both exact queries and SQL parse caches before measurement.
     let queries = (0..repetitions)
@@ -116,7 +127,7 @@ fn run(
         results.push(canonical(output[0].as_ref().unwrap()));
     }
     let summary = |variant: usize| json!({"median_us":percentile(&samples[variant],0.5),"p95_us":percentile(&samples[variant],0.95),"samples_us":samples[variant]});
-    json!({"workload":phase,"right_rows":rows,"probe_keys":64,"key_groups":groups,"dimensions":dimensions,"repetitions":repetitions,"result_limit":10,"metric":"cosine_distance","indexed":summary(0),"ephemeral":summary(1),"all_results_identical":true,"canonical_results":results})
+    json!({"workload":phase,"join_column":join_column,"maintained_lookup":if join_column == "id" {"PRIMARY KEY"} else {"HASH"},"right_rows":rows,"probe_keys":64,"key_groups":groups,"dimensions":dimensions,"repetitions":repetitions,"result_limit":10,"metric":"cosine_distance","indexed":summary(0),"ephemeral":summary(1),"all_results_identical":true,"canonical_results":results})
 }
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -135,5 +146,5 @@ fn main() {
             && repetitions > 0
             && repetitions <= 32
     );
-    println!("{}",serde_json::to_string_pretty(&json!({"compute":"cpu","profile":"release","scope":"Complete in-process SELECT JOIN with residual predicate, exact cosine ranking, deterministic tie breaker and LIMIT10. SQL parse caches warmed. Excludes fixture writes/index construction/result serialization; compares maintained right HASH index with per-query temporary hash construction in the same executor.","phases":[run(rows,dimensions,repetitions,rows,"sparse_unique_keys"),run(rows,dimensions,repetitions,500,"one_to_many_keys")]})).unwrap());
+    println!("{}",serde_json::to_string_pretty(&json!({"compute":"cpu","profile":"release","scope":"Complete in-process SELECT JOIN with residual predicate, exact cosine ranking, deterministic tie breaker and LIMIT10. SQL parse caches warmed. Excludes fixture writes/index construction/result serialization; compares maintained right HASH or PRIMARY KEY index with per-query temporary hash construction in the same executor.","phases":[run(rows,dimensions,repetitions,rows,"sparse_unique_keys","topic"),run(rows,dimensions,repetitions,500,"one_to_many_keys","topic"),run(rows,dimensions,repetitions,rows,"primary_key_lookup","id")]})).unwrap());
 }

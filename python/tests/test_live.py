@@ -236,6 +236,17 @@ class LiveSDKTests(unittest.TestCase):
 
     def test_structured_collections_and_cross_table_relationships(self):
         db = self.client
+        response = httpx.put(
+            self.url + "/v1/settings/embeddings",
+            headers={"Authorization": "Bearer sdk-test-token"},
+            json={
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+                "dimensions": 3,
+            },
+            trust_env=False,
+        )
+        response.raise_for_status()
         info = db.create_collection(
             "sdk_structured",
             document_columns=[
@@ -245,23 +256,60 @@ class LiveSDKTests(unittest.TestCase):
         )
         self.assertEqual(info["document_columns"][0]["name"], "product_id")
         documents = info["tables"]["documents"]
+        chunks = info["tables"]["chunks"]
         db.execute(
             "CREATE TABLE sdk_products (id INTEGER PRIMARY KEY, name TEXT); "
-            "INSERT INTO sdk_products VALUES (7,'Widget')"
+            "INSERT INTO sdk_products VALUES (7,'Widget'),(8,'Gadget')"
         )
         # Provider-free SQL fixture, not a shortcut for normal document ingestion.
-        db.insert(
-            documents,
-            [{"document_id": "manual", "title": "Manual", "source": "docs.md",
-              "text": "Maintain the widget.", "metadata": "{}", "chunking": "{}",
-              "chunk_fingerprint": "", "product_id": 7, "published": False}],
-        )
+        profile = json.dumps(info["config"]["profile"], separators=(",", ":"))
+        for document_id, product_id, published, embedding in (
+            ("manual", 7, False, [1, 0, 0]),
+            ("reference", 8, True, [0, 1, 0]),
+        ):
+            text = f"Maintain product {product_id}."
+            db.insert(
+                documents,
+                [
+                    {
+                        "document_id": document_id,
+                        "title": "Manual",
+                        "source": "docs.md",
+                        "text": text,
+                        "metadata": "{}",
+                        "chunking": "{}",
+                        "chunk_fingerprint": "",
+                        "product_id": product_id,
+                        "published": published,
+                    }
+                ],
+            )
+            db.insert(
+                chunks,
+                [
+                    {
+                        "chunk_id": f"{len(document_id)}:{document_id}:0",
+                        "document_id": document_id,
+                        "ordinal": 0,
+                        "start_byte": 0,
+                        "end_byte": len(text.encode()),
+                        "text": text,
+                        "embedding_text": text,
+                        "embedding_profile": profile,
+                        "embedding": embedding,
+                    }
+                ],
+            )
         metadata = db.collection("sdk_structured").document("manual")["metadata"]
         self.assertEqual(metadata, {"product_id": 7, "published": False})
         before = db.relationships()["revision"]
         created = db.create_relationship(
-            "manual_product", source_table=documents, source_column="product_id",
-            target_table="sdk_products", target_column="id", expected_revision=before,
+            "manual_product",
+            source_table=documents,
+            source_column="product_id",
+            target_table="sdk_products",
+            target_column="id",
+            expected_revision=before,
         )
         self.assertTrue(created["relationship"]["valid"])
         self.assertEqual(created["revision"], db.relationships()["revision"])
@@ -271,6 +319,31 @@ class LiveSDKTests(unittest.TestCase):
             [False],
         )[0].rows
         self.assertEqual(rows, [["manual", "Widget"]])
+
+        vector_join = (
+            f"SELECT c.chunk_id,d.product_id,p.name,c.embedding <=> $1 AS distance FROM {chunks} c "
+            f"JOIN {documents} d ON c.document_id=d.document_id "
+            "JOIN sdk_products p ON d.product_id=p.id "
+            "WHERE d.published=$2 ORDER BY distance LIMIT $3"
+        )
+        hits = db.execute(vector_join, [[1, 0, 0], False, 5])[0]
+        self.assertIsInstance(hits, QueryResult)
+        self.assertEqual(
+            hits.to_dicts(),
+            [
+                {
+                    "chunk_id": "6:manual:0",
+                    "product_id": 7,
+                    "name": "Widget",
+                    "distance": 0.0,
+                }
+            ],
+        )
+        self.assertEqual(
+            db.execute(vector_join, [[0, 1, 0], True, 5])[0].rows,
+            [["9:reference:0", 8, "Gadget", 0.0]],
+        )
+        indexes_before_delete = db.indexes(documents)
         with self.assertRaises(APIError) as raised:
             db.delete_relationship("manual_product", expected_revision=before)
         self.assertEqual(raised.exception.code, "stale_revision")
@@ -285,7 +358,14 @@ class LiveSDKTests(unittest.TestCase):
         removed = asyncio.run(remove())
         self.assertEqual(removed["revision"], db.relationships()["revision"])
         self.assertEqual(db.relationships()["relationships"], [])
-        self.assertEqual(db.execute("SELECT name FROM sdk_products")[0].rows, [["Widget"]])
+        self.assertEqual(db.indexes(documents), indexes_before_delete)
+        self.assertEqual(
+            db.execute(vector_join, [[1, 0, 0], False, 5])[0].rows, hits.rows
+        )
+        self.assertEqual(
+            db.execute("SELECT name FROM sdk_products ORDER BY id")[0].rows,
+            [["Widget"], ["Gadget"]],
+        )
 
 
 if __name__ == "__main__":

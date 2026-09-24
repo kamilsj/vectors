@@ -160,17 +160,34 @@ class Client:
         target_column: str,
         expected_revision: int,
     ) -> dict[str, Any]:
-        """Link matching fields for SQL joins; this does not enforce a foreign key."""
-        return self._request("POST", "v1/relationships", body={
-            "name": name, "source_table": source_table, "source_column": source_column,
-            "target_table": target_table, "target_column": target_column,
-            "expected_revision": expected_revision,
-        })
+        """Name a link between matching scalar fields and ensure both are indexed.
 
-    def delete_relationship(self, name: str, *, expected_revision: int) -> dict[str, Any]:
+        Use the revision returned by relationships(). The server rejects stale
+        revisions; writes are never retried. Definitions support ordinary SQL
+        joins and do not enforce foreign keys or create graph chunk edges.
+        """
+        return self._request(
+            "POST",
+            "v1/relationships",
+            body={
+                "name": name,
+                "source_table": source_table,
+                "source_column": source_column,
+                "target_table": target_table,
+                "target_column": target_column,
+                "expected_revision": expected_revision,
+            },
+        )
+
+    def delete_relationship(
+        self, name: str, *, expected_revision: int
+    ) -> dict[str, Any]:
         """Remove a link definition while retaining records and scalar indexes."""
-        return self._request("DELETE", f"v1/relationships/{segment(name)}",
-                             body={"expected_revision": expected_revision})
+        return self._request(
+            "DELETE",
+            f"v1/relationships/{segment(name)}",
+            body={"expected_revision": expected_revision},
+        )
 
     def embedding_settings(self) -> dict[str, Any]:
         return self._request("GET", "v1/settings/embeddings", retry=True)
@@ -408,8 +425,14 @@ class Collection:
         direction: str = "outgoing",
         kind: str | None = None,
         min_weight: float = 0.0,
+        document_filters: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Hybrid retrieval with citations; requires the collection's embedding provider."""
+        """Hybrid retrieval with citations and optional typed document filters.
+
+        Filters combine with AND and use column/operator/value mappings. They
+        constrain both vector candidates and graph expansion. This operation
+        requires the collection's embedding provider and is never retried.
+        """
         body: dict[str, Any] = {
             "text": text,
             "candidate_limit": candidate_limit,
@@ -431,6 +454,8 @@ class Collection:
             body["kind"] = kind
         if min_weight != 0.0:
             body["min_weight"] = min_weight
+        if document_filters is not None:
+            body["document_filters"] = [dict(item) for item in document_filters]
         return self._client._request(
             "POST",
             self._path + "/retrieve",

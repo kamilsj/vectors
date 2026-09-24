@@ -34,6 +34,7 @@ pub(super) struct GraphTraversal<'a> {
     pub scores: &'a HashMap<usize, CandidateScore>,
     pub lexical_scores: &'a [f64],
     pub similarities: Vec<Option<f64>>,
+    pub eligible: Option<&'a [bool]>,
 }
 
 impl GraphTraversal<'_> {
@@ -119,6 +120,9 @@ impl GraphTraversal<'_> {
                             .lookup
                             .get(text_at(row, *endpoint)?)
                             .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
+                        if self.eligible.is_some_and(|rows| !rows[target]) {
+                            continue;
+                        }
                         targets
                             .entry(target)
                             .and_modify(|(weight, previous)| {

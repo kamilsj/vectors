@@ -227,10 +227,49 @@ db.delete_relationship("article_product", expected_revision=saved["revision"])
 These methods also exist on `AsyncClient`. Creation atomically saves the
 definition and missing lookup indexes; deletion keeps records and indexes.
 Named links do not enforce foreign keys or automatically extend GraphRAG
-traversal. SQL currently supports one scalar equijoin between two tables, with
-INNER/LEFT semantics, scalar filters, vector scores, ordering, and limits;
-aggregate joins, multiple joins, and join explain plans remain unsupported.
+traversal. SQL supports INNER/LEFT scalar equijoin chains across up to 16 tables,
+including scalar filters, vector scores, ordering, and limits. Each ON must
+connect an earlier table to the new table. Aggregate joins and join explain
+plans remain unsupported.
 See [structured data and relationships](../docs/STRUCTURED_DATA.md).
+
+For a collection declaring `product_id` and `published` document fields, scope
+hybrid retrieval without re-embedding or copying business facts into passages:
+
+```python
+result = db.collection("manuals").retrieve(
+    "How do I maintain this product?",
+    document_filters=[
+        {"column": "product_id", "operator": "eq", "value": 7},
+        {"column": "published", "operator": "eq", "value": True},
+    ],
+    max_hops=2,
+)
+```
+
+Up to 32 AND-combined predicates use `eq`, `ne`, `gt`, `gte`, `lt`, or `lte`.
+`eq`/`ne` with `None` mean IS NULL/IS NOT NULL. Filters use canonical document
+columns before vector/keyword top-k and every graph hop, so excluded documents
+cannot re-enter as graph context or bridges. Omit `document_filters` or pass
+`[]` for the previous behavior. These are retrieval selectors, not per-user
+permissions; BM25 corpus statistics remain collection-wide.
+
+For filters and output fields belonging to business tables, query the full
+path directly with a vector from the collection's embedding model:
+
+```python
+rows = db.execute("""
+    SELECT c.text, d.title, p.name, c.embedding <=> $1 AS distance
+    FROM graph_manuals_chunks c
+    JOIN graph_manuals_documents d ON c.document_id = d.document_id
+    JOIN products p ON d.product_id = p.id
+    WHERE d.published = TRUE AND p.price <= $2
+    ORDER BY distance LIMIT 10
+""", params=[query_vector, 50.0])[0]
+```
+
+Graph and business tables share one query snapshot and durable storage in
+Vectors. A separate PostgreSQL server is not queried or synchronized by the SDK.
 
 ## Async applications
 

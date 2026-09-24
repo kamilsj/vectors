@@ -144,9 +144,10 @@ def check_assets(api):
               'id="graph-search-form"', 'id="graph-seeds"',
               'id="graph-retrieval-direction"', 'id="graph-retrieval-kind"',
               'id="graph-retrieval-min-weight"', 'id="graph-document-fields"',
+              'id="graph-filters-panel"', 'id="graph-document-filters"',
               'id="relationship-dialog"'],
         "/assets/app.js": ["retrieval_path", "graph-retrieval-direction", "/retrieve",
-                           "document_columns", "/relationships"],
+                           "document_columns", "document_filters", "/relationships"],
         "/assets/app.css": [".graph-workspace", ".graph-retrieval-path", ".relationship-card"],
     }.items():
         asset = api.request(path, authenticated=False)
@@ -198,11 +199,20 @@ def check_apis(api):
     require(browse["nodes"] == [] and browse["edges"] == [], "new graph collection was not empty")
     retrieved = api.request("/v1/graph/collections/release_smoke/retrieve", {
         "text": "Release check", "direction": "incoming", "kind": "supports", "min_weight": 0.5,
+        "document_filters": [{"column": "record_id", "operator": "eq", "value": 1}],
     })
     require(retrieved["hits"] == [] and retrieved["embedding_usage"]["total_tokens"] == 0,
             "empty graph retrieval should succeed without provider usage")
     api.request("/v1/graph/collections/release_smoke/retrieve",
                 {"text": "Release check", "min_weight": 2}, status=400)
+    for column, value, code in [("missing", 1, "unknown_column"),
+                                ("record_id", "1", "invalid_value")]:
+        rejected = api.request("/v1/graph/collections/release_smoke/retrieve", {
+            "text": "Release check",
+            "document_filters": [{"column": column, "operator": "eq", "value": value}],
+        }, status=400)
+        require(rejected["error"]["code"] == code,
+                "invalid document filter was not rejected before embedding")
 
     # Synthetic source-only fixture: no embeddings or provider calls.
     api.request("/v1/tables/graph_release_smoke_documents/rows", {"rows": [{
@@ -216,6 +226,8 @@ def check_apis(api):
         "expected_revision": revision,
     })
     require(relationship["relationship"]["valid"], "cross-table relationship was not saved")
+    sql(api, "CREATE TABLE release_labels (record_id INTEGER UNIQUE, label TEXT); "
+             "INSERT INTO release_labels VALUES (1, 'Published')")
     check_relationship_join(api)
 
 
@@ -225,10 +237,12 @@ def check_relationship_join(api):
             "relationship catalog is incomplete or invalid")
     document = api.request("/v1/graph/collections/release_smoke/documents/manual")
     require(document["metadata"]["record_id"] == 1, "typed document metadata was lost")
-    result = sql(api, "SELECT d.document_id,r.title,cosine_distance(r.embedding,ARRAY[1,0,0]) AS distance "
+    result = sql(api, "SELECT d.document_id,r.title,l.label,cosine_distance(r.embedding,ARRAY[1,0,0]) AS distance "
                  "FROM graph_release_smoke_documents d LEFT JOIN release_smoke r ON d.record_id=r.id "
+                 "JOIN release_labels l ON r.id=l.record_id "
                  "ORDER BY distance LIMIT 1")[0]
-    require(result["rows"] == [["manual", "Release ✓", 0.0]], "vector-ranked SQL join returned wrong data")
+    require(result["rows"] == [["manual", "Release ✓", "Published", 0.0]],
+            "vector-ranked three-table SQL join returned wrong data")
 
 
 def run(binary, expected_version, timeout):
@@ -248,7 +262,7 @@ def run(binary, expected_version, timeout):
             require(collection["config"]["name"] == "release_smoke" and collection["chunk_count"] == 0,
                     "graph collection did not survive restart")
             check_relationship_join(api)
-    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, typed fields, relationships, joins, restart")
+    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, typed filters, relationships, join chains, restart")
 
 
 def main():

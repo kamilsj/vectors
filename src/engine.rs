@@ -2268,6 +2268,17 @@ fn run_typed_vector_search(
     request: VectorSearch,
     compute: &ComputeRuntime,
 ) -> Result<QueryResult> {
+    run_typed_vector_search_in_rows(table, request, compute, None)
+}
+
+// `allowed_rows` contains sorted, unique row positions from this table's
+// currently locked snapshot. Restrict before top-k, never after ranking.
+fn run_typed_vector_search_in_rows(
+    table: &Table,
+    request: VectorSearch,
+    compute: &ComputeRuntime,
+    allowed_rows: Option<&[usize]>,
+) -> Result<QueryResult> {
     if request.limit == 0 {
         return Err(Error::InvalidQuery(
             "search limit must be greater than zero".into(),
@@ -2357,6 +2368,19 @@ fn run_typed_vector_search(
     let indexed_rows = selection
         .as_ref()
         .and_then(|selection| indexed_candidate_rows(table, selection));
+    let indexed_rows = match (indexed_rows, allowed_rows) {
+        (Some(mut candidates), Some(allowed)) => {
+            candidates
+                .rows
+                .retain(|row| allowed.binary_search(row).is_ok());
+            Some(candidates)
+        }
+        (None, Some(allowed)) => Some(IndexedCandidates {
+            rows: allowed.to_vec(),
+            exact: selection.is_none(),
+        }),
+        (candidates, None) => candidates,
+    };
     let residual_selection = match &indexed_rows {
         Some(candidates) if candidates.exact => None,
         _ => selection.as_ref(),
@@ -4872,6 +4896,7 @@ struct EvalContext<'a> {
     row: &'a [Value],
     excluded: Option<&'a [Value]>,
     joined_row: Option<&'a [Value]>,
+    joined_values: Option<&'a [Option<&'a Value>]>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -4881,6 +4906,7 @@ impl<'a> EvalContext<'a> {
             row,
             excluded: None,
             joined_row: None,
+            joined_values: None,
         }
     }
 
@@ -4890,6 +4916,7 @@ impl<'a> EvalContext<'a> {
             row,
             excluded: Some(excluded),
             joined_row: None,
+            joined_values: None,
         }
     }
 
@@ -4899,6 +4926,7 @@ impl<'a> EvalContext<'a> {
             row: &[],
             excluded: None,
             joined_row: None,
+            joined_values: None,
         }
     }
 
@@ -4908,10 +4936,24 @@ impl<'a> EvalContext<'a> {
             row: left,
             excluded: None,
             joined_row: right,
+            joined_values: None,
+        }
+    }
+
+    fn joined_many(columns: &'a [Column], values: &'a [Option<&'a Value>]) -> Self {
+        Self {
+            columns,
+            row: &[],
+            excluded: None,
+            joined_row: None,
+            joined_values: Some(values),
         }
     }
 
     fn value(&self, index: usize) -> Value {
+        if let Some(values) = self.joined_values {
+            return values[index].cloned().unwrap_or(Value::Null);
+        }
         if index < self.row.len() {
             self.row[index].clone()
         } else {

@@ -649,3 +649,37 @@ cross-database performance. Measurements ran in a coordinated quiet window;
 desktop background activity was not controlled. The
 [raw report](benchmarks/sql-joins-2026-09-20.json) includes every timing sample,
 result fingerprints, and exact measured source and executable hashes.
+
+### Reusing primary-key lookups
+
+On 2026-09-24 the same harness gained a PRIMARY KEY workload, matching the
+common document-to-business-record join. It compares identical 50,000-row
+tables with a maintained primary key versus a temporary lookup, using 64
+probes, 128-dimensional vectors, the same residual filter, and `LIMIT 10`.
+
+```sh
+cargo build --release --locked --example benchmark_sql_join
+target/release/examples/benchmark_sql_join 50000 128 20
+```
+
+Baseline commit `292e721` was compared with the JOIN changes using the same
+updated harness, Rust 1.98.1, default features, CPU execution, and the same
+Apple M4 Max/macOS hardware described above. Four sequential processes ran in
+baseline/candidate/candidate/baseline order, producing 40 samples per version
+and workload. Other project builds and tests were paused during measurement.
+
+| Maintained lookup workload | Before median / p95 | After median / p95 |
+| --- | ---: | ---: |
+| PRIMARY KEY, 64 matches | 3.073 / 3.614 ms | 0.252 / 0.280 ms |
+| HASH, 64 matches | 0.241 / 0.287 ms | 0.248 / 0.285 ms |
+| HASH, 6,400 matching pairs | 15.798 / 16.645 ms | 16.056 / 16.931 ms |
+
+Reusing the existing primary-key map improved that workload's median by
+12.20×. The pre-existing HASH workloads were 2.8% and 1.6% slower, respectively;
+this is a targeted primary-key improvement, not a general throughput claim.
+Complete ordered results, scores, column types, and rows-examined counts matched
+across versions and maintained/temporary lookup strategies. Multi-table chains
+have correctness coverage but were not timed here. The same setup, provider,
+HTTP, serialization, and persistence exclusions apply as above. The
+[raw report](benchmarks/sql-joins-2026-09-24.json) records every sample and the
+exact source/binary hashes for reproducing the comparison.

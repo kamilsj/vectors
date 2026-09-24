@@ -7,6 +7,9 @@ use std::sync::{OnceLock, Weak};
 #[path = "graph_traversal.rs"]
 mod traversal;
 
+#[path = "graph_filters.rs"]
+mod filters;
+
 #[derive(Clone, Debug)]
 pub struct GraphBrowseRequest {
     pub collection: String,
@@ -576,6 +579,7 @@ impl LexicalIndex {
         terms: &BTreeSet<String>,
         chunks: &Table,
         limit: usize,
+        eligible: Option<&[bool]>,
     ) -> (Vec<f64>, Vec<(usize, f64)>) {
         let mut scores = vec![0.0; self.length_factors.len()];
         let count = self.length_factors.len() as f64;
@@ -587,6 +591,9 @@ impl LexicalIndex {
             let frequency = postings.len() as f64;
             let idf = (1.0 + (count - frequency + 0.5) / (frequency + 0.5)).ln();
             for &(row, frequency) in postings {
+                if eligible.is_some_and(|rows| !rows[row]) {
+                    continue;
+                }
                 let tf = frequency as f64;
                 let denominator = tf + self.length_factors[row];
                 scores[row] += idf * tf * 2.2 / denominator;
@@ -724,6 +731,19 @@ impl Database {
         request: GraphRagRequest,
         policy: GraphRagTraversal,
     ) -> Result<GraphRagSnapshot> {
+        self.graph_rag_candidates_filtered(request, policy, Vec::new())
+    }
+
+    /// Apply AND-combined scalar document predicates before vector/BM25 top-k
+    /// and at every graph hop. All predicates and values are read from the same
+    /// catalog snapshot as the returned citations; excluded nodes cannot be
+    /// used as bridges. Unfiltered retrieval keeps its existing fast path.
+    pub fn graph_rag_candidates_filtered(
+        &self,
+        request: GraphRagRequest,
+        policy: GraphRagTraversal,
+        document_filters: Vec<VectorSearchFilter>,
+    ) -> Result<GraphRagSnapshot> {
         policy.validate()?;
         if !(1..=100).contains(&request.candidate_limit)
             || !(1..=20).contains(&request.seed_limit)
@@ -753,13 +773,36 @@ impl Database {
             return Err(Error::ZeroNorm);
         }
         let chunks = table(&catalog, &info.tables.chunks)?;
+        let document_table = table(&catalog, &info.tables.documents)?;
+        let eligible = filters::eligible_chunks(document_table, chunks, &document_filters)?;
+        if eligible
+            .as_ref()
+            .is_some_and(|rows| !rows.iter().any(|allowed| *allowed))
+        {
+            return Ok(GraphRagSnapshot {
+                collection: info.config.name,
+                revision: catalog.revision,
+                candidates: Vec::new(),
+                edges: Vec::new(),
+                lexical_cache_hit: false,
+                truncated: false,
+            });
+        }
+        let allowed_rows = eligible
+            .as_ref()
+            .map(|rows| {
+                rows.iter()
+                    .enumerate()
+                    .filter_map(|(row, allowed)| allowed.then_some(row))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|rows| rows.len() != chunks.rows.len());
         let lookup = chunks
             .rows
             .iter()
             .enumerate()
             .map(|(index, row)| text_at(row, 0).map(|id| (id, index)))
             .collect::<Result<HashMap<_, _>>>()?;
-        let document_table = table(&catalog, &info.tables.documents)?;
         let documents = document_table
             .rows
             .iter()
@@ -768,7 +811,7 @@ impl Database {
         let mut scores: HashMap<usize, CandidateScore> = HashMap::new();
         let mut query_similarities = vec![None; chunks.rows.len()];
         if request.vector_weight > 0.0 {
-            let result = run_typed_vector_search(
+            let result = run_typed_vector_search_in_rows(
                 chunks,
                 VectorSearch {
                     table: info.tables.chunks.clone(),
@@ -780,6 +823,7 @@ impl Database {
                     limit: request.candidate_limit,
                 },
                 &self.compute,
+                allowed_rows.as_deref(),
             )?;
             for (rank, row) in result.rows.iter().enumerate() {
                 let index = *lookup
@@ -796,7 +840,8 @@ impl Database {
             let (index, cache_hit) =
                 lexical_index(&self.catalog, &info.config.name, chunks, &terms)?;
             lexical_cache_hit = cache_hit;
-            let (all_scores, lexical_ranks) = index.score(&terms, chunks, request.candidate_limit);
+            let (all_scores, lexical_ranks) =
+                index.score(&terms, chunks, request.candidate_limit, eligible.as_deref());
             lexical_scores = all_scores;
             for (rank, (index, _)) in lexical_ranks.into_iter().enumerate() {
                 scores.entry(index).or_default().fusion +=
@@ -823,6 +868,7 @@ impl Database {
             scores: &scores,
             lexical_scores: &lexical_scores,
             similarities: query_similarities,
+            eligible: eligible.as_deref(),
         }
         .expand(&ranked)?;
         let mut candidates = Vec::with_capacity(admitted.len());

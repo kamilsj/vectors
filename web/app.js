@@ -831,8 +831,8 @@ function parseFilterValue(value, dataType) {
   }
   if (dataType === "INTEGER" || dataType === "DOUBLE") {
     const number = Number(value);
-    if (!value.trim() || !Number.isFinite(number)) throw new Error(`Filter value must be numeric for ${dataType}.`);
-    if (dataType === "INTEGER" && !Number.isSafeInteger(number)) throw new Error("Integer filter value must be a safe whole number.");
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim()) || !Number.isFinite(number)) throw new Error(`Filter value must be numeric for ${dataType}.`);
+    if (dataType === "INTEGER" && (!/^[+-]?\d+$/.test(value.trim()) || !Number.isSafeInteger(number))) throw new Error("Integer filter value must be a safe whole number.");
     return number;
   }
   return value;
@@ -1893,6 +1893,7 @@ async function embedAndInsertDocuments() {
 function newGraphState() {
   return { collections: [], collection: "", catalogGeneration: 0, generation: 0, previewGeneration: 0,
     searchGeneration: 0, seedExplicit: false, busy: false, searchBusy: false, loading: false, notice: "",
+    filterDrafts: new Map(), filterSchema: "",
     mode: "pages", rootChunk: null, rootLabel: "", pageSelection: null, neighborhoodTruncated: false, offset: 0, limit: 100, total: 0,
     revision: null, nodes: [], edges: [], selected: null, zoom: 1, pan: { x: 0, y: 0 }, dragged: false };
 }
@@ -1937,6 +1938,112 @@ function openCreateCollection() {
 
 function graphDocumentColumns() {
   return validateFieldDefinitions(graphCollection()?.document_columns || [], { documentFields: true });
+}
+
+const GRAPH_FILTER_OPERATORS = [
+  ["eq", "Equals"], ["ne", "Does not equal"], ["lt", "Less than"], ["lte", "At most"],
+  ["gt", "Greater than"], ["gte", "At least"], ["is_null", "Is empty (null)"], ["is_not_null", "Has a value"],
+];
+function graphFilterColumns() {
+  return ["document_id", "title", "source"].map((name) => ({ name, data_type: "TEXT" })).concat(graphDocumentColumns());
+}
+function graphFilterDraft() {
+  const drafts = state.graph.filterDrafts;
+  if (!drafts.has(state.graph.collection)) drafts.set(state.graph.collection, []);
+  return drafts.get(state.graph.collection);
+}
+function readGraphFilters() {
+  const draft = graphFilterDraft();
+  if (!draft.length) return [];
+  if (!graphCollection()) throw new Error("Choose a collection before filtering its documents.");
+  if (draft.length > 32) throw new Error("Use at most 32 document filters.");
+  const columns = graphFilterColumns();
+  return draft.map((item) => {
+    if (!item.column) throw new Error("Choose a document field for each filter before retrieving context.");
+    const column = columns.find((column) => column.name === item.column);
+    if (!column || column.data_type !== item.dataType) throw new Error(`The field ${item.column} changed or is unavailable. Choose its field again or remove the filter.`);
+    if (!GRAPH_FILTER_OPERATORS.some(([operator]) => operator === item.operator)) throw new Error("Choose a valid document filter condition.");
+    if (item.operator === "is_null" || item.operator === "is_not_null") return { column: column.name, operator: item.operator === "is_null" ? "eq" : "ne", value: null };
+    if (column.data_type === "BOOLEAN" && !["eq", "ne"].includes(item.operator)) throw new Error("Boolean fields support equals, does not equal, and empty value conditions.");
+    return { column: column.name, operator: item.operator, value: parseFilterValue(item.value, column.data_type) };
+  });
+}
+function describeGraphFilters(filters) {
+  return filters.map((filter) => {
+    if (filter.value === null) return `${filter.column} ${filter.operator === "eq" ? "is empty" : "has a value"}`;
+    const label = GRAPH_FILTER_OPERATORS.find(([operator]) => operator === filter.operator)?.[1].toLowerCase() || filter.operator;
+    const value = JSON.stringify(filter.value);
+    return `${filter.column} ${label} ${value.length > 100 ? `${value.slice(0, 100)}…` : value}`;
+  }).join(" AND ");
+}
+function graphFiltersChanged() {
+  state.graph.searchGeneration += 1;
+  state.graph.searchBusy = false;
+  $("#graph-search-results").setAttribute("aria-busy", "false");
+  clear($("#graph-search-results")).append(node("p", "empty-workspace", "Document filters changed. Retrieve context to see matching passages."));
+  $("#graph-search-status").textContent = "";
+  updateGraphFilterSummary(); updateGraphPaging();
+}
+function updateGraphFilterSummary() {
+  const count = graphFilterDraft().length;
+  $("#graph-filters-count").textContent = count ? ` · ${count}` : "";
+  try {
+    const filters = readGraphFilters();
+    $("#graph-filter-summary").textContent = filters.length
+      ? `Match all: ${describeGraphFilters(filters)}. Only matching documents can supply passages or connecting context.`
+      : "All documents are eligible. Add filters to narrow the source context.";
+  } catch (error) { $("#graph-filter-summary").textContent = error.message; }
+}
+function syncGraphFilters() {
+  const disabled = state.graph.busy || state.graph.searchBusy;
+  $("#graph-filter-add").disabled = disabled || !graphCollection() || graphFilterDraft().length >= 32 || Boolean($("#graph-document-filters").dataset.error);
+  $("#graph-filter-clear").disabled = disabled || !graphFilterDraft().length;
+  for (const row of $$("[data-graph-filter-row]")) {
+    const noValue = ["is_null", "is_not_null"].includes($("[data-filter-operator]", row).value);
+    $("[data-filter-value]", row).disabled = disabled || noValue;
+  }
+}
+function renderGraphFilters() {
+  const target = clear($("#graph-document-filters"));
+  let columns;
+  try { columns = graphFilterColumns(); target.dataset.error = ""; }
+  catch (error) {
+    columns = []; target.dataset.error = error.message;
+    target.append(node("p", "inline-status", `Document fields could not be loaded: ${error.message}`));
+  }
+  const signature = JSON.stringify([state.graph.collection, columns]);
+  if (state.graph.filterSchema && signature !== state.graph.filterSchema && graphFilterDraft().length) graphFiltersChanged();
+  state.graph.filterSchema = signature;
+  for (const [index, item] of graphFilterDraft().entries()) {
+    const row = node("div", "graph-filter-row"); row.dataset.graphFilterRow = "";
+    const label = (text, input) => { const element = node("label", "", text); element.append(input); return element; };
+    const field = node("select"); field.dataset.filterColumn = "";
+    fillOptions(field, columns.map((column) => ({ id: column.name, label: `${column.name} · ${column.data_type.toLowerCase()}` })), item.column, "Choose a field");
+    if (columns.some((column) => column.name === item.column && column.data_type !== item.dataType)) {
+      field.value = ""; field.firstElementChild.textContent = "Choose field again (type changed)";
+    }
+    if (item.column && !columns.some((column) => column.name === item.column)) {
+      const missing = node("option", "", `${item.column} · unavailable`); missing.value = item.column; field.append(missing); field.value = item.column;
+    }
+    field.addEventListener("change", () => {
+      item.column = field.value; item.dataType = columns.find((column) => column.name === item.column)?.data_type;
+      item.value = ""; item.operator = "eq"; renderGraphFilters(); graphFiltersChanged();
+      $$("[data-filter-column]", target)[index]?.focus();
+    });
+    const operator = node("select"); operator.dataset.filterOperator = "";
+    const operators = GRAPH_FILTER_OPERATORS.filter(([value]) => item.dataType !== "BOOLEAN" || ["eq", "ne", "is_null", "is_not_null"].includes(value));
+    fillOptions(operator, operators.map(([id, label]) => ({ id, label })), item.operator);
+    operator.addEventListener("change", () => { item.operator = operator.value; graphFiltersChanged(); });
+    const input = node(item.dataType === "BOOLEAN" ? "select" : "input"); input.dataset.filterValue = "";
+    if (item.dataType === "BOOLEAN") fillOptions(input, [{ id: "true", label: "True" }, { id: "false", label: "False" }], item.value, "Choose true or false");
+    else { input.type = "text"; input.value = item.value; if (item.dataType === "INTEGER" || item.dataType === "DOUBLE") input.inputMode = "decimal"; }
+    input.addEventListener("input", () => { item.value = input.value; graphFiltersChanged(); });
+    const remove = node("button", "button ghost compact graph-filter-remove", "Remove"); remove.type = "button";
+    remove.setAttribute("aria-label", `Remove document filter ${index + 1}`);
+    remove.addEventListener("click", () => { graphFilterDraft().splice(index, 1); renderGraphFilters(); graphFiltersChanged(); });
+    row.append(label("Document field", field), label("Condition", operator), label("Value", input), remove); target.append(row);
+  }
+  updateGraphFilterSummary(); syncGraphFilters();
 }
 
 function renderGraphDocumentFields({ reset = false } = {}) {
@@ -2074,6 +2181,7 @@ function updateGraphPaging() {
   $$("#graph-neighborhood-controls input, #graph-neighborhood-controls select, #graph-neighborhood-controls button, [data-explore-connections]").forEach((element) => { element.disabled = graph.busy; });
   $$("#graph-relationship-form input, #graph-relationship-form select, #graph-relationship-form button, [data-remove-relationship]").forEach((element) => { element.disabled = graph.busy || graph.loading; });
   $$("#graph-search-form input, #graph-search-form textarea, #graph-search-form select, #graph-search-form button").forEach((element) => { element.disabled = graph.busy || graph.searchBusy; });
+  syncGraphFilters();
 }
 
 async function loadGraphCollections(preferred = null) {
@@ -2091,6 +2199,7 @@ async function loadGraphCollections(preferred = null) {
     else {
       graphProfileNote();
       renderGraphDocumentFields();
+      renderGraphFilters();
       if (selected) await loadGraph();
       else renderGraph();
     }
@@ -2113,7 +2222,8 @@ async function selectGraphCollection(name) {
   $("#graph-document-status").textContent = "";
   clear($("#graph-chunk-preview"));
   clear($("#graph-search-results")).append(node("p", "empty-workspace", "Retrieved passages and their source citations will appear here."));
-  graphProfileNote(); renderGraphDocumentFields({ reset: true }); renderGraph(); renderGraphDetails(); updateGraphPaging();
+  graphProfileNote(); renderGraphDocumentFields({ reset: true }); renderGraphFilters(); renderGraph(); renderGraphDetails(); updateGraphPaging();
+  $("#graph-search-results").setAttribute("aria-busy", "false");
   if (name) await loadGraph();
 }
 async function loadGraph() {
@@ -2632,7 +2742,10 @@ async function retrieveGraphContext(event) {
   event.preventDefault();
   const graph = state.graph;
   if (graph.searchBusy || graph.busy) return;
+  const session = state.session;
+  const collection = graph.collection;
   const generation = ++graph.searchGeneration;
+  const current = () => session === state.session && graph === state.graph && collection === state.graph.collection && generation === state.graph.searchGeneration;
   graph.searchBusy = true; updateGraphPaging();
   $("#graph-search-results").setAttribute("aria-busy", "true");
   try {
@@ -2641,28 +2754,31 @@ async function retrieveGraphContext(event) {
     const maxBytes = $("#graph-reranker").value === "voyage" ? 7872 : 8191;
     if (text.includes("\0") || new TextEncoder().encode(text).length > maxBytes) throw new Error(`Questions must not contain NUL characters and must fit within ${maxBytes} UTF-8 bytes.`);
     const options = graphRetrievalOptions();
+    const documentFilters = readGraphFilters();
     const config = await requireGraphProfile();
-    if (generation !== state.graph.searchGeneration) throw staleRequest();
+    if (!current()) throw staleRequest();
     const reranker = $("#graph-reranker").value;
     if (reranker === "voyage") {
       const settings = state.reranking || await loadRerankingSettings();
       if (!settings?.configured) throw new Error("Add a Voyage reranking key in Settings first.");
     }
-    if (generation !== state.graph.searchGeneration) throw staleRequest();
+    if (!current()) throw staleRequest();
     const payload = { text, ...options, reranker };
+    if (documentFilters.length) payload.document_filters = documentFilters;
     $("#graph-search-status").textContent = reranker === "voyage" ? "Retrieving candidates, then asking Voyage to rerank their context…" : "Combining vector matches, lexical evidence, and connected passages…";
     const result = await request(graphPath("/retrieve"), { method: "POST", timeout: (config.timeout_seconds + (reranker === "voyage" ? state.reranking.timeout_seconds : 0) + 15) * 1000, body: JSON.stringify(payload) });
-    if (generation !== state.graph.searchGeneration) throw staleRequest();
-    renderGraphContext(result);
+    if (!current()) throw staleRequest();
+    renderGraphContext(result, documentFilters);
     $("#graph-search-status").textContent = `${result.hits.length} passage${result.hits.length === 1 ? "" : "s"} retrieved. Scores rank candidates; they are not confidence or factual certainty.`;
-  } catch (error) { if (generation === state.graph.searchGeneration) graphError(error, "graph-search-status"); }
-  finally { if (generation === state.graph.searchGeneration) { graph.searchBusy = false; updateGraphPaging(); $("#graph-search-results").setAttribute("aria-busy", "false"); } }
+  } catch (error) { if (current()) graphError(error, "graph-search-status"); }
+  finally { if (current()) { graph.searchBusy = false; updateGraphPaging(); $("#graph-search-results").setAttribute("aria-busy", "false"); } }
 }
-function renderGraphContext(result) {
+function renderGraphContext(result, documentFilters = []) {
   const target = clear($("#graph-search-results"));
   const method = result.reranking.method === "voyage" ? `Voyage ${result.reranking.model}` : "Local hybrid ranking";
   target.append(node("p", "graph-context-summary", `${method} · ${result.candidate_count} candidates · ${result.context_bytes.toLocaleString()} context bytes${result.truncated ? " · bounded results" : ""}`));
-  if (!result.hits.length) { target.append(node("p", "empty-workspace", "No passages fit this query and context budget.")); return; }
+  if (documentFilters.length) target.append(node("p", "graph-context-summary graph-applied-filters", `Document scope · ${describeGraphFilters(documentFilters)}. Unmatched documents are excluded from this context.`));
+  if (!result.hits.length) { target.append(node("p", "empty-workspace", documentFilters.length ? "No passages fit these document filters, question, and context budget. Review the filters or widen the scope." : "No passages fit this query and context budget.")); return; }
   const returnedPassages = new Map(result.hits.slice(0, 100).map((hit) => [hit.chunk_id, hit]));
   for (const [index, hit] of result.hits.slice(0, 100).entries()) {
     const card = node("article", "graph-hit"); card.append(node("h4", "", `${index + 1}. ${hit.title || hit.document_id}`), graphCitation(hit), node("p", "graph-passage", hit.text));
@@ -2737,6 +2853,16 @@ function bindGraphEvents() {
   $("#graph-document-form").addEventListener("input", () => { state.graph.previewGeneration += 1; clear($("#graph-chunk-preview")); $("#graph-document-status").textContent = ""; });
   $("#graph-preview").addEventListener("click", previewGraphDocument);
   $("#graph-search-form").addEventListener("submit", retrieveGraphContext);
+  $("#graph-filter-add").addEventListener("click", () => {
+    if (state.graph.busy || state.graph.searchBusy || !graphCollection() || graphFilterDraft().length >= 32) return;
+    graphFilterDraft().push({ column: "", dataType: "", operator: "eq", value: "" });
+    renderGraphFilters(); graphFiltersChanged();
+    $$("[data-graph-filter-row]").at(-1)?.querySelector("select").focus();
+  });
+  $("#graph-filter-clear").addEventListener("click", () => {
+    if (state.graph.busy || state.graph.searchBusy) return;
+    state.graph.filterDrafts.set(state.graph.collection, []); renderGraphFilters(); graphFiltersChanged();
+  });
   $("#graph-candidates").addEventListener("input", updateGraphSeedBudget);
   $("#graph-hops").addEventListener("input", updateGraphSeedBudget);
   $("#graph-seeds").addEventListener("input", () => { state.graph.seedExplicit = true; updateGraphSeedBudget(); });
@@ -2786,6 +2912,7 @@ function resetGraphSession() {
   $("#admin-create-form").reset();
   mountFieldBuilder("graph-create-fields", [], { documentFields: true });
   renderGraphDocumentFields({ reset: true });
+  renderGraphFilters();
   fillOptions($("#graph-collection"), [], null, "Choose a collection");
   for (const id of ["graph-chunk-preview", "graph-search-results"]) clear($("#" + id));
   for (const id of ["graph-document-status", "graph-search-status", "graph-create-status"]) $("#" + id).textContent = "";

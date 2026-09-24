@@ -76,15 +76,53 @@ class SDKTests(unittest.TestCase):
         with Client(transport=httpx.MockTransport(handler)) as client:
             client.create_collection("manuals", document_columns=columns)
             revision = client.relationships()["revision"]
-            client.create_relationship("about_product", source_table="graph_manuals_documents",
-                                       source_column="product_id", target_table="products",
-                                       target_column="id", expected_revision=revision)
+            client.create_relationship(
+                "about_product",
+                source_table="graph_manuals_documents",
+                source_column="product_id",
+                target_table="products",
+                target_column="id",
+                expected_revision=revision,
+            )
             client.delete_relationship("about_product", expected_revision=8)
         self.assertEqual(json.loads(calls[0].content)["document_columns"], columns)
         self.assertEqual(calls[1].method, "GET")
         self.assertEqual(json.loads(calls[2].content)["expected_revision"], 7)
         self.assertEqual(calls[3].url.path, "/v1/relationships/about_product")
         self.assertEqual(json.loads(calls[3].content), {"expected_revision": 8})
+
+    def test_named_relationship_writes_never_retry_overloads_or_stale_revisions(self):
+        for status, code in ((503, "overloaded"), (409, "stale_revision")):
+            with self.subTest(code=code):
+                calls = []
+
+                def handler(request):
+                    calls.append(request)
+                    return httpx.Response(
+                        status,
+                        headers={"Retry-After": "0"},
+                        json={"error": {"code": code, "message": "retry manually"}},
+                    )
+
+                with Client(transport=httpx.MockTransport(handler)) as client:
+                    for operation in (
+                        lambda: client.create_relationship(
+                            "manual_product",
+                            source_table="graph_manuals_documents",
+                            source_column="product_id",
+                            target_table="products",
+                            target_column="id",
+                            expected_revision=7,
+                        ),
+                        lambda: client.delete_relationship(
+                            "manual_product", expected_revision=7
+                        ),
+                    ):
+                        before = len(calls)
+                        with self.assertRaises(APIError) as raised:
+                            operation()
+                        self.assertEqual(raised.exception.code, code)
+                        self.assertEqual(len(calls), before + 1)
 
     def test_insert_consumes_generator_lazily_and_reports_progress(self):
         consumed, requests = [], []
@@ -255,12 +293,18 @@ class SDKTests(unittest.TestCase):
         with Client(transport=httpx.MockTransport(handler)) as client:
             graph = client.collection("docs")
             graph.retrieve("question")
-            graph.retrieve("question", direction="outgoing", kind=None, min_weight=0)
+            graph.retrieve(
+                "question",
+                direction="outgoing",
+                kind=None,
+                min_weight=0,
+                document_filters=None,
+            )
             result = graph.retrieve(
                 "question", direction="incoming", kind="supports", min_weight=0.8
             )
         self.assertEqual(payloads[0], payloads[1])
-        for field in ("direction", "kind", "min_weight"):
+        for field in ("direction", "kind", "min_weight", "document_filters"):
             self.assertNotIn(field, payloads[0])
         self.assertEqual(
             payloads[2],
@@ -272,6 +316,36 @@ class SDKTests(unittest.TestCase):
             },
         )
         self.assertEqual(result["hits"][0]["retrieval_path"], evidence)
+
+    def test_retrieval_document_filters_preserve_types_and_explicit_empty_list(self):
+        payloads = []
+
+        def handler(request):
+            payloads.append(json.loads(request.content))
+            return httpx.Response(200, json={"hits": []})
+
+        filters = [
+            {"column": "product_id", "operator": "eq", "value": 7},
+            {"column": "published", "operator": "eq", "value": False},
+            {"column": "category", "operator": "ne", "value": "雪"},
+            {"column": "weight", "operator": "gte", "value": 0.5},
+            {"column": "retired_at", "operator": "eq", "value": None},
+        ]
+        with Client(transport=httpx.MockTransport(handler)) as client:
+            graph = client.collection("manuals")
+            graph.retrieve("question", document_filters=[])
+            graph.retrieve("question", document_filters=filters)
+            before = len(payloads)
+            with self.assertRaises(ValueError):
+                graph.retrieve(
+                    "question",
+                    document_filters=[
+                        {"column": "weight", "operator": "eq", "value": float("nan")}
+                    ],
+                )
+            self.assertEqual(len(payloads), before)
+        self.assertEqual(payloads[0]["document_filters"], [])
+        self.assertEqual(payloads[1]["document_filters"], filters)
 
     def test_redirects_are_not_followed_and_configuration_is_validated(self):
         calls = []
@@ -337,6 +411,15 @@ class AsyncSDKTests(unittest.IsolatedAsyncioTestCase):
         for options in (
             {},
             {"direction": "both", "kind": "references", "min_weight": 0.4},
+            {"document_filters": None},
+            {"document_filters": []},
+            {
+                "document_filters": [
+                    {"column": "product_id", "operator": "eq", "value": 7},
+                    {"column": "published", "operator": "eq", "value": False},
+                    {"column": "nullable", "operator": "ne", "value": None},
+                ]
+            },
         ):
             with Client(transport=httpx.MockTransport(sync_handler)) as client:
                 client.collection("docs").retrieve("question", **options)
@@ -345,6 +428,47 @@ class AsyncSDKTests(unittest.IsolatedAsyncioTestCase):
             ) as client:
                 await client.collection("docs").retrieve("question", **options)
         self.assertEqual(async_payloads, sync_payloads)
+
+    async def test_async_named_relationships_preserve_revision_and_paths(self):
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json={"revision": 7, "relationships": []})
+
+        async with AsyncClient(
+            "https://example.test/database/", transport=httpx.MockTransport(handler)
+        ) as client:
+            listed = await client.relationships()
+            await client.create_relationship(
+                "manual_product",
+                source_table="graph_manuals_documents",
+                source_column="product_id",
+                target_table="products",
+                target_column="id",
+                expected_revision=listed["revision"],
+            )
+            await client.delete_relationship("manual_product", expected_revision=8)
+        self.assertEqual(
+            [(request.method, request.url.path) for request in requests],
+            [
+                ("GET", "/database/v1/relationships"),
+                ("POST", "/database/v1/relationships"),
+                ("DELETE", "/database/v1/relationships/manual_product"),
+            ],
+        )
+        self.assertEqual(
+            json.loads(requests[1].content),
+            {
+                "name": "manual_product",
+                "source_table": "graph_manuals_documents",
+                "source_column": "product_id",
+                "target_table": "products",
+                "target_column": "id",
+                "expected_revision": 7,
+            },
+        )
+        self.assertEqual(json.loads(requests[2].content), {"expected_revision": 8})
 
     async def test_async_ingestion_search_and_graph(self):
         requests = []

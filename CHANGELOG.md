@@ -15,15 +15,25 @@ uses that section as the curated introduction to the GitHub release notes.
 - Typed document fields for RAG collections, with required/unique constraints,
   maintained scalar indexes, and one shared visual field editor for collections
   and ordinary SQL tables. Declared metadata lives in canonical SQL columns.
-- Two-table SQL `INNER JOIN` and `LEFT JOIN` on scalar equality, including
-  vector ranking, aliases, filters, and bounded results. Joins reuse existing
-  hash indexes or build a temporary lookup and stream matching row pairs.
+- SQL `INNER JOIN` and `LEFT JOIN` chains across up to 16 tables on scalar
+  equality, including vector ranking, aliases, filters, and bounded results.
+  Joins reuse existing hash indexes or build a temporary lookup and stream
+  matching rows without materializing intermediate join results.
+- Typed `document_filters` in hybrid GraphRAG retrieval and the Python SDK,
+  applied before vector/BM25 top-k and every graph hop, with schema validation
+  before provider calls and snapshot-consistent field values and citations.
+- Typed document filter controls in Connections, with collection-specific
+  drafts, nullable-field comparisons, and the applied scope on retrieval results.
 - Named relationships between different tables through Data, the HTTP API,
   and synchronous/asynchronous Python clients. Links match compatible fields,
   create lookup indexes atomically, and open a ready-to-edit SQL join.
 
 ### Changed
 
+- SQL joins reuse maintained PRIMARY KEY and UNIQUE lookup maps, avoiding
+  temporary lookup construction for common document-to-record joins.
+- Retrieval with no matching documents skips vector scoring, keyword index
+  construction, and citation-map allocation after validating the request.
 - Metadata-only document edits reuse existing embeddings, chunk relationships,
   and keyword indexes, with zero embedding usage and revision protection.
 - Data creation offers RAG documents or structured tables through the existing

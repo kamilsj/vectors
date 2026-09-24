@@ -126,10 +126,13 @@ fingerprint without changing chunk storage generations, vectors, or edges.
 They therefore retain the lexical cache. Legacy schemas and snapshots remain
 compatible.
 
-Two-table INNER/LEFT equijoins bind column references once and feed borrowed
-row pairs into the shared expression evaluator and bounded candidate sink.
-The right-side maintained HASH index is reused where types match; otherwise
-a temporary hash lookup is built. Mixed INTEGER/DOUBLE keys use the same
+INNER/LEFT equijoin chains (up to 16 tables) bind each ON against its visible
+table prefix and feed borrowed row values into the shared expression evaluator
+and bounded candidate sink. A scratch row holds references, not cloned vectors
+or materialized intermediate results. The two-table path retains its direct
+row-pair loop. Every stage requires equality to the newly joined table.
+The right-side maintained HASH or PRIMARY KEY/UNIQUE index is reused where
+types match; otherwise a temporary hash lookup is built. Mixed INTEGER/DOUBLE keys use the same
 numeric coercion as expression comparison. NULL keys never match; LEFT joins
 produce a null-extended right row only when no pair satisfies ON. WHERE then
 filters the joined row. Ordered joins still scan their matching candidates;
@@ -141,8 +144,20 @@ Definition insertion and missing endpoint HASH indexes share one atomic SQL
 batch and the existing WAL/snapshot machinery. Listing checks endpoint types
 and marks broken links invalid. Deletion removes only the definition. These
 links do not enforce foreign keys or participate automatically in GraphRAG
-traversal. The SQL join path currently excludes aggregate/multi-table joins
+traversal. The SQL join path currently excludes aggregate joins
 and EXPLAIN; unsupported forms fail explicitly.
+
+Hybrid RAG accepts up to 32 typed document predicates, validated before provider
+work and again under the candidate snapshot lock. Scalar indexes narrow matching
+documents; their chunk eligibility restricts exact vector top-k, BM25 ranks, and
+every traversal hop before any neighbor/candidate budget is consumed. Excluded
+chunks cannot be bridges or path evidence. The unfiltered/all-eligible vector
+case retains the contiguous scan path. Keyword postings and BM25 corpus
+statistics remain collection-wide; query-local eligibility never enters the
+chunk-generation cache. Final reranking/MMR uses the same owned snapshot.
+If no document matches, retrieval returns before building citation maps or
+running the vector/keyword rankers. Profile and query validation still run;
+this does not bypass embedding generation at the HTTP boundary.
 
 The graph engine stages a catalog copy under the write lock. Document replacement
 removes old chunks and all incident edges, adds new rows, and uses the existing

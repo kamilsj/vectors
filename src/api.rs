@@ -1250,9 +1250,8 @@ async fn vector_search(
         .body(body))
 }
 
-fn typed_search(request: VectorSearchRequest) -> Result<VectorSearch, ApiError> {
-    let filters = request
-        .filters
+fn typed_search_filters(filters: Vec<SearchFilter>) -> Result<Vec<VectorSearchFilter>, ApiError> {
+    filters
         .into_iter()
         .map(|filter| {
             let invalid = || {
@@ -1300,7 +1299,11 @@ fn typed_search(request: VectorSearchRequest) -> Result<VectorSearch, ApiError> 
                 value,
             })
         })
-        .collect::<Result<Vec<_>, ApiError>>()?;
+        .collect::<Result<Vec<_>, ApiError>>()
+}
+
+fn typed_search(request: VectorSearchRequest) -> Result<VectorSearch, ApiError> {
+    let filters = typed_search_filters(request.filters)?;
     Ok(VectorSearch {
         table: request.table,
         vector_column: request.vector_column,

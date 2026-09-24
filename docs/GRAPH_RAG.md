@@ -96,8 +96,9 @@ exposed as a collection migration API.
 
 Use SQL joins to filter chunks by document fields or link documents to ordinary
 tables. See [structured data and relationships](STRUCTURED_DATA.md). These
-filters are explicit SQL queries; the `/retrieve` endpoint does not yet accept
-custom document-field filters or traverse named cross-table relationships.
+SQL queries can join chunks, documents, and business tables in one operation.
+The `/retrieve` endpoint also accepts typed `document_filters`; named
+cross-table relationships do not automatically become graph traversal edges.
 
 ## Preview chunks without calling a provider
 
@@ -261,7 +262,8 @@ curl http://127.0.0.1:8080/v1/graph/collections/knowledge/retrieve \
 
 The stages are:
 
-1. Retrieve semantic vector matches and lexical BM25 matches from the collection.
+1. Apply optional typed `document_filters`, then retrieve semantic vector matches
+   and lexical BM25 matches from the eligible documents.
    Lexical matching helps preserve exact identifiers, names, and error codes.
 2. Combine their ranks using weighted reciprocal rank fusion, then expand
    eligible relationships with a bounded beam: rank new context by link strength
@@ -289,6 +291,16 @@ their stored orientation. Direct vector/BM25 matches remain eligible regardless
 of these relationship filters. For example, add `"direction":"incoming"`,
 `"kind":"references"`, and `"min_weight":0.6` to find context that references
 your strongest matches. This is a retrieval policy, not a document-access filter.
+
+To restrict which documents may participate, provide `document_filters`, for
+example `[{"column":"category","operator":"eq","value":"maintenance"}]`
+when the collection declares a `category` field. Up to 32 AND-combined scalar
+predicates apply before both rankers' top-k and every graph hop. Excluded chunks
+cannot act as bridges or appear in returned edges/path evidence. Omission and
+`[]` preserve unfiltered behavior. Field/type validation runs before provider
+work, including on empty collections, and again on the retrieval snapshot.
+BM25 corpus statistics remain collection-wide. See
+[filter semantics and relational SQL examples](STRUCTURED_DATA.md#scope-graphrag-retrieval-by-document-fields).
 
 A traversed bridge can be omitted from the candidate pool or final context.
 The top-level `edges` still describe only links among selected hits. A graph-

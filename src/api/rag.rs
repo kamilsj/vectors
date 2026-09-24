@@ -220,6 +220,8 @@ enum Reranker {
 #[serde(deny_unknown_fields)]
 struct Retrieve {
     text: String,
+    #[serde(default)]
+    document_filters: Vec<SearchFilter>,
     #[serde(default = "candidate_limit")]
     candidate_limit: usize,
     #[serde(default = "seed_limit")]
@@ -342,6 +344,13 @@ async fn retrieve(
     authorize(&request, security.as_ref().map(|value| value.get_ref()))?;
     let mut input = input.into_inner();
     input.validate(&limits)?;
+    if input.document_filters.len() > 32 {
+        return Err(ApiError::bad_request(
+            "invalid_rag_request",
+            "RAG accepts at most 32 document filters",
+        ));
+    }
+    let document_filters = typed_search_filters(std::mem::take(&mut input.document_filters))?;
     let traversal = GraphRagTraversal {
         direction: input.direction,
         kind: input.kind.take(),
@@ -354,8 +363,11 @@ async fn retrieve(
     let collection = collection.into_inner();
     let database = database.get_ref().clone();
     let read_db = database.clone();
+    let preflight_filters = document_filters.clone();
     let state = run_database_task(limiter.as_ref(), move || {
-        read_db.graph_collection(&collection)
+        read_db
+            .graph_validate_document_filters(&collection, &preflight_filters)
+            .map_err(search_error)
     })
     .await?;
     if state.chunk_count == 0 {
@@ -393,21 +405,24 @@ async fn retrieve(
             .into_iter()
             .next()
             .ok_or_else(|| ApiError::internal("query embedding is missing"))?;
-        let snapshot = database.graph_rag_candidates_with_traversal(
-            GraphRagRequest {
-                collection: state.config.name,
-                expected_profile: state.config.profile,
-                query: normalized_embedding(values)?,
-                query_text,
-                candidate_limit: input.candidate_limit,
-                seed_limit: input.seed_limit,
-                max_hops: input.max_hops,
-                neighbor_limit: input.neighbor_limit,
-                vector_weight: input.vector_weight,
-                lexical_weight: input.lexical_weight,
-            },
-            traversal,
-        )?;
+        let snapshot = database
+            .graph_rag_candidates_filtered(
+                GraphRagRequest {
+                    collection: state.config.name,
+                    expected_profile: state.config.profile,
+                    query: normalized_embedding(values)?,
+                    query_text,
+                    candidate_limit: input.candidate_limit,
+                    seed_limit: input.seed_limit,
+                    max_hops: input.max_hops,
+                    neighbor_limit: input.neighbor_limit,
+                    vector_weight: input.vector_weight,
+                    lexical_weight: input.lexical_weight,
+                },
+                traversal,
+                document_filters,
+            )
+            .map_err(search_error)?;
         Ok::<_, ApiError>((snapshot, generated.usage))
     })
     .await?;

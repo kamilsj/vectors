@@ -221,6 +221,46 @@ fn integer_double_equality_uses_existing_sql_numeric_comparison() {
 }
 
 #[test]
+fn unique_join_lookups_preserve_nulls_mutations_and_numeric_collisions() {
+    let db = Database::new();
+    db.execute("CREATE TABLE probes (id INTEGER); CREATE TABLE targets (id INTEGER UNIQUE,label TEXT); INSERT INTO probes VALUES (0),(1),(2),(NULL); INSERT INTO targets VALUES (0,'zero'),(1,'one'),(NULL,'first null'),(NULL,'second null')").unwrap();
+    let sql = "SELECT p.id,t.label FROM probes p LEFT JOIN targets t ON p.id=t.id ORDER BY p.id NULLS FIRST";
+    assert_eq!(
+        query(&db, sql).rows,
+        vec![
+            vec![Value::Null, Value::Null],
+            vec![Value::Integer(0), Value::Text("zero".into())],
+            vec![Value::Integer(1), Value::Text("one".into())],
+            vec![Value::Integer(2), Value::Null],
+        ]
+    );
+    db.execute("UPDATE targets SET id=2 WHERE id=1; DELETE FROM targets WHERE id=0; INSERT INTO targets VALUES (1,'replacement')").unwrap();
+    assert_eq!(
+        query(&db, sql).rows,
+        vec![
+            vec![Value::Null, Value::Null],
+            vec![Value::Integer(0), Value::Null],
+            vec![Value::Integer(1), Value::Text("replacement".into())],
+            vec![Value::Integer(2), Value::Text("one".into())],
+        ]
+    );
+    // Distinct, unique i64 keys can compare equal after the evaluator's f64
+    // coercion. A unique lookup cannot discard either matching target row.
+    db.execute("CREATE TABLE float_probes (k DOUBLE); CREATE TABLE integer_targets (k INTEGER PRIMARY KEY); INSERT INTO float_probes VALUES (9007199254740992.0); INSERT INTO integer_targets VALUES (9007199254740992),(9007199254740993)").unwrap();
+    assert_eq!(
+        query(
+            &db,
+            "SELECT t.k FROM float_probes p JOIN integer_targets t ON p.k=t.k ORDER BY t.k"
+        )
+        .rows,
+        vec![
+            vec![Value::Integer(9007199254740992)],
+            vec![Value::Integer(9007199254740993)]
+        ]
+    );
+}
+
+#[test]
 fn maintained_indexes_follow_mutations_and_unordered_limit_stops_early() {
     let db = fixture(true);
     assert_eq!(
@@ -299,7 +339,6 @@ fn unsupported_join_shapes_are_explicit_even_for_empty_inputs() {
         "SELECT a.id FROM lhs a RIGHT JOIN rhs b ON a.link=b.link",
         "SELECT a.id FROM lhs a JOIN rhs b ON a.id>b.id",
         "SELECT * FROM lhs a JOIN rhs b USING(link)",
-        "SELECT a.id FROM lhs a JOIN rhs b ON a.link=b.link JOIN lhs c ON c.id=a.id",
         "SELECT a.id FROM lhs a WITH (NOLOCK) JOIN rhs b ON a.link=b.link",
         "SELECT a.id FROM lhs a JOIN rhs b WITH (NOLOCK) ON a.link=b.link",
         "SELECT a.id FROM lhs PARTITION (p0) a JOIN rhs b ON a.link=b.link",

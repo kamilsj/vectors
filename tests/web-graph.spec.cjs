@@ -176,7 +176,7 @@ test("changing connection during a graph write retains its uncertain outcome not
 });
 
 test("empty retrieval is explicit and impossible result limits do not contact a provider", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-question").fill("Empty context"); await page.locator("#graph-search-form summary").click(); await page.locator("#graph-candidates").fill("2"); await page.locator("#graph-search-submit").click();
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-question").fill("Empty context"); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.locator("#graph-candidates").fill("2"); await page.locator("#graph-search-submit").click();
   await expect(page.locator("#graph-search-status")).toContainText("must not exceed"); expect(fixture.calls.some((call) => call.path.endsWith("/retrieve"))).toBe(false);
   await page.locator("#graph-candidates").fill("40"); await page.route("**/retrieve", (route) => reply(route, { hits: [], candidate_count: 0, context_bytes: 0, reranking: { method: "local", model: null }, truncated: false })); await page.locator("#graph-search-submit").click(); await expect(page.locator("#graph-search-results")).toContainText("No passages fit");
 });
@@ -287,14 +287,14 @@ async function askGraph(page, question = "How are these passages connected?") {
 }
 
 test("retrieval sends direction, exact kind and weight with the explicit seed budget", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").click();
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-retrieval-direction").selectOption("incoming"); await page.locator("#graph-retrieval-kind").fill("supports"); await page.locator("#graph-retrieval-min-weight").fill("0.65"); await page.locator("#graph-seeds").fill("4");
   await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
   expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ direction: "incoming", kind: "supports", min_weight: .65, seed_limit: 4 });
 });
 
 test("small candidate budgets reserve graph context while explicit seeds remain unchanged", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").click();
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-candidates").fill("8"); await expect(page.locator("#graph-seeds")).toHaveValue("6"); await page.locator("#graph-result-limit").fill("4"); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
   expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ candidate_limit: 8, seed_limit: 6 });
   await page.locator("#graph-seeds").fill("7"); await page.locator("#graph-candidates").fill("4"); await expect(page.locator("#graph-seeds")).toHaveValue("7"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Starting passages must not exceed");
@@ -305,7 +305,7 @@ test("small candidate budgets reserve graph context while explicit seeds remain 
 });
 
 test("invalid relationship filters and seed limits stop before retrieval", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").click();
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-retrieval-kind").fill("Invalid label"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Relationship type must start");
   await page.locator("#graph-retrieval-kind").fill(""); await page.locator("#graph-retrieval-min-weight").fill("1.2"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Minimum relationship weight");
   await page.locator("#graph-retrieval-min-weight").fill("0"); await page.locator("#graph-seeds").fill("0"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Starting passages must be a whole number");
@@ -367,7 +367,7 @@ test("retrieval path details and advanced controls fit desktop and mobile screen
   await page.setViewportSize({ width: 1512, height: 1050 }); const fixture = await workspace(page);
   const path = { seed_chunk_id: "chunk-1", edges: [{ from_chunk: "chunk-7", to_chunk: "chunk-1", kind: "supports", weight: .9 }, { from_chunk: "chunk-7", to_chunk: "chunk-13", kind: "references", weight: .75 }] };
   await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
-  await openGraph(page); await page.locator("#graph-search-form summary").click(); await page.locator("#graph-hops").fill("2"); await page.locator("#graph-retrieval-direction").selectOption("both"); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
+  await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.locator("#graph-hops").fill("2"); await page.locator("#graph-retrieval-direction").selectOption("both"); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
   await page.locator(".graph-retrieval").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-desktop.png") }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.setViewportSize({ width: 390, height: 844 }); await page.locator(".graph-retrieval").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-mobile.png"), style: ".topbar { visibility: hidden; }" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

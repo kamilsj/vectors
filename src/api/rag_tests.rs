@@ -7,6 +7,10 @@ use actix_web::{http::Method, test, App};
 use serde_json::json;
 
 fn fixture() -> Database {
+    fixture_with_columns(Vec::new())
+}
+
+fn fixture_with_columns(document_columns: Vec<Column>) -> Database {
     let db = Database::new();
     let profile = GraphEmbeddingProfile {
         provider: "openai".into(),
@@ -14,12 +18,15 @@ fn fixture() -> Database {
         dimensions: 2,
         context_format_version: 1,
     };
-    db.graph_create_collection(GraphCollectionConfig {
-        name: "notes".into(),
-        profile: profile.clone(),
-        semantic_neighbors: 2,
-        semantic_threshold: 0.5,
-    })
+    db.graph_create_collection_with_columns(
+        GraphCollectionConfig {
+            name: "notes".into(),
+            profile: profile.clone(),
+            semantic_neighbors: 2,
+            semantic_threshold: 0.5,
+        },
+        document_columns,
+    )
     .unwrap();
     for (id, title, text, vector) in [
         (
@@ -63,6 +70,31 @@ fn fixture() -> Database {
         })
         .unwrap();
     }
+    db
+}
+
+fn document_filter_fixture() -> Database {
+    let db = fixture_with_columns(vec![
+        Column {
+            name: "tenant_id".into(),
+            data_type: DataType::Integer,
+            nullable: true,
+            unique: false,
+        },
+        Column {
+            name: "published".into(),
+            data_type: DataType::Boolean,
+            nullable: true,
+            unique: false,
+        },
+    ]);
+    db.execute(
+        "UPDATE graph_notes_documents SET tenant_id = 1, published = TRUE; \
+         UPDATE graph_notes_documents SET tenant_id = 2 WHERE document_id = 'two'; \
+         UPDATE graph_notes_documents SET tenant_id = NULL WHERE document_id = 'three'; \
+         UPDATE graph_notes_chunks SET embedding_text = 'ZX419' WHERE chunk_id = '3:one:0'",
+    )
+    .unwrap();
     db
 }
 
@@ -118,6 +150,165 @@ fn add_traversal_link(db: &Database, from: &str, to: &str, kind: &str, weight: f
         weight,
     })
     .unwrap();
+}
+
+#[actix_web::test]
+async fn retrieval_document_filters_apply_before_vector_and_lexical_top_k() {
+    let db = document_filter_fixture();
+    let (endpoint, mock) = mock_provider(6, |_, _, _| (200, embedding_response()));
+    let embeddings = configured(&endpoint, Provider::Openai);
+    for (vector_weight, lexical_weight) in [(1, 0), (0, 1), (1, 1)] {
+        let mut request = json!({
+            "text":"ZX419", "candidate_limit":1, "seed_limit":1,
+            "max_results":1, "max_hops":0, "diversity":0,
+            "vector_weight":vector_weight, "lexical_weight":lexical_weight
+        });
+        let (status, unfiltered) = call(
+            &db,
+            &embeddings,
+            None,
+            Method::POST,
+            "/v1/graph/collections/notes/retrieve",
+            request.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unfiltered}");
+        assert_eq!(unfiltered["hits"][0]["document_id"], "one");
+        request["document_filters"] = json!([
+            {"column":"tenant_id", "operator":"eq", "value":2},
+            {"column":"published", "operator":"eq", "value":true}
+        ]);
+        let (status, filtered) = call(
+            &db,
+            &embeddings,
+            None,
+            Method::POST,
+            "/v1/graph/collections/notes/retrieve",
+            request,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{filtered}");
+        assert_eq!(filtered["candidate_count"], 1);
+        assert_eq!(filtered["hits"][0]["document_id"], "two");
+        assert_eq!(filtered["hits"][0]["metadata"]["tenant_id"], 2);
+        assert_eq!(filtered["hits"][0]["metadata"]["published"], true);
+    }
+    mock.join().unwrap();
+}
+
+#[actix_web::test]
+async fn retrieval_document_filters_exclude_graph_context_and_support_null() {
+    let db = document_filter_fixture();
+    add_traversal_link(&db, "3:two:0", "3:one:0", "supports", 1.0);
+    add_traversal_link(&db, "3:two:0", "5:three:0", "supports", 0.9);
+    let (endpoint, mock) = mock_provider(2, |_, _, _| (200, embedding_response()));
+    let embeddings = configured(&endpoint, Provider::Openai);
+    for (value, expected) in [(json!(2), "two"), (JsonValue::Null, "three")] {
+        let mut request = json!({
+            "text":"ZX419", "candidate_limit":5, "seed_limit":1,
+            "max_results":5, "max_hops":3, "neighbor_limit":1,
+            "direction":"both", "kind":"supports", "diversity":0
+        });
+        request["document_filters"] = json!([
+            {"column":"tenant_id", "operator":"eq", "value":value}
+        ]);
+        let (status, result) = call(
+            &db,
+            &embeddings,
+            None,
+            Method::POST,
+            "/v1/graph/collections/notes/retrieve",
+            request,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["candidate_count"], 1);
+        assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(result["hits"][0]["document_id"], expected);
+        assert_eq!(result["edges"], json!([]));
+        assert_eq!(result["truncated"], false);
+    }
+    mock.join().unwrap();
+}
+
+#[actix_web::test]
+async fn invalid_document_filters_fail_before_provider_even_for_empty_collections() {
+    let db = document_filter_fixture();
+    let mut config = db.graph_collection("notes").unwrap().config;
+    config.name = "empty".into();
+    let columns = db.schema("graph_notes_documents").unwrap()[7..].to_vec();
+    db.graph_create_collection_with_columns(config, columns)
+        .unwrap();
+    let embeddings = configured("http://127.0.0.1:1", Provider::Openai);
+    let invalid = [
+        json!([{"column":"missing", "operator":"eq", "value":1}]),
+        json!([{"column":"tenant_id", "operator":"eq", "value":"2"}]),
+        json!([{"column":"tenant_id", "operator":"eq", "value":2.0}]),
+        json!([{"column":"published", "operator":"eq", "value":1}]),
+        json!([{"column":"tenant_id", "operator":"gt", "value":null}]),
+        json!([{"column":"tenant_id", "operator":"eq", "value":[2]}]),
+        json!([{"column":"tenant_id", "operator":"eq", "value":{"id":2}}]),
+        json!([{"column":"tenant_id", "operator":"contains", "value":2}]),
+        JsonValue::Array(vec![
+            json!({"column":"tenant_id", "operator":"eq", "value":2});
+            33
+        ]),
+    ];
+    for collection in ["notes", "empty"] {
+        for filters in &invalid {
+            let mut request = query();
+            request["document_filters"] = filters.clone();
+            let (status, result) = call(
+                &db,
+                &embeddings,
+                None,
+                Method::POST,
+                &format!("/v1/graph/collections/{collection}/retrieve"),
+                request,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{filters}: {result}");
+            assert!(!result["error"]["code"]
+                .as_str()
+                .unwrap()
+                .starts_with("embedding_"));
+        }
+    }
+}
+
+#[actix_web::test]
+async fn document_filters_rebind_after_query_embedding_and_before_snapshot() {
+    let db = document_filter_fixture();
+    let initial_revision = db.revision().unwrap();
+    let write_db = db.clone();
+    let (endpoint, mock) = mock_provider(1, move |_, _, _| {
+        write_db
+            .execute(
+                "UPDATE graph_notes_documents SET tenant_id = 1 WHERE document_id = 'two'; \
+                 UPDATE graph_notes_documents SET tenant_id = 2 WHERE document_id = 'three'",
+            )
+            .unwrap();
+        (200, embedding_response())
+    });
+    let embeddings = configured(&endpoint, Provider::Openai);
+    let mut request = query();
+    request["document_filters"] = json!([{"column":"tenant_id", "operator":"eq", "value":2}]);
+    let (status, result) = call(
+        &db,
+        &embeddings,
+        None,
+        Method::POST,
+        "/v1/graph/collections/notes/retrieve",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["candidate_count"], 1);
+    assert_eq!(result["hits"][0]["document_id"], "three");
+    assert_eq!(result["hits"][0]["metadata"]["tenant_id"], 2);
+    assert_eq!(result["revision"], db.revision().unwrap());
+    assert!(result["revision"].as_u64().unwrap() > initial_revision);
+    mock.join().unwrap();
 }
 
 #[actix_web::test]

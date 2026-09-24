@@ -63,8 +63,10 @@ HTTP body alone does not satisfy it.
 
 - Add background checkpoint/WAL rotation so snapshot I/O no longer excludes
   writers; preserve the current concurrent-read and crash-ordering guarantees.
-- Extend the implemented two-table INNER/LEFT scalar joins with planning,
-  aggregate/multi-table joins, and subqueries for richer hybrid retrieval.
+- Extend the implemented streaming INNER/LEFT join chains with join-order
+  planning, aggregate joins, and subqueries for richer hybrid retrieval.
+- Extend typed document filtering to explicit linked-record predicates in
+  GraphRAG; named cross-table links currently participate through SQL joins.
 - Expand metrics with latency and result-size histograms; add request tracing,
   cancellation, and per-query CPU and memory limits.
 - Move eligible GPU top-k reduction onto the device only when benchmarks show

@@ -399,6 +399,8 @@ and durable state unchanged.
 | Writes | multi-row `INSERT`, `UPDATE`, `DELETE`, atomic statement batches |
 | Upserts | `ON CONFLICT DO NOTHING`, `DO UPDATE`, `excluded.column`, optional `WHERE` |
 | Queries | aliases, `DISTINCT`, `WHERE`, `ORDER BY`, `LIMIT`, `OFFSET` |
+| Joins | streaming `INNER`/`LEFT` scalar equijoin chains across up to 16 tables |
+| GraphRAG | typed document filters, vector/BM25 ranking, bounded graph expansion, citations |
 | Aggregates | `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `DISTINCT`, `GROUP BY`, `HAVING` |
 | Expressions | arithmetic, comparisons, boolean logic, `NULL`, `BETWEEN`, `IN`, `LIKE`, `ILIKE` |
 | Planning | `EXPLAIN`, hash-index pruning, bounded top-k execution |
@@ -596,6 +598,11 @@ context. Smaller browser candidate budgets suggest fewer starting passages to
 leave room for graph context. Diversity, per-document, and byte budgets bound the
 selection. Optional Voyage cross-encoder reranking scores the query together
 with each candidate; configure its key in **Settings** before choosing that mode.
+Use **Filter documents** in the retrieval controls to narrow results by fields
+such as product, category, or publication status. The same filters constrain
+keyword/vector matches and every graph hop, so excluded documents cannot return
+through related passages. The HTTP API and Python SDK accept these predicates
+as `document_filters`.
 The keyword cache survives relationship edits and unrelated writes, while chunk
 storage changes invalidate it. Rebuilds reuse repeated word keys and preserve
 the existing Unicode keyword scoring. The existing `/search` route retains its simpler
@@ -745,8 +752,8 @@ numbers are separate and are persisted in snapshot format version 3.
 ## Current limitations
 
 - exact search only; no approximate-nearest-neighbor index yet;
-- joins currently support two tables with `INNER`/`LEFT JOIN ... ON` scalar
-  equality; no multi-table/aggregate joins, subqueries, window functions, or
+- joins support up to 16 tables with `INNER`/`LEFT JOIN ... ON` scalar
+  equality; no aggregate joins, subqueries, window functions, or
   aggregate `FILTER` clauses; join `EXPLAIN` is not yet supported;
 - named table relationships do not enforce foreign keys; there is no
   PostgreSQL wire-protocol compatibility;
