@@ -23,15 +23,29 @@ relationships](STRUCTURED_DATA.md) for the HTTP endpoints and current SQL scope.
 1. Open **Settings** and choose OpenAI or Voyage AI.
 2. Choose a model and output dimensions. Dimensions must match the target
    `VECTOR(n)` column.
-3. Enter the provider key and save, or start the server with `OPENAI_API_KEY`
-   or `VOYAGE_API_KEY` set in its environment.
+3. Enter the provider key and save, or configure `OPENAI_API_KEY` or
+   `VOYAGE_API_KEY` in the server environment or a private `.env.local` file.
 4. Choose batch size, request timeout, and concurrent request capacity as needed.
 
 Provider keys entered in the console are sent to your vectors server and kept
 only in its memory. They are never returned by the settings API or saved in
 browser storage. Restarting the server discards entered keys and reloads its
-environment. Clearing a key disables it for the current process; remove the
-corresponding environment variable to keep it disabled after restarting.
+environment and local credential file. Clearing a key disables it for the
+current process; remove it from both the environment and local file to keep it
+disabled after restarting.
+
+For persistent local credentials, copy the repository's `.env.example` to
+`.env.local`, set its permissions to `600` on Unix (`chmod 600 .env.local`),
+and fill in the required key values. `vectors-server` reads this file from its
+working directory at startup, or accepts an explicit `--env-file PATH`.
+The file accepts only `OPENAI_API_KEY` and `VOYAGE_API_KEY`; server authentication
+continues to use the `VECTORS_API_TOKEN` environment variable. Existing provider
+environment variables win, even when empty; blank file entries are unused.
+Values are literal and can be enclosed in matching quotes; there is no shell
+execution, variable interpolation, or escape processing. Use a separate line
+for each `#` comment. Invalid entries fail before startup without exposing
+values. The local file is ignored by Git and is never included in settings API
+responses. See [local API keys](../README.md#local-api-keys) for startup examples.
 
 When using `--data-dir`, non-secret provider settings are saved in
 `embedding-settings.json` in that directory. Without durable storage, settings

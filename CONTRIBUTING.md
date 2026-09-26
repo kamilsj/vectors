@@ -153,7 +153,7 @@ downloads on every supported platform. Run it locally with an isolated temporary
 database (created and removed by the script):
 
 ```sh
-python3 scripts/release_smoke.py --server target/release/vectors-server --expected-version v0.8.0
+python3 scripts/release_smoke.py --server target/release/vectors-server --expected-version v0.9.0
 ```
 
 ## Performance changes

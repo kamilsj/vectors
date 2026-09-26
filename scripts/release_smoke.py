@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-r"""Smoke-test an extracted release binary using Python 3.10+ and no provider keys.
+r"""Smoke-test an extracted release binary using Python 3.10+ and synthetic provider keys.
 
-Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.8.0
-Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.8.0
+Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.9.0
+Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.9.0
 
-Only loopback HTTP and a temporary durable database are used. This checks the
-embedded UI assets, not browser rendering. A nonzero exit blocks publication.
+Only loopback HTTP and a temporary durable database are used; no provider calls
+are made. This checks embedded UI assets, not browser rendering. A nonzero exit
+blocks publication.
 """
 
 import argparse
@@ -33,10 +34,18 @@ def require(condition, message):
         raise SmokeError(message)
 
 
+def redact(text, values):
+    for value in values:
+        if value:
+            text = text.replace(value, "[redacted]")
+    return text
+
+
 class API:
-    def __init__(self, port, token):
+    def __init__(self, port, token, redactions=()):
         self.port = port
         self.token = token
+        self.redactions = redactions
 
     def request(self, path, payload=None, *, status=200, authenticated=True, timeout=5):
         headers = {"Accept-Encoding": "identity"}
@@ -54,7 +63,8 @@ class API:
             data = response.read(4 * 1024 * 1024 + 1)
             require(len(data) <= 4 * 1024 * 1024, f"{path}: response exceeded 4 MiB")
             require(response.status == status,
-                    f"{path}: expected HTTP {status}, got {response.status}: {data[:500]!r}")
+                    f"{path}: expected HTTP {status}, got {response.status}: "
+                    + redact(data[:500].decode("utf-8", errors="replace"), self.redactions))
             content_type = response.getheader("Content-Type", "")
             if "application/json" in content_type:
                 return json.loads(data)
@@ -64,7 +74,8 @@ class API:
 
 
 @contextlib.contextmanager
-def running_server(binary, directory, timeout, expected_version):
+def running_server(binary, directory, timeout, expected_version, *,
+                   environment_overrides=None, extra_args=(), sensitive_values=()):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -85,16 +96,20 @@ def running_server(binary, directory, timeout, expected_version):
         "VECTORS_HTTP_SHUTDOWN_TIMEOUT_SECS": "2",
         "RAYON_NUM_THREADS": "2",
     })
+    if environment_overrides:
+        environment.update(environment_overrides)
+    redactions = (token, *sensitive_values,
+                  *(environment_overrides or {}).values())
     with tempfile.TemporaryFile() as log:
         process = subprocess.Popen(
             [str(binary), "--port", str(port), "--compute", "cpu",
-             "--data-dir", str(directory / "data")],
+             "--data-dir", str(directory / "data"), *extra_args],
             cwd=directory, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         )
         failed = False
         forced = False
         try:
-            api = API(port, token)
+            api = API(port, token, redactions)
             deadline = time.monotonic() + timeout
             while True:
                 require(process.poll() is None, "server exited before becoming ready")
@@ -131,7 +146,8 @@ def running_server(binary, directory, timeout, expected_version):
                         process.wait(timeout=5)
             if failed or forced or process.returncode != 0:
                 log.seek(0)
-                print("Temporary server log:\n" + log.read().decode("utf-8", errors="replace")[-16000:],
+                print("Temporary server log:\n" + redact(
+                    log.read().decode("utf-8", errors="replace")[-16000:], redactions),
                       file=sys.stderr)
             if not failed:
                 require(not forced and process.returncode == 0,
@@ -142,12 +158,14 @@ def check_assets(api):
     for path, markers in {
         "/": ["Connections", 'id="view-connections"', 'id="graph-canvas"',
               'id="graph-search-form"', 'id="graph-seeds"',
+              'id="graph-seeds-per-document"',
               'id="graph-retrieval-direction"', 'id="graph-retrieval-kind"',
               'id="graph-retrieval-min-weight"', 'id="graph-document-fields"',
               'id="graph-filters-panel"', 'id="graph-document-filters"',
               'id="relationship-dialog"'],
         "/assets/app.js": ["retrieval_path", "graph-retrieval-direction", "/retrieve",
-                           "document_columns", "document_filters", "/relationships"],
+                           "document_columns", "document_filters", "/relationships",
+                           "max_seeds_per_document"],
         "/assets/app.css": [".graph-workspace", ".graph-retrieval-path", ".relationship-card"],
     }.items():
         asset = api.request(path, authenticated=False)
@@ -199,12 +217,17 @@ def check_apis(api):
     require(browse["nodes"] == [] and browse["edges"] == [], "new graph collection was not empty")
     retrieved = api.request("/v1/graph/collections/release_smoke/retrieve", {
         "text": "Release check", "direction": "incoming", "kind": "supports", "min_weight": 0.5,
+        "max_seeds_per_document": 1,
         "document_filters": [{"column": "record_id", "operator": "eq", "value": 1}],
     })
     require(retrieved["hits"] == [] and retrieved["embedding_usage"]["total_tokens"] == 0,
             "empty graph retrieval should succeed without provider usage")
     api.request("/v1/graph/collections/release_smoke/retrieve",
                 {"text": "Release check", "min_weight": 2}, status=400)
+    rejected = api.request("/v1/graph/collections/release_smoke/retrieve",
+                           {"text": "Release check", "max_seeds_per_document": 0}, status=400)
+    require(rejected["error"]["code"] == "invalid_rag_request",
+            "invalid seed document cap was not rejected before embedding")
     for column, value, code in [("missing", 1, "unknown_column"),
                                 ("record_id", "1", "invalid_value")]:
         rejected = api.request("/v1/graph/collections/release_smoke/retrieve", {
@@ -245,6 +268,27 @@ def check_relationship_join(api):
             "vector-ranked three-table SQL join returned wrong data")
 
 
+def write_key_file(path, contents):
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o600)
+
+
+def check_provider_settings(api, *, openai, voyage, sensitive_values):
+    embeddings = api.request("/v1/settings/embeddings")
+    reranking = api.request("/v1/settings/reranking")
+    providers = {provider["id"]: provider["configured"] for provider in embeddings["providers"]}
+    require(providers.get("openai") is openai and providers.get("voyage") is voyage,
+            "provider credential status differs from local configuration")
+    require(embeddings.get("configured") is providers.get(embeddings.get("provider")),
+            "active embedding provider credential status is inconsistent")
+    require(reranking.get("configured") is voyage,
+            "Voyage reranking did not use the local credential configuration")
+    serialized = json.dumps([embeddings, reranking])
+    require('"api_key"' not in serialized and
+            all(value not in serialized for value in sensitive_values),
+            "settings responses exposed a provider credential")
+
+
 def run(binary, expected_version, timeout):
     version = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
                              check=True, timeout=timeout).stdout.strip()
@@ -252,23 +296,49 @@ def run(binary, expected_version, timeout):
             f"binary version mismatch: expected vectors-server {expected_version}, got {version!r}")
     with tempfile.TemporaryDirectory(prefix="vectors-release-smoke-") as temporary:
         directory = Path(temporary)
-        with running_server(binary, directory, timeout, expected_version) as api:
+        # These are local test strings, never usable credentials. All API checks
+        # below use settings, local SQL/vectors, previews, or empty retrieval.
+        openai_key = "release-smoke-openai-" + secrets.token_hex(16)
+        voyage_key = "release-smoke-voyage-" + secrets.token_hex(16)
+        sensitive_values = (openai_key, voyage_key)
+        default_file = directory / ".env.local"
+        write_key_file(default_file, f"OPENAI_API_KEY={openai_key}\nVOYAGE_API_KEY={voyage_key}\n")
+        with running_server(binary, directory, timeout, expected_version,
+                            sensitive_values=sensitive_values) as api:
+            check_provider_settings(api, openai=True, voyage=True, sensitive_values=sensitive_values)
             check_assets(api)
             check_apis(api)
-        with running_server(binary, directory, timeout, expected_version) as api:
+        # A changed file must be re-read on restart; no key belongs in database settings.
+        write_key_file(default_file, f"OPENAI_API_KEY=\nVOYAGE_API_KEY={voyage_key}\n")
+        with running_server(binary, directory, timeout, expected_version,
+                            sensitive_values=sensitive_values) as api:
+            check_provider_settings(api, openai=False, voyage=True, sensitive_values=sensitive_values)
             result = sql(api, "SELECT id, title FROM release_smoke ORDER BY id")[0]
             require(result["rows"] == [[1, "Release ✓"], [2, "Other"]], "SQL data did not survive restart")
             collection = api.request("/v1/graph/collections/release_smoke")
             require(collection["config"]["name"] == "release_smoke" and collection["chunk_count"] == 0,
                     "graph collection did not survive restart")
             check_relationship_join(api)
-    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, typed filters, relationships, join chains, restart")
+        write_key_file(default_file, f"OPENAI_API_KEY={openai_key}\nVOYAGE_API_KEY={voyage_key}\n")
+        with running_server(binary, directory, timeout, expected_version,
+                            environment_overrides={"OPENAI_API_KEY": "", "VOYAGE_API_KEY": ""},
+                            sensitive_values=sensitive_values) as api:
+            check_provider_settings(api, openai=False, voyage=False, sensitive_values=sensitive_values)
+        explicit_file = directory / "provider keys.env"
+        write_key_file(explicit_file, f"OPENAI_API_KEY='{openai_key}'\nVOYAGE_API_KEY=\n")
+        # Explicit selection must replace the default file, even if it is malformed.
+        write_key_file(default_file, "UNKNOWN_SETTING=invalid-default\n")
+        with running_server(binary, directory, timeout, expected_version,
+                            extra_args=("--env-file", str(explicit_file)),
+                            sensitive_values=sensitive_values) as api:
+            check_provider_settings(api, openai=True, voyage=False, sensitive_values=sensitive_values)
+    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, seed document caps, typed filters, relationships, join chains, restart, local provider key files and environment precedence")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
-    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.8.0")
+    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.9.0")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
     args = parser.parse_args()
     version = args.expected_version.removeprefix("v")

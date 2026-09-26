@@ -59,8 +59,9 @@ install both binaries for the current user, start a durable server, and open
 the web console when a desktop is available. Releases support Linux x86-64 and
 ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
-[v0.8.0](https://github.com/kamilsj/vectors/releases/tag/v0.8.0) includes the
-GraphRAG engine and the Search, Connections, Data, SQL, and Settings workspaces.
+[v0.9.0](https://github.com/kamilsj/vectors/releases/tag/v0.9.0) adds structured
+GraphRAG document fields and filters, SQL joins and named relationships,
+per-document starting-passage limits, and private local provider-key files.
 If you still see the older interface, run the installer below to upgrade the
 server with `--restart` (PowerShell: `-Restart`), then reload the console.
 
@@ -265,7 +266,8 @@ workspaces:
 For a sample without a provider key, open **SQL**, run the quickstart, and
 select `documents`. For text search, configure a provider in **Settings** and
 use the same model and dimensions for documents and queries. Provider keys
-stay on the server; environment keys use `OPENAI_API_KEY` or `VOYAGE_API_KEY`.
+stay on the server; use `OPENAI_API_KEY` or `VOYAGE_API_KEY` in the environment
+or a private `.env.local` file (see [local API keys](#local-api-keys)).
 See [embeddings and administration](docs/EMBEDDINGS_AND_ADMIN.md) for setup,
 data-management workflows, API examples, and key persistence behavior.
 
@@ -276,7 +278,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.8.0 | in-memory SQL vector database
+vectors 0.9.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```
@@ -628,6 +630,40 @@ Start with the [chunking and GraphRAG guide](docs/GRAPH_RAG.md) for API
 examples, limits, model compatibility, and replacement/deletion behavior.
 
 ## Server configuration
+
+### Local API keys
+
+Create a private configuration from the empty example:
+
+```sh
+cp .env.example .env.local
+chmod 600 .env.local
+```
+
+Fill in `OPENAI_API_KEY` and/or `VOYAGE_API_KEY` in `.env.local`.
+Start the server normally:
+
+```sh
+cargo run --release --bin vectors-server -- --data-dir ./vectors-data
+```
+
+The server reads `.env.local` from its working directory before starting its
+runtime. To use a different file, pass `--env-file /path/to/private.env`.
+Existing environment variables take precedence, including an explicitly empty
+value. Blank entries in the file are unused. Values are literal, optionally
+surrounded by matching single or double quotes; shell commands, variable
+expansion, and escape sequences are not evaluated. Only the two credential
+names above are accepted. Comments occupy their own lines, beginning with `#`.
+An explicitly selected missing file, invalid configuration, or a Unix file
+accessible by group/other users stops startup without displaying its contents.
+
+`.env.local` is excluded from Git; `.env.example` contains no credentials.
+Keys entered through Settings remain in memory for the current server process.
+Edit the local file to change credentials used after restart.
+Server authentication still uses `VECTORS_API_TOKEN` in the environment;
+the local file configures provider keys only.
+
+### Listen address and runtime limits
 
 Select a local port directly from the command line:
 

@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use vectors::{api, ComputeConfig, ComputeDevice, Database};
 
+#[path = "vectors-server/env_file.rs"]
+mod env_file;
+
 #[derive(Debug, PartialEq, Eq)]
 enum StartupAction {
     Run(StartupOptions),
@@ -19,10 +22,10 @@ struct StartupOptions {
     bind_override: Option<String>,
     data_dir_override: Option<PathBuf>,
     compute_override: Option<ComputeDevice>,
+    env_file_override: Option<PathBuf>,
 }
 
-#[actix_web::main]
-async fn main() -> io::Result<()> {
+fn main() -> io::Result<()> {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
     let options = match parse_arguments(&arguments)? {
         StartupAction::Version => {
@@ -31,13 +34,20 @@ async fn main() -> io::Result<()> {
         }
         StartupAction::Help => {
             println!(
-                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line options override their VECTORS_* environment equivalents.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n      --data-dir PATH   Persist writes in PATH with a WAL and checkpoints\n      --compute DEVICE  Vector scans: auto, cpu, or gpu\n  -h, --help            Show this help\n  -V, --version         Show version\n\nExamples:\n  vectors-server --data-dir ./vectors-data\n  vectors-server --data-dir ./vectors-data --port 8081\n  vectors-server --data-dir ./vectors-data --bind 0.0.0.0:9000\n  vectors-server --data-dir ./vectors-data --compute auto\n\nOpen the web tutorial at http://127.0.0.1:8080 and choose 'Help'.\nUse VECTORS_API_TOKEN to protect /v1 endpoints; health and metrics stay public.\nInstallers can set VECTORS_SHUTDOWN_FILE to an absolute, private state-file path for graceful restarts.",
+                "vectors-server {}\n\nUsage: vectors-server [options]\n\nStarts the HTTP API and web console. Command-line options override their VECTORS_* environment equivalents.\n\nOptions:\n  -p, --port PORT       Listen on 127.0.0.1:PORT\n      --bind ADDRESS    Listen on ADDRESS, for example 0.0.0.0:9000\n      --data-dir PATH   Persist writes in PATH with a WAL and checkpoints\n      --compute DEVICE  Vector scans: auto, cpu, or gpu\n      --env-file PATH   Read private API keys from PATH (default: optional .env.local)\n  -h, --help            Show this help\n  -V, --version         Show version\n\nExamples:\n  vectors-server --data-dir ./vectors-data\n  vectors-server --data-dir ./vectors-data --port 8081\n  vectors-server --data-dir ./vectors-data --bind 0.0.0.0:9000\n  vectors-server --data-dir ./vectors-data --compute auto\n  vectors-server --env-file /private/path/vectors.env --data-dir ./vectors-data\n\nOpen the web tutorial at http://127.0.0.1:8080 and choose 'Help'.\nUse VECTORS_API_TOKEN to protect /v1 endpoints; health and metrics stay public.\nAPI-key files accept OPENAI_API_KEY and VOYAGE_API_KEY. Existing environment values take precedence.\nInstallers can set VECTORS_SHUTDOWN_FILE to an absolute, private state-file path for graceful restarts.",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
         }
         StartupAction::Run(options) => options,
     };
+    // Load process credentials while startup is still single-threaded, before
+    // the async runtime or any database/provider worker can read the environment.
+    env_file::load(options.env_file_override.as_deref())?;
+    actix_web::rt::System::new().block_on(run(options))
+}
+
+async fn run(options: StartupOptions) -> io::Result<()> {
     let bind_address = options
         .bind_override
         .or_else(|| env::var("VECTORS_BIND").ok())
@@ -249,6 +259,15 @@ fn parse_arguments(arguments: &[String]) -> io::Result<StartupAction> {
                         "--compute must be auto, cpu, or gpu",
                     )
                 })?);
+            }
+            "--env-file" => {
+                if options.env_file_override.is_some() || value.trim().is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "--env-file may only be supplied once with a non-empty path",
+                    ));
+                }
+                options.env_file_override = Some(PathBuf::from(value));
             }
             _ => {
                 return Err(io::Error::new(
@@ -541,6 +560,7 @@ mod tests {
                 bind_override: Some("127.0.0.1:8081".into()),
                 data_dir_override: Some(PathBuf::from("./data")),
                 compute_override: None,
+                env_file_override: None,
             })
         );
         assert_eq!(
@@ -549,6 +569,7 @@ mod tests {
                 bind_override: Some("0.0.0.0:9000".into()),
                 data_dir_override: None,
                 compute_override: None,
+                env_file_override: None,
             })
         );
         assert_eq!(
@@ -557,6 +578,7 @@ mod tests {
                 bind_override: None,
                 data_dir_override: None,
                 compute_override: Some(ComputeDevice::Gpu),
+                env_file_override: None,
             })
         );
         assert!(parse_arguments(&["--port".into(), "0".into()]).is_err());
@@ -565,6 +587,37 @@ mod tests {
         assert!(parse_arguments(&["--compute".into(), "maybe".into()]).is_err());
         assert_eq!(suggested_port("127.0.0.1:8080"), 8081);
         assert_eq!(suggested_port("invalid"), 8081);
+    }
+
+    #[test]
+    fn parses_private_env_file_option() {
+        assert_eq!(
+            parse_arguments(&["--env-file".into(), "local keys.env".into()]).unwrap(),
+            StartupAction::Run(StartupOptions {
+                env_file_override: Some(PathBuf::from("local keys.env")),
+                ..StartupOptions::default()
+            })
+        );
+        for arguments in [
+            vec!["--env-file".into()],
+            vec!["--env-file".into(), " ".into()],
+            vec![
+                "--env-file".into(),
+                "first".into(),
+                "--env-file".into(),
+                "second".into(),
+            ],
+        ] {
+            assert!(parse_arguments(&arguments).is_err());
+        }
+        assert_eq!(
+            parse_arguments(&["--help".into()]).unwrap(),
+            StartupAction::Help
+        );
+        assert_eq!(
+            parse_arguments(&["--version".into()]).unwrap(),
+            StartupAction::Version
+        );
     }
 
     #[test]

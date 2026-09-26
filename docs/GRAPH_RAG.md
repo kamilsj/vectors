@@ -380,7 +380,8 @@ and [diversity-reranking paper](https://aclanthology.org/X98-1025/).
 
 Configure **Settings → Reranking**, or use `PUT /v1/settings/reranking` with
 `model`, `api_key`, `timeout_seconds`, and `max_concurrent_requests`.
-`VOYAGE_API_KEY` supplies the initial key at server startup. Reranking settings
+`VOYAGE_API_KEY` in the environment or private `.env.local` file supplies the
+initial key at server startup (see [local API keys](../README.md#local-api-keys)). Reranking settings
 are separate from embedding settings, so OpenAI embeddings can use Voyage
 reranking. Runtime credentials are write-only and are not persisted; non-secret
 settings persist when the server uses a data directory.

@@ -75,7 +75,7 @@ address, install-only mode, and no-browser mode:
 | --- | --- | --- |
 | inspect target without downloading | `--print-target` | `-PrintTarget` |
 | preview the complete plan | `--dry-run` | `-WhatIf` |
-| fixed version | `--version v0.8.0` or `VECTORS_VERSION` | `-Version v0.8.0` or `VECTORS_VERSION` |
+| fixed version | `--version v0.9.0` or `VECTORS_VERSION` | `-Version v0.9.0` or `VECTORS_VERSION` |
 | install directory | `--install-dir PATH` or `VECTORS_INSTALL_DIR` | `-InstallDir PATH` or `VECTORS_INSTALL_DIR` |
 | listen address | `--bind 127.0.0.1:8081` or `VECTORS_BIND` | `-BindAddress 127.0.0.1:8081` or `VECTORS_BIND` |
 | do not start | `--no-start` or `VECTORS_NO_START=1` | `-NoStart` or `VECTORS_NO_START=1` |
@@ -134,7 +134,7 @@ The shell executable accepts these options:
 The opening prompt points to the built-in lesson:
 
 ```text
-vectors 0.8.0 | in-memory SQL vector database
+vectors 0.9.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```

@@ -139,7 +139,7 @@ manage `vectors-server --data-dir PATH` with your existing service manager.
 | Show help | `--help` | `Get-Help .\install.ps1 -Full` |
 | Inspect the resolved target | `--print-target` | `-PrintTarget` |
 | Preview changes | `--dry-run` | `-WhatIf` |
-| Install a fixed release | `--version v0.8.0` | `-Version v0.8.0` |
+| Install a fixed release | `--version v0.9.0` | `-Version v0.9.0` |
 | Choose the binary directory | `--install-dir PATH` | `-InstallDir PATH` |
 | Choose the server address | `--bind 127.0.0.1:8081` | `-BindAddress 127.0.0.1:8081` |
 | Do not start the server | `--no-start` | `-NoStart` |
@@ -170,7 +170,7 @@ Examples:
 ```sh
 # Pin a release and leave the server stopped.
 VECTORS_INSTALL_DIR="$HOME/bin" \
-  sh ./install.sh --version v0.8.0 --no-start --no-open
+  sh ./install.sh --version v0.9.0 --no-start --no-open
 
 # Start on a different local port with an explicit durable directory.
 VECTORS_DATA_DIR="$HOME/vectors-data" \
@@ -179,7 +179,7 @@ VECTORS_DATA_DIR="$HOME/vectors-data" \
 
 ```powershell
 # Pin a release and leave the server stopped.
-& .\install.ps1 -Version v0.8.0 -InstallDir "$HOME\bin" -NoStart -NoOpen
+& .\install.ps1 -Version v0.9.0 -InstallDir "$HOME\bin" -NoStart -NoOpen
 
 # Start on another local port with an explicit durable directory.
 $env:VECTORS_DATA_DIR = "$HOME\vectors-data"

@@ -12,6 +12,17 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## 0.9.0 - 2026-09-26
+
+### Added
+
+- Private local API-key configuration loaded by `vectors-server` from
+  `.env.local` or `--env-file`, with environment overrides, sanitized errors,
+  and Unix permission checks. Console-entered keys remain process-local.
 - Optional `max_seeds_per_document` in hybrid GraphRAG retrieval, the Rust and
   Python APIs, and Connections. Capping starting passages from each document
   helps graph expansion reach evidence through other sources; omission keeps
