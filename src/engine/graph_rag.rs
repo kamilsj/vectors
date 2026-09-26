@@ -93,6 +93,19 @@ pub struct GraphRagRequest {
     pub lexical_weight: f64,
 }
 
+/// Optional retrieval policies. Defaults preserve unrestricted seed selection
+/// and outgoing traversal without document filters.
+#[derive(Clone, Debug, Default)]
+pub struct GraphRagOptions {
+    pub traversal: GraphRagTraversal,
+    pub document_filters: Vec<VectorSearchFilter>,
+    /// Maximum initial graph seeds from one document (1..=20). None leaves
+    /// seed selection unrestricted. Applied before `seed_limit`, within the
+    /// bounded hybrid candidate pool; ignored when `max_hops` is zero.
+    /// This does not limit direct matches or subsequent graph context.
+    pub max_seeds_per_document: Option<usize>,
+}
+
 /// Optional relationship policy for graph expansion. Direct hybrid matches
 /// remain eligible independently of this policy.
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
@@ -744,7 +757,34 @@ impl Database {
         policy: GraphRagTraversal,
         document_filters: Vec<VectorSearchFilter>,
     ) -> Result<GraphRagSnapshot> {
+        self.graph_rag_candidates_with_options(
+            request,
+            GraphRagOptions {
+                traversal: policy,
+                document_filters,
+                ..GraphRagOptions::default()
+            },
+        )
+    }
+
+    /// Retrieve with document filters, relationship policy, and an optional
+    /// per-document cap on graph seeds. Seeds are selected in hybrid rank order
+    /// before the total seed limit, so repeated chunks cannot crowd out every
+    /// other document's graph connections. All policies share one snapshot.
+    pub fn graph_rag_candidates_with_options(
+        &self,
+        request: GraphRagRequest,
+        options: GraphRagOptions,
+    ) -> Result<GraphRagSnapshot> {
+        let GraphRagOptions {
+            traversal: policy,
+            document_filters,
+            max_seeds_per_document,
+        } = options;
         policy.validate()?;
+        if max_seeds_per_document.is_some_and(|limit| !(1..=20).contains(&limit)) {
+            return Err(invalid("RAG seeds per document must be in 1..20"));
+        }
         if !(1..=100).contains(&request.candidate_limit)
             || !(1..=20).contains(&request.seed_limit)
             || request.seed_limit > request.candidate_limit
@@ -869,6 +909,7 @@ impl Database {
             lexical_scores: &lexical_scores,
             similarities: query_similarities,
             eligible: eligible.as_deref(),
+            max_seeds_per_document,
         }
         .expand(&ranked)?;
         let mut candidates = Vec::with_capacity(admitted.len());

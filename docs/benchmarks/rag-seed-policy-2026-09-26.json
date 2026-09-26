@@ -1,0 +1,88 @@
+{
+  "date": "2026-09-26",
+  "base_commit": "bfd7cec80ff6baff52da7f96527148d319fe8682",
+  "implementation": "Working tree with optional max_seeds_per_document and benchmark argument",
+  "environment": {
+    "cpu": "Apple M4 Max",
+    "cores": 16,
+    "os": "macOS 27.0 (26A428)",
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "features": "default",
+    "compute": "cpu"
+  },
+  "commands": [
+    "cargo run --release --example benchmark_rag_retrieval -- 64 16 128 50",
+    "cargo run --release --example benchmark_rag_retrieval -- 64 16 128 50 1"
+  ],
+  "uncapped": {
+    "cold_us": {
+      "median": 5022.5419999999995,
+      "p95": 5186.75
+    },
+    "identical_results": true,
+    "median_speedup": 12.360624510870366,
+    "provider_calls": 0,
+    "scope": "Local RAG retrieval plus context selection; excludes provider latency, ingestion, and invalidation writes.",
+    "warm_us": {
+      "median": 406.334,
+      "p95": 448.291
+    },
+    "workload": {
+      "candidates": 40,
+      "chunks": 1024,
+      "chunks_per_document": 16,
+      "compute": "cpu",
+      "dimensions": 128,
+      "diversity": 0.3,
+      "documents": 64,
+      "hops": 1,
+      "max_seeds_per_document": null,
+      "neighbors": 8,
+      "profile": "release",
+      "repetitions": 50,
+      "results": 10,
+      "seeds": 12
+    }
+  },
+  "one_seed_per_document": {
+    "cold_us": {
+      "median": 5285.0830000000005,
+      "p95": 6860.625
+    },
+    "identical_results": true,
+    "median_speedup": 11.840006720806498,
+    "provider_calls": 0,
+    "scope": "Local RAG retrieval plus context selection; excludes provider latency, ingestion, and invalidation writes.",
+    "warm_us": {
+      "median": 446.375,
+      "p95": 559.334
+    },
+    "workload": {
+      "candidates": 40,
+      "chunks": 1024,
+      "chunks_per_document": 16,
+      "compute": "cpu",
+      "dimensions": 128,
+      "diversity": 0.3,
+      "documents": 64,
+      "hops": 1,
+      "max_seeds_per_document": 1,
+      "neighbors": 8,
+      "profile": "release",
+      "repetitions": 50,
+      "results": 10,
+      "seeds": 12
+    }
+  },
+  "notes": [
+    "Both policies use the same implementation and corpus; this is not a before/after speed comparison.",
+    "Each policy asserts cold and warm hits, edges, and byte counts are identical; policies can return different context.",
+    "One local run per policy with 50 queries. Providers, HTTP, ingestion, and invalidation writes are excluded.",
+    "Synthetic regression tests establish recovery of a previously missed linked answer; this benchmark makes no real-world recall claim."
+  ],
+  "source_sha256": {
+    "src/engine/graph_rag.rs": "11e84b5fef87e37efd20a9e72e7dbb2be904c5ba4e245a51a45d44bf877cc843",
+    "src/engine/graph_traversal.rs": "157177312025644af5f6dd113581e0ff691a1b7c9625f22017b76039fd7e17c5",
+    "examples/benchmark_rag_retrieval.rs": "8854efbec979c1bbdbf708e39439c2ae4a5cc1c789b7ca7ed6df2fb3c900317f"
+  }
+}

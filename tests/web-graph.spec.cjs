@@ -293,6 +293,30 @@ test("retrieval sends direction, exact kind and weight with the explicit seed bu
   expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ direction: "incoming", kind: "supports", min_weight: .65, seed_limit: 4 });
 });
 
+test("per-document starting passage cap is optional and forwarded independently of result limits", async ({ page }) => {
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  const cap = page.getByLabel("Starting passages per document");
+  await expect(cap).toHaveValue(""); await expect(cap).toHaveAttribute("placeholder", "No cap");
+  await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
+  expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).not.toHaveProperty("max_seeds_per_document");
+  for (const limit of [1, 20]) {
+    await cap.fill(String(limit)); await askGraph(page); await expect(page.locator("#graph-search-submit")).toBeEnabled();
+    expect(fixture.calls.filter((call) => call.path.endsWith("/retrieve")).at(-1).body).toMatchObject({ max_seeds_per_document: limit, seed_limit: 12, max_per_document: 3 });
+  }
+  await cap.fill(""); await askGraph(page); await expect(page.locator("#graph-search-submit")).toBeEnabled();
+  const requests = fixture.calls.filter((call) => call.path.endsWith("/retrieve"));
+  expect(requests).toHaveLength(4); expect(requests.at(-1).body).not.toHaveProperty("max_seeds_per_document");
+});
+
+test("invalid per-document starting passage caps stop before retrieval", async ({ page }) => {
+  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  for (const value of ["0", "-1", "21", "1.5"]) {
+    await page.getByLabel("Starting passages per document").fill(value); await askGraph(page);
+    await expect(page.locator("#graph-search-status")).toContainText("Starting passages per document must be a whole number between 1 and 20, or blank for no cap.");
+  }
+  expect(fixture.calls.some((call) => call.path.endsWith("/retrieve"))).toBe(false);
+});
+
 test("small candidate budgets reserve graph context while explicit seeds remain unchanged", async ({ page }) => {
   const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-candidates").fill("8"); await expect(page.locator("#graph-seeds")).toHaveValue("6"); await page.locator("#graph-result-limit").fill("4"); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
@@ -316,7 +340,7 @@ test("invalid relationship filters and seed limits stop before retrieval", async
 test("legacy retrieval responses omit path explanations and empty kind remains optional", async ({ page }) => {
   const fixture = await workspace(page); await openGraph(page); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0);
   const payload = fixture.calls.find((call) => call.path.endsWith("/retrieve")).body;
-  expect(payload).toMatchObject({ direction: "outgoing", min_weight: 0, seed_limit: 12 }); expect(payload).not.toHaveProperty("kind");
+  expect(payload).toMatchObject({ direction: "outgoing", min_weight: 0, seed_limit: 12 }); expect(payload).not.toHaveProperty("kind"); expect(payload).not.toHaveProperty("max_seeds_per_document");
 });
 
 test("a two-hop explanation preserves incoming arrows and identifies unreturned bridges", async ({ page }) => {
@@ -357,10 +381,10 @@ test("untrusted path identifiers are text and never become HTML or executable li
 test("a stale path response after reconnect cannot restore old provenance", async ({ page }) => {
   const fixture = await workspace(page); const gate = deferred(); let entered = false;
   await page.route("**/retrieve", async (route) => { entered = true; await gate.promise; await reply(route, pathResult([pathHit(fixture.nodes[12], { seed_chunk_id: "old-private-seed", edges: [{ from_chunk: "old-private-seed", to_chunk: "chunk-13", kind: "supports", weight: 1 }] })])); });
-  await openGraph(page); await askGraph(page); await expect.poll(() => entered).toBe(true);
+  await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.getByLabel("Starting passages per document").fill("2"); await askGraph(page); await expect.poll(() => entered).toBe(true);
   await page.locator("#open-token").click(); await page.locator("#token-input").fill("new-path-session"); await page.locator("#save-token").click(); gate.resolve();
   await expect(page.locator("#status-label")).toHaveText("Connected"); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0); await expect(page.locator("#graph-search-results")).not.toContainText("old-private-seed");
-  await expect(page.locator("#graph-seeds")).toHaveValue("12"); await expect(page.locator("#graph-retrieval-direction")).toHaveValue("outgoing");
+  await expect(page.locator("#graph-seeds")).toHaveValue("12"); await expect(page.locator("#graph-seeds-per-document")).toHaveValue(""); await expect(page.locator("#graph-retrieval-direction")).toHaveValue("outgoing");
 });
 
 test("retrieval path details and advanced controls fit desktop and mobile screens", async ({ page }, testInfo) => {

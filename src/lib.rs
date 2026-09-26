@@ -31,10 +31,10 @@ pub use engine::{
     GraphDocumentInput, GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit,
     GraphIngestRequest, GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode,
     GraphNeighborhoodRequest, GraphNeighborhoodResult, GraphNode, GraphRagCandidate, GraphRagHit,
-    GraphRagPath, GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot,
-    GraphRagTraversal, GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult,
-    GraphRelationshipRequest, GraphRelationshipResult, GraphSearchRequest, GraphSearchResult,
-    GraphTables,
+    GraphRagOptions, GraphRagPath, GraphRagRequest, GraphRagResult, GraphRagSelection,
+    GraphRagSnapshot, GraphRagTraversal, GraphRelationshipDeleteRequest,
+    GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
+    GraphSearchRequest, GraphSearchResult, GraphTables,
 };
 pub use error::{Error, Result};
 pub use parameters::bind_parameters;

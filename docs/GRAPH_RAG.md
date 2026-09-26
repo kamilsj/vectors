@@ -282,6 +282,21 @@ context. Each hop retains at most `candidate_limit` frontier passages, after
 the per-passage `neighbor_limit` is applied. Stable chunk IDs break score ties.
 These bounds make traversal selective, not an exhaustive graph search.
 
+When many chunks from one document dominate the starting matches, set
+`max_seeds_per_document` to an integer from 1 to 20, for example
+`"max_seeds_per_document":2`. This limits the starting passages from each
+document so graph expansion can begin from more sources in the ranked pool.
+It can select fewer than `seed_limit` seeds when too few documents qualify.
+The pool remains bounded by the existing vector and keyword candidate limits;
+increase `candidate_limit` if other documents are absent from that pool. This
+option does not change ranking when `max_hops` is zero.
+Omitting the field or passing `null` keeps the existing uncapped behavior.
+This starting-passage cap is separate from `max_per_document`, which limits
+chunks in the final context; connected passages can still come from a document
+that has reached its seed cap. The cap applies to `/retrieve`, not `/search`.
+The existing hit `seed` flag still identifies any direct hybrid match; it does
+not enumerate the subset used as initial graph traversal seeds.
+
 `direction` selects `outgoing` (the default), `incoming`, or `both`. Optional
 `kind` selects one exact stored label, such as `supports` or `semantic`;
 `min_weight` accepts a finite inclusive threshold from 0 to 1. Kind and weight
@@ -321,8 +336,12 @@ to `/retrieve`; `/search` retains its existing vector-seed traversal.
 
 The embedded Rust API retains `graph_rag_candidates(request)` with the outgoing
 default. Use `graph_rag_candidates_with_traversal(request, GraphRagTraversal {
-direction, kind, min_weight })` for an explicit policy. Both synchronous and
-asynchronous Python collection clients accept these same keyword arguments.
+direction, kind, min_weight })` for an explicit traversal policy. To combine
+traversal, document filters, and a starting-passage cap, use
+`graph_rag_candidates_with_options(request, GraphRagOptions { traversal,
+document_filters, max_seeds_per_document: Some(2) })`. Existing request literals
+and entry points remain compatible. Both synchronous and asynchronous Python
+collection clients accept the retrieval policies as keyword arguments.
 
 `diversity: 0` keeps relevance order; larger values trade relevance for less
 repeated context. The default is `0.3`. `max_context_bytes` counts returned chunk
@@ -389,6 +408,7 @@ specified in the [Voyage reranker API](https://docs.voyageai.com/reference/reran
 | --- | ---: | --- |
 | Candidate pool | 40 | 1–100 |
 | Fused seeds | 12 | 1–20, no more than candidates |
+| Seeds per document | No cap | Optional 1–20; omitted or `null` is uncapped |
 | Returned chunks | 10 | 1–100, no more than candidates or server row limit |
 | Graph hops | 1 | 0–3 |
 | Neighbors per expanded chunk | 8 | 1–32 |
@@ -413,6 +433,10 @@ and minimum-weight controls. Starting passages (seeds) are adjustable; suggested
 seeds decrease with a small candidate budget so connected context has room.
 An explicit seed choice is preserved until **Use suggested seeds** is selected.
 Choosing as many seeds as candidate slots can leave no room for new graph hits.
+**Starting passages per document** optionally limits seeds from each source;
+leave it blank for no cap. This helps the graph start across different documents
+when one long document supplies many matching chunks. **Results per document**
+still applies separately to the final context.
 Graph-derived results expose **How this passage was found**, with the starting
 seed, original relationship arrows, and links to explore intermediate chunks.
 An identifier for an omitted bridge does not imply that its text was returned.

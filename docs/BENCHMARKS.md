@@ -511,6 +511,34 @@ vector dimensions, and measured pairs. The
 [raw results](benchmarks/rag-retrieval-2026-09-19.json) include source hashes and
 environment details.
 
+### Per-document graph seed limits
+
+Append a seed cap to the same benchmark to measure retrieval with graph starts
+spread across documents in the bounded hybrid candidate pool:
+
+```sh
+cargo run --release --example benchmark_rag_retrieval -- 64 16 128 50
+cargo run --release --example benchmark_rag_retrieval -- 64 16 128 50 1
+```
+
+On 2026-09-26, Apple M4 Max (16 cores), macOS 27.0, Rust 1.98.1, release/default
+features and CPU compute, one run per policy with 50 queries produced:
+
+| Seed policy | Cold median / p95 (µs) | Warm median / p95 (µs) |
+| --- | ---: | ---: |
+| Uncapped | 5022.54 / 5186.75 | 406.33 / 448.29 |
+| At most one initial seed per document | 5285.08 / 6860.63 | 446.38 / 559.33 |
+
+Both runs use the same implementation and 1,024-chunk, 128-dimensional corpus.
+This is a policy-cost observation, not a speedup claim. Cold and warm results
+match within each policy; different policies may select different context.
+Provider latency, HTTP, ingestion, and invalidation writes are excluded.
+[Raw measurements and provenance](benchmarks/rag-seed-policy-2026-09-26.json).
+The `graph_rag_seeds` regression suite separately verifies recovery of a linked
+answer crowded out by one document's chunks, with unchanged candidate budgets,
+filter boundaries, and source citations; this is synthetic coverage, not a
+real-world recall evaluation.
+
 ## RAG retrieval while other data changes
 
 The lexical index now follows the chunk table's storage generation instead of

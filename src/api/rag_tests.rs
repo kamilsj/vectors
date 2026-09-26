@@ -479,6 +479,132 @@ async fn browse_and_relationship_edits_are_provider_free_and_revision_guarded() 
 }
 
 #[actix_web::test]
+async fn retrieval_seed_document_cap_recovers_graph_context_and_preserves_default() {
+    let db = fixture();
+    let profile = db.graph_collection("notes").unwrap().config.profile;
+    for (id, passages) in [
+        (
+            "one",
+            vec![
+                ("First storage passage.", vec![1.0, 0.0]),
+                ("Second storage passage.", vec![0.99, 0.01]),
+            ],
+        ),
+        (
+            "answer",
+            vec![("Recovery requires a checkpoint.", vec![-1.0, 0.0])],
+        ),
+    ] {
+        let text = passages
+            .iter()
+            .map(|(text, _)| *text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut offset = 0;
+        let chunks = passages
+            .into_iter()
+            .map(|(passage, vector)| {
+                let start_byte = offset;
+                offset += passage.len() + 1;
+                GraphChunkInput {
+                    start_byte,
+                    end_byte: start_byte + passage.len(),
+                    text: passage.into(),
+                    embedding_text: passage.into(),
+                    embedding: Vector::new(vector).unwrap().normalized().unwrap(),
+                }
+            })
+            .collect();
+        db.graph_ingest_document(GraphIngestRequest {
+            collection: "notes".into(),
+            expected_revision: db.revision().unwrap(),
+            expected_profile: profile.clone(),
+            document: GraphDocumentInput {
+                id: id.into(),
+                title: id.into(),
+                source: format!("manual/{id}.md"),
+                text,
+                metadata: json!({}),
+                chunking: json!({}),
+                chunks,
+            },
+        })
+        .unwrap();
+    }
+    add_traversal_link(&db, "5:three:0", "6:answer:0", "supports", 1.0);
+    let (endpoint, mock) = mock_provider(3, |_, _, _| (200, embedding_response()));
+    let embeddings = configured(&endpoint, Provider::Openai);
+    let mut request = json!({
+        "text":"recovery", "candidate_limit":4, "seed_limit":2,
+        "max_results":4, "max_hops":1, "neighbor_limit":1,
+        "kind":"supports", "lexical_weight":0, "diversity":0
+    });
+    let path = "/v1/graph/collections/notes/retrieve";
+    let (status, baseline) =
+        call(&db, &embeddings, None, Method::POST, path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{baseline}");
+    assert!(!baseline["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|hit| hit["document_id"] == "answer"));
+    request["max_seeds_per_document"] = JsonValue::Null;
+    let (status, uncapped) =
+        call(&db, &embeddings, None, Method::POST, path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{uncapped}");
+    assert_eq!(uncapped["hits"], baseline["hits"]);
+    request["max_seeds_per_document"] = json!(1);
+    let (status, capped) = call(&db, &embeddings, None, Method::POST, path, request).await;
+    assert_eq!(status, StatusCode::OK, "{capped}");
+    assert_eq!(capped["candidate_count"], 4);
+    let answer = capped["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["document_id"] == "answer")
+        .expect("a seed from another document exposes the answer");
+    assert_eq!(answer["depth"], 1);
+    assert_eq!(answer["retrieval_path"]["seed_chunk_id"], "5:three:0");
+    assert_eq!(answer["retrieval_path"]["edges"][0]["kind"], "supports");
+    assert_eq!(
+        capped["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|hit| hit["document_id"] == "one")
+            .count(),
+        2
+    );
+    mock.join().unwrap();
+}
+
+#[actix_web::test]
+async fn invalid_seed_document_caps_fail_before_provider_for_nonempty_and_empty_collections() {
+    let db = fixture();
+    let mut config = db.graph_collection("notes").unwrap().config;
+    config.name = "empty".into();
+    db.graph_create_collection(config).unwrap();
+    let embeddings = configured("http://127.0.0.1:1", Provider::Openai);
+    for collection in ["notes", "empty"] {
+        for cap in [0, 21] {
+            let mut request = query();
+            request["max_seeds_per_document"] = json!(cap);
+            let (status, result) = call(
+                &db,
+                &embeddings,
+                None,
+                Method::POST,
+                &format!("/v1/graph/collections/{collection}/retrieve"),
+                request,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+            assert_eq!(result["error"]["code"], "invalid_rag_request");
+        }
+    }
+}
+
+#[actix_web::test]
 async fn local_hybrid_retrieval_recovers_keywords_with_consistent_repeated_results() {
     let db = fixture();
     let (endpoint, mock) = mock_provider(2, |_, _, _| (200, embedding_response()));

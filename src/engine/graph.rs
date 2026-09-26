@@ -14,10 +14,10 @@ pub use neighborhood::{
 #[path = "graph_rag.rs"]
 mod rag;
 pub use rag::{
-    GraphBrowseRequest, GraphBrowseResult, GraphNode, GraphRagCandidate, GraphRagHit, GraphRagPath,
-    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagSnapshot, GraphRagTraversal,
-    GraphRelationshipDeleteRequest, GraphRelationshipDeleteResult, GraphRelationshipRequest,
-    GraphRelationshipResult,
+    GraphBrowseRequest, GraphBrowseResult, GraphNode, GraphRagCandidate, GraphRagHit,
+    GraphRagOptions, GraphRagPath, GraphRagRequest, GraphRagResult, GraphRagSelection,
+    GraphRagSnapshot, GraphRagTraversal, GraphRelationshipDeleteRequest,
+    GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
 };
 
 const MAX_CHUNKS: usize = 10_000;

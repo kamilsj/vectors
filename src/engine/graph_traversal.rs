@@ -35,24 +35,38 @@ pub(super) struct GraphTraversal<'a> {
     pub lexical_scores: &'a [f64],
     pub similarities: Vec<Option<f64>>,
     pub eligible: Option<&'a [bool]>,
+    pub max_seeds_per_document: Option<usize>,
 }
 
 impl GraphTraversal<'_> {
     pub fn expand(mut self, ranked: &[usize]) -> Result<(Vec<Admission>, bool)> {
         let request = self.request;
+        let seeds = self.select_seeds(ranked)?;
         let base_limit = if request.max_hops == 0 {
             request.candidate_limit
         } else {
-            request.seed_limit.max(
+            seeds.len().max(
                 request
                     .candidate_limit
                     .saturating_sub((request.candidate_limit / 4).max(1)),
             )
         };
-        let mut admitted = ranked
-            .iter()
-            .take(base_limit)
-            .map(|&row| Admission {
+        // Reserve places for every chosen seed, including those below the
+        // ordinary direct-match cutoff, then fill remaining places by rank.
+        // This keeps both the direct pool and the graph frontier bounded.
+        let mut direct_rows = seeds.clone();
+        let mut included = seeds.iter().copied().collect::<HashSet<_>>();
+        for &row in ranked {
+            if direct_rows.len() == base_limit {
+                break;
+            }
+            if included.insert(row) {
+                direct_rows.push(row);
+            }
+        }
+        let mut admitted = direct_rows
+            .into_iter()
+            .map(|row| Admission {
                 row,
                 depth: 0,
                 score: self.scores[&row],
@@ -64,15 +78,14 @@ impl GraphTraversal<'_> {
             .enumerate()
             .map(|(position, item)| (item.row, position))
             .collect::<HashMap<_, _>>();
-        let mut frontier = admitted
-            .iter()
-            .take(request.seed_limit)
-            .map(|item| Evidence {
-                row: item.row,
-                score: item.score,
-                strength: item.score.fusion,
+        let mut frontier = seeds
+            .into_iter()
+            .map(|row| Evidence {
+                row,
+                score: self.scores[&row],
+                strength: self.scores[&row].fusion,
                 trace: Trace {
-                    seed: item.row,
+                    seed: row,
                     edges: [0; 3],
                     len: 0,
                 },
@@ -261,6 +274,35 @@ impl GraphTraversal<'_> {
             });
         }
         Ok((admitted, truncated))
+    }
+
+    fn select_seeds(&self, ranked: &[usize]) -> Result<Vec<usize>> {
+        let Some(limit) = self
+            .max_seeds_per_document
+            .filter(|_| self.request.max_hops > 0)
+        else {
+            return Ok(ranked
+                .iter()
+                .copied()
+                .take(self.request.seed_limit)
+                .collect());
+        };
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        let mut seeds = Vec::with_capacity(self.request.seed_limit);
+        for &row in ranked {
+            let count = counts
+                .entry(text_at(&self.chunks.rows[row], 1)?)
+                .or_default();
+            if *count >= limit {
+                continue;
+            }
+            *count += 1;
+            seeds.push(row);
+            if seeds.len() == self.request.seed_limit {
+                break;
+            }
+        }
+        Ok(seeds)
     }
 
     fn preferred(&self, next: &Evidence, previous: &Evidence) -> bool {

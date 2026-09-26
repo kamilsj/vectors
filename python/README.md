@@ -166,6 +166,18 @@ result = graph.retrieve("What supports this recovery procedure?",
                         direction="incoming", kind="supports", min_weight=0.5)
 ```
 
+Use `max_seeds_per_document=1` to spread graph traversal across documents when
+one long source dominates the highest-ranked chunks. The optional cap accepts
+1..20; omission or `None` preserves the original seed ranking. It controls which
+passages start graph exploration, while `max_per_document` limits returned
+passages. For example:
+
+```python
+result = graph.retrieve("How do retries interact with recovery?",
+                        seed_limit=8, max_seeds_per_document=1,
+                        max_per_document=3)
+```
+
 Query embeddings are still generated when `vector_weight=0` for returned cosine
 diagnostics; graph query fit then uses lexical evidence. `search` uses the
 simpler vector-seed graph search. Connected hits may include `retrieval_path`

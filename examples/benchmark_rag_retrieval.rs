@@ -1,11 +1,12 @@
 //! Repeatable cold/warm lexical-cache comparison with identical RAG results.
 //! Run: cargo run --release --example benchmark_rag_retrieval -- 64 16 128 20
+//! Append an optional per-document seed cap (1..20) to measure scoped seeding.
 use serde_json::json;
 use std::time::Instant;
 use vectors::{
     ComputeConfig, ComputeDevice, Database, GraphChunkInput, GraphCollectionConfig,
-    GraphDocumentInput, GraphEmbeddingProfile, GraphIngestRequest, GraphRagRequest,
-    GraphRagSelection, Vector,
+    GraphDocumentInput, GraphEmbeddingProfile, GraphIngestRequest, GraphRagOptions,
+    GraphRagRequest, GraphRagSelection, Vector,
 };
 
 fn vector(seed: usize, dimensions: usize) -> Vector {
@@ -34,8 +35,14 @@ fn main() {
     let per_doc = args.get(1).copied().unwrap_or(16);
     let dimensions = args.get(2).copied().unwrap_or(128);
     let repetitions = args.get(3).copied().unwrap_or(20);
+    let max_seeds_per_document = args.get(4).copied();
     assert!(docs > 0 && (1..=256).contains(&per_doc) && docs * per_doc <= 10_000);
     assert!((1..=3072).contains(&dimensions) && repetitions > 0);
+    assert!(max_seeds_per_document.is_none_or(|limit| (1..=20).contains(&limit)));
+    let options = GraphRagOptions {
+        max_seeds_per_document,
+        ..GraphRagOptions::default()
+    };
     let database = Database::new_with_compute(ComputeConfig {
         device: ComputeDevice::Cpu,
         ..ComputeConfig::default()
@@ -116,14 +123,14 @@ fn main() {
         };
         let start = Instant::now();
         let cold = database
-            .graph_rag_candidates(request.clone())
+            .graph_rag_candidates_with_options(request.clone(), options.clone())
             .unwrap()
             .finalize(selection.clone(), None)
             .unwrap();
         cold_us.push(start.elapsed().as_secs_f64() * 1_000_000.0);
         let start = Instant::now();
         let warm = database
-            .graph_rag_candidates(request)
+            .graph_rag_candidates_with_options(request, options.clone())
             .unwrap()
             .finalize(selection, None)
             .unwrap();
@@ -134,7 +141,7 @@ fn main() {
         assert_eq!(cold.context_bytes, warm.context_bytes);
     }
     println!("{}", serde_json::to_string_pretty(&json!({
-        "workload":{"documents":docs,"chunks_per_document":per_doc,"chunks":docs*per_doc,"dimensions":dimensions,"repetitions":repetitions,"candidates":40,"seeds":12,"results":10,"hops":1,"neighbors":8,"diversity":0.3,"compute":"cpu","profile":"release"},
+        "workload":{"documents":docs,"chunks_per_document":per_doc,"chunks":docs*per_doc,"dimensions":dimensions,"repetitions":repetitions,"candidates":40,"seeds":12,"max_seeds_per_document":max_seeds_per_document,"results":10,"hops":1,"neighbors":8,"diversity":0.3,"compute":"cpu","profile":"release"},
         "cold_us":{"median":percentile(&cold_us,0.5),"p95":percentile(&cold_us,0.95)},
         "warm_us":{"median":percentile(&warm_us,0.5),"p95":percentile(&warm_us,0.95)},
         "median_speedup":percentile(&cold_us,0.5)/percentile(&warm_us,0.5),

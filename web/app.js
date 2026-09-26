@@ -2668,6 +2668,12 @@ function graphRetrievalOptions() {
   for (const [key, label, min, max] of [["candidate_limit", "Candidate passages", 1, 100], ["seed_limit", "Starting passages", 1, 20], ["max_results", "Maximum results", 1, 100], ["max_hops", "Connection depth", 0, 3], ["neighbor_limit", "Neighbors per passage", 1, 32], ["max_context_bytes", "Context budget", 1, 1048576], ["max_per_document", "Results per document", 1, 100]]) {
     if (!Number.isInteger(payload[key]) || payload[key] < min || payload[key] > max) throw new Error(`${label} must be a whole number between ${min} and ${max}.`);
   }
+  const seedsPerDocument = $("#graph-seeds-per-document");
+  if (seedsPerDocument.value.trim() || seedsPerDocument.validity.badInput) {
+    const limit = numeric("#graph-seeds-per-document");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error("Starting passages per document must be a whole number between 1 and 20, or blank for no cap.");
+    payload.max_seeds_per_document = limit;
+  }
   if (payload.max_results > payload.candidate_limit) throw new Error("Maximum results must not exceed the candidate passage count.");
   if (payload.seed_limit > payload.candidate_limit) throw new Error("Starting passages must not exceed the candidate passage count. Lower seeds or use the suggested value.");
   if (!Number.isFinite(payload.diversity) || payload.diversity < 0 || payload.diversity > 1) throw new Error("Diversity must be between 0 and 1.");

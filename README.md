@@ -595,9 +595,13 @@ strength and query relevance. Retrieval can follow incoming, outgoing, or both
 directions, narrowed by relationship label and weight. **How this passage was
 found** shows the retained path even when a bridge is omitted from the final
 context. Smaller browser candidate budgets suggest fewer starting passages to
-leave room for graph context. Diversity, per-document, and byte budgets bound the
-selection. Optional Voyage cross-encoder reranking scores the query together
-with each candidate; configure its key in **Settings** before choosing that mode.
+leave room for graph context. Optional **Starting passages per document**
+(`max_seeds_per_document`, 1–20) helps expansion begin across different sources
+when one document supplies many matching chunks; a blank setting keeps the
+existing behavior. Diversity, final per-document result limits, and byte budgets
+bound the selection. Optional Voyage cross-encoder reranking scores the query
+together with each candidate; configure its key in **Settings** before choosing
+that mode.
 Use **Filter documents** in the retrieval controls to narrow results by fields
 such as product, category, or publication status. The same filters constrain
 keyword/vector matches and every graph hop, so excluded documents cannot return

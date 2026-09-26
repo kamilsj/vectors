@@ -12,6 +12,10 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- Optional `max_seeds_per_document` in hybrid GraphRAG retrieval, the Rust and
+  Python APIs, and Connections. Capping starting passages from each document
+  helps graph expansion reach evidence through other sources; omission keeps
+  the existing behavior and final per-document result limits remain separate.
 - Typed document fields for RAG collections, with required/unique constraints,
   maintained scalar indexes, and one shared visual field editor for collections
   and ordinary SQL tables. Declared metadata lives in canonical SQL columns.

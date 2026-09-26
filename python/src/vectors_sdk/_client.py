@@ -426,12 +426,15 @@ class Collection:
         kind: str | None = None,
         min_weight: float = 0.0,
         document_filters: Sequence[Mapping[str, Any]] | None = None,
+        max_seeds_per_document: int | None = None,
     ) -> dict[str, Any]:
         """Hybrid retrieval with citations and optional typed document filters.
 
         Filters combine with AND and use column/operator/value mappings. They
-        constrain both vector candidates and graph expansion. This operation
-        requires the collection's embedding provider and is never retried.
+        constrain both vector candidates and graph expansion. Set
+        max_seeds_per_document to 1..20 to cap each document's traversal seeds;
+        None keeps the original seed ranking. This operation requires the
+        collection's embedding provider and is never retried.
         """
         body: dict[str, Any] = {
             "text": text,
@@ -456,6 +459,8 @@ class Collection:
             body["min_weight"] = min_weight
         if document_filters is not None:
             body["document_filters"] = [dict(item) for item in document_filters]
+        if max_seeds_per_document is not None:
+            body["max_seeds_per_document"] = max_seeds_per_document
         return self._client._request(
             "POST",
             self._path + "/retrieve",

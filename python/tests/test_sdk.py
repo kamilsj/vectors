@@ -299,12 +299,23 @@ class SDKTests(unittest.TestCase):
                 kind=None,
                 min_weight=0,
                 document_filters=None,
+                max_seeds_per_document=None,
             )
             result = graph.retrieve(
-                "question", direction="incoming", kind="supports", min_weight=0.8
+                "question",
+                direction="incoming",
+                kind="supports",
+                min_weight=0.8,
+                max_seeds_per_document=1,
             )
         self.assertEqual(payloads[0], payloads[1])
-        for field in ("direction", "kind", "min_weight", "document_filters"):
+        for field in (
+            "direction",
+            "kind",
+            "min_weight",
+            "document_filters",
+            "max_seeds_per_document",
+        ):
             self.assertNotIn(field, payloads[0])
         self.assertEqual(
             payloads[2],
@@ -313,6 +324,7 @@ class SDKTests(unittest.TestCase):
                 "direction": "incoming",
                 "kind": "supports",
                 "min_weight": 0.8,
+                "max_seeds_per_document": 1,
             },
         )
         self.assertEqual(result["hits"][0]["retrieval_path"], evidence)
@@ -412,6 +424,9 @@ class AsyncSDKTests(unittest.IsolatedAsyncioTestCase):
             {},
             {"direction": "both", "kind": "references", "min_weight": 0.4},
             {"document_filters": None},
+            {"max_seeds_per_document": None},
+            {"max_seeds_per_document": 1},
+            {"max_seeds_per_document": 20, "seed_limit": 20},
             {"document_filters": []},
             {
                 "document_filters": [

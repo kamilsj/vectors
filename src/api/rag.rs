@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::{
-    GraphBrowseRequest, GraphNeighborhoodDirection, GraphNeighborhoodRequest, GraphRagRequest,
-    GraphRagResult, GraphRagSelection, GraphRagTraversal, GraphRelationshipDeleteRequest,
-    GraphRelationshipRequest, RerankingService,
+    GraphBrowseRequest, GraphNeighborhoodDirection, GraphNeighborhoodRequest, GraphRagOptions,
+    GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagTraversal,
+    GraphRelationshipDeleteRequest, GraphRelationshipRequest, RerankingService,
 };
 
 pub(super) fn configure(config: &mut web::ServiceConfig) {
@@ -226,6 +226,7 @@ struct Retrieve {
     candidate_limit: usize,
     #[serde(default = "seed_limit")]
     seed_limit: usize,
+    max_seeds_per_document: Option<usize>,
     #[serde(default = "result_limit")]
     max_results: usize,
     #[serde(default = "default_hops")]
@@ -283,6 +284,9 @@ impl Retrieve {
             || !(1..=100).contains(&self.candidate_limit)
             || !(1..=20).contains(&self.seed_limit)
             || self.seed_limit > self.candidate_limit
+            || self
+                .max_seeds_per_document
+                .is_some_and(|limit| !(1..=20).contains(&limit))
             || self.max_hops > 3
             || !(1..=32).contains(&self.neighbor_limit)
             || self.max_results == 0
@@ -298,7 +302,7 @@ impl Retrieve {
             || !(0.0..=10.0).contains(&self.lexical_weight)
             || self.vector_weight + self.lexical_weight == 0.0
         {
-            return Err(ApiError::bad_request("invalid_rag_request", "use text up to 8191 bytes, 1..100 candidates, 1..20 seeds, 0..3 hops, 1..32 neighbors, results within candidate/server limits, diversity 0..1, context 1..1048576 bytes, 1..100 chunks per document, and nonzero combined weights in 0..10"));
+            return Err(ApiError::bad_request("invalid_rag_request", "use text up to 8191 bytes, 1..100 candidates, 1..20 seeds, an optional 1..20 seeds per document, 0..3 hops, 1..32 neighbors, results within candidate/server limits, diversity 0..1, context 1..1048576 bytes, 1..100 chunks per document, and nonzero combined weights in 0..10"));
         }
         GraphRagRequest::validate_query_text(&self.text)?;
         if matches!(self.reranker, Reranker::Voyage)
@@ -406,7 +410,7 @@ async fn retrieve(
             .next()
             .ok_or_else(|| ApiError::internal("query embedding is missing"))?;
         let snapshot = database
-            .graph_rag_candidates_filtered(
+            .graph_rag_candidates_with_options(
                 GraphRagRequest {
                     collection: state.config.name,
                     expected_profile: state.config.profile,
@@ -419,8 +423,11 @@ async fn retrieve(
                     vector_weight: input.vector_weight,
                     lexical_weight: input.lexical_weight,
                 },
-                traversal,
-                document_filters,
+                GraphRagOptions {
+                    traversal,
+                    document_filters,
+                    max_seeds_per_document: input.max_seeds_per_document,
+                },
             )
             .map_err(search_error)?;
         Ok::<_, ApiError>((snapshot, generated.usage))
