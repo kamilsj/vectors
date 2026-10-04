@@ -9,6 +9,12 @@ pub(super) struct Admission {
     pub retrieval_path: Option<GraphRagPath>,
 }
 
+pub(super) struct Expansion {
+    pub admitted: Vec<Admission>,
+    pub traversal_seed_ids: Vec<String>,
+    pub truncated: bool,
+}
+
 // Keep row references in the beam; only admitted paths copy edge strings.
 #[derive(Clone, Copy)]
 struct Trace {
@@ -30,18 +36,27 @@ pub(super) struct GraphTraversal<'a> {
     pub policy: &'a GraphRagTraversal,
     pub chunks: &'a Table,
     pub edges: &'a Table,
-    pub lookup: &'a HashMap<&'a str, usize>,
+    pub lookup: &'a HashMap<UniqueKey, usize>,
     pub scores: &'a HashMap<usize, CandidateScore>,
-    pub lexical_scores: &'a [f64],
-    pub similarities: Vec<Option<f64>>,
-    pub eligible: Option<&'a [bool]>,
+    pub lexical_scores: &'a LexicalScores,
+    pub lexical_max: f64,
+    pub similarities: HashMap<usize, f64>,
+    pub eligible: Option<&'a [usize]>,
     pub max_seeds_per_document: Option<usize>,
 }
 
 impl GraphTraversal<'_> {
-    pub fn expand(mut self, ranked: &[usize]) -> Result<(Vec<Admission>, bool)> {
+    pub fn expand(mut self, ranked: &[usize]) -> Result<Expansion> {
         let request = self.request;
         let seeds = self.select_seeds(ranked)?;
+        let traversal_seed_ids = if request.max_hops == 0 {
+            Vec::new()
+        } else {
+            seeds
+                .iter()
+                .map(|&row| text_at(&self.chunks.rows[row], 0).map(str::to_owned))
+                .collect::<Result<Vec<_>>>()?
+        };
         let base_limit = if request.max_hops == 0 {
             request.candidate_limit
         } else {
@@ -73,6 +88,13 @@ impl GraphTraversal<'_> {
                 retrieval_path: None,
             })
             .collect::<Vec<_>>();
+        if request.max_hops == 0 {
+            return Ok(Expansion {
+                admitted,
+                traversal_seed_ids,
+                truncated: ranked.len() > request.candidate_limit,
+            });
+        }
         let direct = admitted
             .iter()
             .enumerate()
@@ -91,12 +113,15 @@ impl GraphTraversal<'_> {
                 },
             })
             .collect::<Vec<_>>();
-        let mut best_path = vec![0.0f64; self.chunks.rows.len()];
+        let mut best_path = HashMap::new();
         for candidate in &frontier {
-            best_path[candidate.row] = candidate.strength;
+            best_path.insert(candidate.row, candidate.strength);
         }
         let mut context: HashMap<usize, Evidence> = HashMap::new();
-        let lexical_max = self.lexical_scores.iter().copied().fold(0.0, f64::max);
+        let lexical_max = self.lexical_max;
+        // Memoization only avoids repeated exact cosine work. Bound it by the
+        // query beam, even when an expanded hub has collection-sized degree.
+        let similarity_cache_limit = request.candidate_limit * (request.max_hops + 1);
         let outgoing = self
             .edges
             .indexes
@@ -131,9 +156,12 @@ impl GraphTraversal<'_> {
                         }
                         let target = *self
                             .lookup
-                            .get(text_at(row, *endpoint)?)
+                            .get(&UniqueKey::Text(text_at(row, *endpoint)?.into()))
                             .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
-                        if self.eligible.is_some_and(|rows| !rows[target]) {
+                        if self
+                            .eligible
+                            .is_some_and(|rows| rows.binary_search(&target).is_err())
+                        {
                             continue;
                         }
                         targets
@@ -153,17 +181,17 @@ impl GraphTraversal<'_> {
                 let mut neighbors = Vec::with_capacity(targets.len());
                 for (row, (weight, edge_index)) in targets {
                     let original = self.scores.get(&row).copied().unwrap_or(CandidateScore {
-                        lexical: self.lexical_scores[row],
+                        lexical: self.lexical_scores.get(row),
                         fusion: 0.0,
                     });
                     // Separate structural strength from query fit so a weakly
                     // matching bridge can still lead to useful evidence.
                     let strength = (source.strength * 0.5 * weight).max(original.fusion);
-                    if strength <= best_path[row] {
+                    if strength <= best_path.get(&row).copied().unwrap_or(0.0) {
                         continue;
                     }
                     let vector_fit = if request.vector_weight > 0.0 {
-                        if let Some(similarity) = self.similarities[row] {
+                        if let Some(&similarity) = self.similarities.get(&row) {
                             similarity.max(0.0)
                         } else {
                             let Some(Value::Vector(vector)) = self.chunks.rows[row].get(8) else {
@@ -172,14 +200,16 @@ impl GraphTraversal<'_> {
                             let similarity = (1.0
                                 - f64::from(request.query.cosine_distance(vector)?))
                             .clamp(-1.0, 1.0);
-                            self.similarities[row] = Some(similarity);
+                            if self.similarities.len() < similarity_cache_limit {
+                                self.similarities.insert(row, similarity);
+                            }
                             similarity.max(0.0)
                         }
                     } else {
                         0.0
                     };
                     let lexical_fit = if request.lexical_weight > 0.0 && lexical_max > 0.0 {
-                        (self.lexical_scores[row] / lexical_max).clamp(0.0, 1.0)
+                        (self.lexical_scores.get(row) / lexical_max).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
@@ -216,7 +246,7 @@ impl GraphTraversal<'_> {
             truncated |= next.len() > request.candidate_limit;
             top_evidence(&mut next, request.candidate_limit, self.chunks);
             for proposal in &next {
-                best_path[proposal.row] = proposal.strength;
+                best_path.insert(proposal.row, proposal.strength);
                 if let Some(&position) = direct.get(&proposal.row) {
                     admitted[position].score.fusion =
                         admitted[position].score.fusion.max(proposal.score.fusion);
@@ -273,7 +303,11 @@ impl GraphTraversal<'_> {
                 retrieval_path: None,
             });
         }
-        Ok((admitted, truncated))
+        Ok(Expansion {
+            admitted,
+            traversal_seed_ids,
+            truncated,
+        })
     }
 
     fn select_seeds(&self, ranked: &[usize]) -> Result<Vec<usize>> {

@@ -24,8 +24,9 @@ flowchart LR
 Automatic semantic edges mean cosine similarity. They do not assert facts such
 as authorship, causality, or agreement. Applications can add their own directed,
 labeled relationships using SQL. This implementation provides chunk-level graph
-retrieval; it does not extract entities, generate community summaries, or call a
-language model to answer the question.
+retrieval; it does not extract entities or generate community summaries. Optional
+chat generates cited answers from selected passages. See the [PDF RAG lab](PDF_RAG_LAB.md)
+for folder uploads, interactive testing, diagnostics and a repeatable corpus.
 
 ## Configure the embedding space
 
@@ -273,6 +274,14 @@ The stages are:
 4. Select whole chunks using maximal marginal relevance, source-overlap and
    duplicate suppression, a per-document cap, and a context byte budget.
 
+Set `vector_weight: 0` for lexical-only query retrieval. The API skips query
+embedding and the engine skips the dense candidate scan; local ranking works
+without an embedding key or active provider matching the collection. Embedding
+usage and embedding time are zero. Document filters still apply before ranking
+and every graph hop. With `max_hops > 0`, expansion uses lexical query fit;
+diversity selection can still compare stored candidate vectors. Optional Voyage
+reranking and chat answer generation continue to require their provider keys.
+
 Expansion combines decayed path strength with the target passage's cosine or
 BM25 query match. Structural path strength stays separate from query fit, so a
 weakly matching bridge can lead to useful context. Stronger paths found later
@@ -350,7 +359,8 @@ additional space. A chunk that cannot fit is skipped rather than shortened,
 so its stored text and citations remain exact. Fewer than `max_results` hits
 can be returned when these constraints exclude candidates.
 
-Each hit retains its source citation and cosine `similarity`, and adds
+Each hit retains its source citation and cosine `similarity` (JSON `null` when
+`vector_weight: 0`; Rust `Option<f64>` from 0.10), and adds
 `lexical_score`, `fusion_score`, optional `rerank_score`, and `selection_score`.
 These scores have different meanings and are not calibrated probabilities.
 The response includes `candidate_count`, `context_bytes`, the catalog revision,
@@ -442,8 +452,9 @@ Graph-derived results expose **How this passage was found**, with the starting
 seed, original relationship arrows, and links to explore intermediate chunks.
 An identifier for an omitted bridge does not imply that its text was returned.
 
-The console's **Connections** workspace includes collection creation, chunk
-preview, document ingestion, graph browsing, and RAG search. Nodes represent
+The console's **Playground** workspace separates Chat, Documents, and Graph.
+Use Chat to test retrieval and compare repeat runs, Documents to import PDFs or
+preview text chunks, and Graph to browse relationships. Nodes represent
 chunks and are grouped visually by source document. Select a node in the diagram
 or accessible list to inspect its full text, citation range, and relationships.
 Choose **Explore connections** on a passage or RAG result to follow its links
@@ -604,8 +615,11 @@ does not change.
 
 The graph uses exact searches and an in-memory catalog. Semantic link creation
 performs at most one exact search per incoming chunk; it is bounded but becomes
-more expensive as a collection grows. Graph writes stage a catalog copy and
-hold the writer lock while building and committing relationships. This is a
+more expensive as a collection grows. New documents prepare atomic append
+plans; replacement and orphan repair stage changes using shared unchanged
+tables. Both paths hold the writer lock while building and committing
+relationships. Capacity and orphan checks still scan the target collection.
+The [scaling plan](SCALING.md) explains the remaining storage/indexing work. This is a
 bounded document/graph workflow, not an unbounded graph analytics system or ANN
 index. Quality depends on your embedding model, source documents, chunk size,
 and similarity threshold. Test with your own questions and citations; no

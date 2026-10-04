@@ -53,6 +53,7 @@ class LiveSDKTests(unittest.TestCase):
                 str(Path(cls.directory.name) / "data"),
             ],
             env=environment,
+            cwd=cls.directory.name,
             stdout=cls.log,
             stderr=subprocess.STDOUT,
         )
@@ -166,6 +167,20 @@ class LiveSDKTests(unittest.TestCase):
         graph = db.collection("sdk_graph")
         self.assertEqual(graph.retrieve("recovery")["hits"], [])
         self.assertEqual(graph.search("recovery")["hits"], [])
+        empty_chat = graph.chat(
+            "How do they recover?",
+            grounding="strict",
+            context_mode="conversation",
+            history=[{"role": "user", "content": "Tell me about committed records."}],
+        )
+        self.assertEqual(empty_chat["answer_status"], "no_sources")
+        self.assertIsNone(empty_chat["answer"])
+        self.assertEqual(empty_chat["retrieval"]["hits"], [])
+        self.assertEqual(empty_chat["query_context"]["mode"], "conversation")
+        self.assertFalse(empty_chat["query_context"]["rewritten"])
+        self.assertIsNone(empty_chat["query_context"]["generation"]["provider"])
+        self.assertEqual(empty_chat["query_context"]["generation"]["input_tokens"], 0)
+        self.assertIsNone(empty_chat["generation"]["provider"])
         profile = json.dumps(info["config"]["profile"], separators=(",", ":"))
         # Seed precomputed vectors through public SQL/typed tables to avoid any
         # external provider. This fixture is not an ingestion shortcut example.
@@ -202,6 +217,53 @@ class LiveSDKTests(unittest.TestCase):
                     }
                 ],
             )
+        chat_options = {
+            "mode": "retrieve",
+            "retrieval_query": "WAL",
+            "retrieval": {"vector_weight": 0, "max_hops": 0, "max_results": 2},
+        }
+        chat = graph.chat("How do they recover?", **chat_options)
+        self.assertEqual(chat["answer_status"], "retrieval_only")
+        self.assertEqual(chat["citation_status"], "not_applicable")
+        self.assertIsNone(chat["answer"])
+        self.assertIsNone(chat["speech_text"])
+        self.assertEqual(chat["retrieval_query"], "WAL")
+        self.assertEqual(chat["query_context"]["mode"], "provided")
+        self.assertFalse(chat["query_context"]["rewritten"])
+        self.assertEqual(chat["retrieval"]["embedding_usage"]["total_tokens"], 0)
+        self.assertIsNone(chat["generation"]["provider"])
+        self.assertEqual(chat["generation"]["output_tokens"], 0)
+        # Final context selection deduplicates the two identical passages.
+        self.assertEqual(len(chat["retrieval"]["hits"]), 1)
+        self.assertIn(
+            chat["retrieval"]["hits"][0]["document_id"], {"a/b?#雪", "second"}
+        )
+        self.assertTrue(all(hit["text"] == text for hit in chat["retrieval"]["hits"]))
+        self.assertEqual([citation["label"] for citation in chat["citations"]], ["S1"])
+
+        async def chat_async():
+            async with AsyncClient(self.url, token="sdk-test-token") as client:
+                return await client.collection("sdk_graph").chat(
+                    "How do they recover?", **chat_options
+                )
+
+        asynchronous = asyncio.run(chat_async())
+        for key in (
+            "answer_status",
+            "citation_status",
+            "citations",
+            "retrieval_query",
+            "query_context",
+            "generation",
+        ):
+            self.assertEqual(asynchronous[key], chat[key], key)
+        self.assertEqual(asynchronous["retrieval"]["hits"], chat["retrieval"]["hits"])
+        self.assertEqual(
+            asynchronous["retrieval"]["revision"], chat["retrieval"]["revision"]
+        )
+        self.assertEqual(
+            asynchronous["retrieval"]["embedding_usage"]["total_tokens"], 0
+        )
         page = graph.browse(limit=1)
         self.assertEqual(page["total_nodes"], 2)
         source = graph.document("a/b?#雪")
@@ -229,10 +291,10 @@ class LiveSDKTests(unittest.TestCase):
         graph.delete_document("a/b?#雪", expected_revision=removed["revision"])
         self.assertEqual(graph.info()["document_count"], 1)
         self.assertTrue(db.preview_chunks(text)["chunks"])
-        # A nonempty collection requires embeddings, including lexical-weighted
-        # retrieval. Surface its real error instead of silently falling back.
+        # Default vector retrieval still needs credentials; keyword-only chat
+        # above must succeed without invoking any external provider.
         with self.assertRaises(APIError):
-            graph.retrieve("recovery", vector_weight=0)
+            graph.retrieve("recovery")
 
     def test_structured_collections_and_cross_table_relationships(self):
         db = self.client

@@ -178,8 +178,11 @@ result = graph.retrieve("How do retries interact with recovery?",
                         max_per_document=3)
 ```
 
-Query embeddings are still generated when `vector_weight=0` for returned cosine
-diagnostics; graph query fit then uses lexical evidence. `search` uses the
+Setting `vector_weight=0` skips query embeddings and dense candidate search, so
+local keyword retrieval needs no provider key. Hits then have `similarity=None`,
+and graph query fit uses lexical evidence. Diversity selection still compares
+stored chunk vectors. Answer generation and Voyage reranking require their
+respective provider keys when requested. `search` uses the
 simpler vector-seed graph search. Connected hits may include `retrieval_path`
 with a `seed_chunk_id` and up to three directed `edges`, ordered along the
 traversal from seed to hit. Edge endpoints keep their stored direction even
@@ -187,6 +190,44 @@ when traversed backward. Bridges in that path need not appear in final hits.
 Graph results remain dictionaries, preserving citation, score, revision, usage,
 and truncation fields. Source offsets count **UTF-8 bytes**, not Python string
 characters: `source.encode("utf-8")[start_byte:end_byte].decode("utf-8")`.
+
+### Chatbots and voicebots
+
+`graph.chat` retrieves fresh sources and returns an answer with citation and
+answer-status diagnostics. It has the same signature on `AsyncCollection`.
+
+```python
+result = graph.chat(
+    "How long does it retain backups?",
+    retrieval_query="ATLAS-00001 backup snapshot retention",
+    grounding="strict", answer_style="voice",
+    generation_timeout_ms=5000, max_output_tokens=512,
+    retrieval={"max_results": 3, "max_context_bytes": 12000},
+)
+if (result["answer_status"] == "answered"
+        and result["citation_status"] == "valid_labels"):
+    print(result["speech_text"])
+else:
+    print("The available sources do not support a validated answer.")
+```
+
+The default searches the question unchanged. Supply `retrieval_query` for a
+standalone follow-up query, or opt into a paid history-based rewrite with
+`context_mode="conversation"`; these options are mutually exclusive.
+`retrieval_query` and `query_context` report the effective query, rewrite timing
+and usage. History is context, not evidence. Reset it when the user, collection
+or filter scope changes.
+
+Strict grounding validates current citation labels and exact source quotes;
+it does not prove the answer's factual entailment. `answer_style="voice"`
+returns speech-ready text, not audio. Inspect `answer_status`, `citation_status`
+and `warnings` before displaying or speaking a response. `mode="retrieve"`
+skips answer generation. Generation deadlines are per model call, not the full
+pipeline; set the client's HTTP timeout accordingly. Chat is never retried.
+
+See [Chatbot and voicebot integration](https://github.com/kamilsj/vectors/blob/main/docs/CHATBOTS.md)
+for all options, a conservative response policy, scope handling and answer
+quality evaluation. Document filters alone are not authorization.
 
 Other operations:
 

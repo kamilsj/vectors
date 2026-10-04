@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-27",
+  "version": "0.10.0 working tree",
+  "platform": "macOS arm64",
+  "build": "release, default features (CPU)",
+  "note": "Single local runs; other verification work was active. Synthetic deterministic vectors, no provider calls. This is not a production capacity guarantee.",
+  "runs": [
+    {
+      "expected_first_hit_checks": 20,
+      "ingestion": {
+        "p50_ms": 4.920209,
+        "p95_ms": 6.570625,
+        "pages_per_second": 198.70763206862378,
+        "total_ms": 5032.519333
+      },
+      "provider_calls": 0,
+      "reopen_ms": 2068.272208,
+      "retrieval_ms": {
+        "p50": 0.636583,
+        "p95": 1.00025
+      },
+      "scope": "Synthetic one-chunk pages, deterministic normalized vectors; sequential durable ingestion and exact hybrid retrieval after reopen (one cold, 19 warm queries). Excludes PDF extraction, providers, network, semantic linking, and concurrent query contention.",
+      "snapshot_bytes": 0,
+      "wal_bytes": 21466349,
+      "workload": {
+        "chunks": 1000,
+        "dimensions": 1536,
+        "durable": true,
+        "pages": 1000,
+        "queries": 20,
+        "semantic_neighbors": 0
+      }
+    },
+    {
+      "expected_first_hit_checks": 20,
+      "ingestion": {
+        "p50_ms": 9.19875,
+        "p95_ms": 15.036000000000001,
+        "pages_per_second": 103.05144756906175,
+        "total_ms": 97038.908583
+      },
+      "provider_calls": 0,
+      "reopen_ms": 13357.683542,
+      "retrieval_ms": {
+        "p50": 4.213459,
+        "p95": 17.531875
+      },
+      "scope": "Synthetic one-chunk pages, deterministic normalized vectors; sequential durable ingestion and exact hybrid retrieval after reopen (one cold, 19 warm queries). Excludes PDF extraction, providers, network, semantic linking, and concurrent query contention.",
+      "snapshot_bytes": 78576401,
+      "wal_bytes": 13284576,
+      "workload": {
+        "chunks": 10000,
+        "dimensions": 1536,
+        "durable": true,
+        "pages": 10000,
+        "queries": 20,
+        "semantic_neighbors": 0
+      }
+    }
+  ]
+}

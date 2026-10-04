@@ -49,7 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
       - run: npm ci --ignore-scripts
+      - run: node scripts/check_pdf_assets.cjs
+      - run: npm run test:evaluation
       - run: npx playwright install --with-deps chromium
       - run: npm run test:web
 
@@ -62,6 +67,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - run: cargo fmt --all -- --check
+      - run: python3 -m unittest discover -s tests -p 'test_rag_*.py'
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo doc --all-features --no-deps
         env:

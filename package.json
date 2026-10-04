@@ -2,10 +2,12 @@
   "name": "vectors-console-tests",
   "private": true,
   "scripts": {
+    "test:evaluation": "node --test tests/rag-evaluation.test.cjs",
     "test:web": "playwright test",
     "benchmark:web": "node scripts/benchmark_web.cjs"
   },
   "devDependencies": {
-    "@playwright/test": "1.63.0"
+    "@playwright/test": "1.63.0",
+    "pdfjs-dist": "6.3.289"
   }
 }

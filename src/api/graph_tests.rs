@@ -693,6 +693,11 @@ async fn graph_routes_require_authentication_and_chunk_preview_obeys_shared_capa
         (Method::GET, "/v1/graph/collections", json!({})),
         (Method::GET, "/v1/graph/collections/notes", json!({})),
         (
+            Method::GET,
+            "/v1/graph/collections/notes/capacity",
+            json!({}),
+        ),
+        (
             Method::POST,
             "/v1/graph/collections/notes/documents",
             json!({"id":"one","text":"hello"}),
@@ -743,6 +748,15 @@ async fn graph_routes_require_authentication_and_chunk_preview_obeys_shared_capa
     assert_eq!(response.headers().get("retry-after").unwrap(), "1");
     let body: JsonValue = test::read_body_json(response).await;
     assert_eq!(body["error"]["code"], "overloaded");
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/v1/graph/collections/notes/capacity")
+            .insert_header(("authorization", "Bearer synthetic-admin"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     drop(held);
     let response = test::call_service(
         &app,
@@ -754,6 +768,47 @@ async fn graph_routes_require_authentication_and_chunk_preview_obeys_shared_capa
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn collection_capacity_is_provider_free_and_returns_exact_snapshot_usage() {
+    let database = Database::new();
+    database
+        .graph_create_collection(GraphCollectionConfig {
+            name: "capacity".into(),
+            profile: GraphEmbeddingProfile {
+                provider: "openai".into(),
+                model: "capacity-test".into(),
+                dimensions: 3,
+                context_format_version: 1,
+            },
+            semantic_neighbors: 0,
+            semantic_threshold: 0.8,
+        })
+        .unwrap();
+    let expected =
+        serde_json::to_value(database.graph_collection_capacity("capacity").unwrap()).unwrap();
+    let revision = database.revision().unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(database.clone()))
+            .app_data(web::Data::new(DatabaseTaskLimiter::new(1)))
+            .configure(crate::api::configure),
+    )
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/v1/graph/collections/capacity/capacity")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: JsonValue = test::read_body_json(response).await;
+    assert_eq!(body, expected);
+    assert_eq!(body["usage"]["text_bytes"], 0);
+    assert_eq!(body["limits"]["document_chunks"], 256);
+    assert_eq!(database.revision().unwrap(), revision);
 }
 
 #[actix_web::test]

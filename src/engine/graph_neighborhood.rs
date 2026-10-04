@@ -243,15 +243,6 @@ fn citation_node(
     })
 }
 
-// These maps are maintained atomically by all SQL/typed writes and rebuilt on
-// recovery. Borrow them under the same catalog lock as the graph traversal.
-fn id_index(table: &Table) -> Result<&HashMap<UniqueKey, usize>> {
-    table
-        .unique_keys
-        .get(&0)
-        .ok_or_else(|| invalid("graph unique id index is missing"))
-}
-
 #[derive(Clone, Debug)]
 struct RankedEdge(GraphEdge);
 impl PartialEq for RankedEdge {

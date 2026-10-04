@@ -154,7 +154,7 @@ fn graph_is_sql_visible_with_only_cross_document_semantics_and_adjacent_context(
     assert_eq!(result.hits.len(), 3);
     assert!(result.hits[0].seed);
     assert_eq!(result.hits[0].depth, 0);
-    assert_eq!(result.hits[0].similarity, 1.0);
+    assert_eq!(result.hits[0].similarity, Some(1.0));
     assert!(result.hits[1..]
         .iter()
         .all(|hit| !hit.seed && hit.depth == 1));

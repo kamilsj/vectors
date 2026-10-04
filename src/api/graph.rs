@@ -33,6 +33,10 @@ pub(super) fn configure(config: &mut web::ServiceConfig) {
             )
             .route("/collections/{collection}", web::get().to(get_collection))
             .route(
+                "/collections/{collection}/capacity",
+                web::get().to(get_collection_capacity),
+            )
+            .route(
                 "/collections/{collection}/documents",
                 web::post().to(ingest_document),
             )
@@ -262,6 +266,23 @@ async fn get_collection(
     let collection = collection.into_inner();
     let body = run_database_task(limiter.as_ref(), move || {
         encoded(&database.graph_collection(&collection)?)
+    })
+    .await?;
+    Ok(json_body(body))
+}
+
+async fn get_collection_capacity(
+    request: HttpRequest,
+    security: Option<web::Data<ApiSecurity>>,
+    limiter: Option<web::Data<DatabaseTaskLimiter>>,
+    database: web::Data<Database>,
+    collection: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    authorize(&request, security.as_ref().map(|value| value.get_ref()))?;
+    let database = database.get_ref().clone();
+    let collection = collection.into_inner();
+    let body = run_database_task(limiter.as_ref(), move || {
+        encoded(&database.graph_collection_capacity(&collection)?)
     })
     .await?;
     Ok(json_body(body))

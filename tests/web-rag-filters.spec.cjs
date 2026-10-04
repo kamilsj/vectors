@@ -27,11 +27,12 @@ async function workspace(page, collections = [collection("knowledge", columns), 
     if (path.endsWith("/retrieve")) return reply(route, result());
     return reply(route, { error: { code: "not_found", message: "Unexpected filter test request" } }, 404);
   });
-  await page.goto("/"); await expect(page.locator("#status-label")).toHaveText("Connected");
+  await page.goto("/?view=search"); await expect(page.locator("#status-label")).toHaveText("Connected");
   if (await page.locator("#mobile-menu").isVisible()) await page.locator("#mobile-menu").click();
   await page.locator('.nav-item[data-view="connections"]').click();
   await expect(page.locator("#graph-collection")).toHaveValue(collections[0]?.config.name || "");
-  await expect(page.locator("#graph-status")).toContainText(collections.length ? "0 passages" : "Create");
+  if (await page.locator("#playground-settings").isHidden()) await page.locator("#playground-settings-toggle").click();
+  await page.locator(".playground-retrieval-test > summary").click();
   return fixture;
 }
 const retrievals = (fixture) => fixture.calls.filter((call) => call.path.endsWith("/retrieve"));
@@ -137,11 +138,11 @@ test("collection switches retain separate drafts and reject a late filtered resp
 test("catalog refresh preserves drafts but blocks removed fields and changed types", async ({ page }) => {
   const fixture = await workspace(page); await addFilter(page, "year", "gte", "2024");
   fixture.collections[0].document_columns = [field("year", "TEXT")];
-  await page.locator("#graph-refresh").click(); await expect(page.locator("#graph-filter-summary")).toContainText("changed or is unavailable");
+  await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click(); await page.locator('[data-playground-tab="chat"]').click(); await expect(page.locator("#graph-filter-summary")).toContainText("changed or is unavailable");
   await retrieve(page); expect(retrievals(fixture)).toHaveLength(0);
   await expect(page.locator("[data-filter-value]")).toHaveValue("2024");
   fixture.collections[0].document_columns = [];
-  await page.locator("#graph-refresh").click(); await expect(page.locator("[data-filter-column] option:checked")).toHaveText("year · unavailable");
+  await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click(); await page.locator('[data-playground-tab="chat"]').click(); await expect(page.locator("[data-filter-column] option:checked")).toHaveText("year · unavailable");
   await retrieve(page); expect(retrievals(fixture)).toHaveLength(0);
   await page.locator("#graph-filter-clear").click(); await retrieve(page); await expect.poll(() => retrievals(fixture).length).toBe(1);
   expect(retrievals(fixture)[0].body).not.toHaveProperty("document_filters");
@@ -164,7 +165,7 @@ test("schema refresh invalidates in-flight retrieval without replacing the filte
   await page.route("**/retrieve", async (route) => { entered = true; await gate.promise; await reply(route, result("Old-schema context")); });
   await addFilter(page, "year", "eq", "0"); await retrieve(page); await expect.poll(() => entered).toBe(true);
   fixture.collections[0].document_columns = [field("year", "TEXT")];
-  await page.locator("#graph-refresh").click(); await expect(page.locator("#graph-filter-summary")).toContainText("changed or is unavailable");
+  await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click(); await page.locator('[data-playground-tab="chat"]').click(); await expect(page.locator("#graph-filter-summary")).toContainText("changed or is unavailable");
   const response = page.waitForResponse((response) => response.url().endsWith("/retrieve")); gate.resolve(); await response;
   await expect(page.locator("#graph-search-results")).toContainText("Document filters changed");
   await expect(page.locator(".graph-hit")).toHaveCount(0); await expect(page.locator("[data-filter-value]")).toHaveValue("0");

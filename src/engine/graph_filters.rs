@@ -42,24 +42,55 @@ impl Database {
         predicate(table(&catalog, &info.tables.documents)?, filters)?;
         Ok(info)
     }
+
+    /// Schema-check filters and determine whether retrieval has any eligible
+    /// chunks before spending provider calls. Actual retrieval checks again
+    /// under its own snapshot lock after provider work completes.
+    pub(crate) fn graph_preflight_document_filters(
+        &self,
+        collection_name: &str,
+        filters: &[VectorSearchFilter],
+    ) -> Result<(GraphCollection, bool)> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let info = collection(&catalog, collection_name)?;
+        let eligible = eligible_chunks(
+            table(&catalog, &info.tables.documents)?,
+            table(&catalog, &info.tables.chunks)?,
+            filters,
+        )?;
+        let has_chunks = eligible
+            .as_ref()
+            .map_or(info.chunk_count > 0, |rows| !rows.is_empty());
+        Ok((info, has_chunks))
+    }
 }
 
 pub(super) fn eligible_chunks(
     documents: &Table,
     chunks: &Table,
     filters: &[VectorSearchFilter],
-) -> Result<Option<Vec<bool>>> {
+) -> Result<Option<Vec<usize>>> {
     let Some(selection) = predicate(documents, filters)? else {
         return Ok(None);
     };
     let indexed = indexed_candidate_rows(documents, &selection);
-    let mut allowed = HashSet::new();
+    // The managed document_id index already maps each selected document to
+    // its chunk rows. Do not scan or allocate a mask for unrelated chunks.
+    let chunk_documents = chunks
+        .indexes
+        .values()
+        .find(|index| index.column == 1)
+        .ok_or_else(|| invalid("graph chunk document index is missing"))?;
+    let mut allowed = Vec::new();
     let mut consider = |index: usize| -> Result<()> {
         let row = &documents.rows[index];
         if evaluate(&selection, &EvalContext::new(&documents.columns, row))?.as_bool()?
             == Some(true)
         {
-            allowed.insert(text_at(row, 0)?);
+            let key = UniqueKey::Text(text_at(row, 0)?.into());
+            if let Some(rows) = chunk_documents.buckets.get(&key) {
+                allowed.extend_from_slice(rows);
+            }
         }
         Ok(())
     };
@@ -72,16 +103,9 @@ pub(super) fn eligible_chunks(
             consider(row)?;
         }
     }
-    // An indexed miss needs no chunk ID reads or lexical/vector work. Keep a
-    // mask of the snapshot's shape so the caller can use the same empty path
-    // for misses found by indexes and by residual predicate evaluation.
-    if allowed.is_empty() {
-        return Ok(Some(vec![false; chunks.rows.len()]));
-    }
-    chunks
-        .rows
-        .iter()
-        .map(|row| Ok(allowed.contains(text_at(row, 1)?)))
-        .collect::<Result<Vec<_>>>()
-        .map(Some)
+    // Vector scans require sorted, unique positions. The same snapshot-owned
+    // set also gates lexical scoring and every graph hop before ranking.
+    allowed.sort_unstable();
+    allowed.dedup();
+    Ok(Some(allowed))
 }

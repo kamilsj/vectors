@@ -101,14 +101,15 @@ async function workspace(page, collections = [], embeddingOverrides = {}, tables
     }
     return reply(route, { error: { code: "unexpected_request", message: "Unexpected structure test request" } }, 404);
   });
-  await page.goto("/");
+  await page.goto("/?view=search");
   await expect(page.locator("#status-label")).toHaveText("Connected");
   return fixture;
 }
 
 async function openGraph(page) {
   await page.locator('.nav-item[data-view="connections"]').click();
-  await expect(page.locator("#view-title")).toHaveText("Connections");
+  await expect(page.locator("#view-title")).toHaveText("Playground");
+  await page.locator('[data-playground-tab="graph"]').click();
 }
 async function addField(page, prefix, column) {
   if (prefix === "graph-create" && !(await page.locator(`#${prefix}-fields-add`).isVisible())) {
@@ -123,6 +124,7 @@ async function addField(page, prefix, column) {
   return row;
 }
 async function documentDraft(page) {
+  await page.locator('[data-playground-tab="documents"]').click();
   await page.locator("#graph-add-open").click();
   await page.locator("#graph-document-id").fill("first-note");
   await page.locator("#graph-document-title").fill("First note");
@@ -158,7 +160,7 @@ test("a typed collection created from Data opens its first document and preserve
   for (const column of typedColumns) await addField(page, "graph-create", column);
   await page.locator("#graph-create-submit").click();
   await expect(page.locator("#graph-create-dialog")).not.toBeVisible();
-  await expect(page.locator("#view-title")).toHaveText("Connections");
+  await expect(page.locator("#view-title")).toHaveText("Playground");
   await expect(page.locator("#graph-collection")).toHaveValue("research");
   await expect(page.locator("#graph-document-panel")).toHaveAttribute("open", "");
   expect(creates(fixture)).toHaveLength(1);
@@ -344,7 +346,7 @@ test("switching collections clears typed metadata and a late old graph cannot re
   await page.locator('[data-document-field="secret"]').fill("Alpha private draft");
   const entered = deferred(); const release = deferred();
   await page.route("**/collections/alpha/graph?*", async (route) => { entered.resolve(); await release.promise; return route.fallback(); });
-  await page.locator("#graph-refresh").click(); await entered.promise;
+  await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click(); await entered.promise; await page.locator('[data-playground-tab="documents"]').click();
   await page.locator("#graph-collection").selectOption("beta");
   await expect(page.locator('[data-document-field="year"]')).toBeVisible();
   release.resolve();
@@ -367,7 +369,7 @@ test("a late collection catalog cannot replace a newer selection or its typed dr
     if (route.request().method() !== "GET") return route.fallback();
     entered.resolve(); await release.promise; return reply(route, [fixture.collections[0]]);
   });
-  await page.locator("#graph-refresh").click(); await entered.promise;
+  await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click(); await entered.promise; await page.locator('[data-playground-tab="documents"]').click();
   await page.locator("#graph-collection").selectOption("beta");
   await page.locator('[data-document-field="year"]').fill("2026");
   const response = page.waitForResponse((response) => new URL(response.url()).pathname === "/v1/graph/collections");

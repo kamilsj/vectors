@@ -83,6 +83,8 @@ pub struct GraphRelationshipDeleteResult {
 pub struct GraphRagRequest {
     pub collection: String,
     pub expected_profile: GraphEmbeddingProfile,
+    /// Query embedding for vector retrieval. Lexical-only requests may provide
+    /// a zero vector of the collection's dimensions; no query cosine is used.
     pub query: Vector,
     pub query_text: String,
     pub candidate_limit: usize,
@@ -178,6 +180,9 @@ pub struct GraphRagSnapshot {
     pub revision: u64,
     pub candidates: Vec<GraphRagCandidate>,
     pub edges: Vec<GraphEdge>,
+    /// Actual initial graph seeds in hybrid rank order. Empty when graph
+    /// traversal is disabled; distinct from the direct-match `hit.seed` flag.
+    pub traversal_seed_ids: Vec<String>,
     pub lexical_cache_hit: bool,
     pub truncated: bool,
 }
@@ -209,6 +214,9 @@ pub struct GraphRagResult {
     pub revision: u64,
     pub hits: Vec<GraphRagHit>,
     pub edges: Vec<GraphEdge>,
+    /// Initial traversal seeds from the retrieval snapshot, including any
+    /// omitted from the final context by reranking or citation budgets.
+    pub traversal_seed_ids: Vec<String>,
     pub lexical_cache_hit: bool,
     pub truncated: bool,
     pub context_bytes: usize,
@@ -419,11 +427,7 @@ fn induced_edges(
     limit: usize,
     traversal: Option<&GraphRagTraversal>,
 ) -> Result<(Vec<GraphEdge>, bool)> {
-    let known = chunks
-        .rows
-        .iter()
-        .map(|row| text_at(row, 0))
-        .collect::<Result<HashSet<_>>>()?;
+    let known = id_index(chunks)?;
     let index = edge_table
         .indexes
         .values()
@@ -444,7 +448,7 @@ fn induced_edges(
             if traversal.is_some_and(|policy| !policy.includes(&edge)) {
                 continue;
             }
-            if !known.contains(edge.to_chunk.as_str()) {
+            if !known.contains_key(&UniqueKey::Text(edge.to_chunk.clone())) {
                 return Err(invalid("graph edge references a missing chunk"));
             }
             if selected.contains(edge.to_chunk.as_str()) {
@@ -476,6 +480,48 @@ const RRF_OFFSET: f64 = 60.0;
 struct LexicalIndex {
     length_factors: Vec<f64>,
     postings: HashMap<String, Vec<(usize, usize)>>,
+}
+
+// Rare terms and selective filters should not allocate one score per stored
+// chunk. Dense storage remains cheaper for broad matches, so choose it only
+// when the posting/eligibility upper bound can cover a substantial fraction.
+enum LexicalScores {
+    Sparse(HashMap<usize, f64>),
+    Dense(Vec<f64>),
+}
+
+impl Default for LexicalScores {
+    fn default() -> Self {
+        Self::Sparse(HashMap::new())
+    }
+}
+
+impl LexicalScores {
+    fn get(&self, row: usize) -> f64 {
+        match self {
+            Self::Sparse(scores) => scores.get(&row).copied().unwrap_or(0.0),
+            Self::Dense(scores) => scores[row],
+        }
+    }
+
+    fn add(&mut self, row: usize, score: f64) {
+        match self {
+            Self::Sparse(scores) => *scores.entry(row).or_default() += score,
+            Self::Dense(scores) => scores[row] += score,
+        }
+    }
+
+    fn positive(&self) -> Vec<(usize, f64)> {
+        match self {
+            Self::Sparse(scores) => scores.iter().map(|(&row, &score)| (row, score)).collect(),
+            Self::Dense(scores) => scores
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, score)| *score > 0.0)
+                .collect(),
+        }
+    }
 }
 struct LexicalCacheEntry {
     owner: Weak<RwLock<Catalog>>,
@@ -592,9 +638,18 @@ impl LexicalIndex {
         terms: &BTreeSet<String>,
         chunks: &Table,
         limit: usize,
-        eligible: Option<&[bool]>,
-    ) -> (Vec<f64>, Vec<(usize, f64)>) {
-        let mut scores = vec![0.0; self.length_factors.len()];
+        eligible: Option<&[usize]>,
+    ) -> (LexicalScores, Vec<(usize, f64)>, f64) {
+        let upper_bound = terms
+            .iter()
+            .filter_map(|term| self.postings.get(term))
+            .fold(0usize, |count, rows| count.saturating_add(rows.len()))
+            .min(eligible.map_or(self.length_factors.len(), <[usize]>::len));
+        let mut scores = if upper_bound.saturating_mul(8) < self.length_factors.len() {
+            LexicalScores::default()
+        } else {
+            LexicalScores::Dense(vec![0.0; self.length_factors.len()])
+        };
         let count = self.length_factors.len() as f64;
         // Sorted query terms ensure stable floating-point accumulation.
         for term in terms {
@@ -603,21 +658,32 @@ impl LexicalIndex {
             };
             let frequency = postings.len() as f64;
             let idf = (1.0 + (count - frequency + 0.5) / (frequency + 0.5)).ln();
-            for &(row, frequency) in postings {
-                if eligible.is_some_and(|rows| !rows[row]) {
-                    continue;
-                }
+            let mut add = |row: usize, frequency: usize| {
                 let tf = frequency as f64;
                 let denominator = tf + self.length_factors[row];
-                scores[row] += idf * tf * 2.2 / denominator;
+                scores.add(row, idf * tf * 2.2 / denominator);
+            };
+            if let Some(rows) =
+                eligible.filter(|rows| rows.len().saturating_mul(8) < postings.len())
+            {
+                // Postings retain row order. Probe a small eligible set rather
+                // than walking a common term across the entire collection;
+                // global document frequency and length normalization stay intact.
+                for &row in rows {
+                    if let Ok(position) = postings.binary_search_by_key(&row, |(row, _)| *row) {
+                        add(row, postings[position].1);
+                    }
+                }
+            } else {
+                for &(row, frequency) in postings {
+                    if eligible.is_none_or(|rows| rows.binary_search(&row).is_ok()) {
+                        add(row, frequency);
+                    }
+                }
             }
         }
-        let mut ranked = scores
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, score)| *score > 0.0)
-            .collect::<Vec<_>>();
+        let mut ranked = scores.positive();
+        let maximum = ranked.iter().map(|(_, score)| *score).fold(0.0, f64::max);
         let compare = |(left, a): &(usize, f64), (right, b): &(usize, f64)| {
             b.total_cmp(a)
                 .then_with(|| compare_sort_values(&chunks.rows[*left][0], &chunks.rows[*right][0]))
@@ -627,7 +693,7 @@ impl LexicalIndex {
             ranked.truncate(limit);
         }
         ranked.sort_by(compare);
-        (scores, ranked)
+        (scores, ranked, maximum)
     }
 }
 
@@ -809,47 +875,29 @@ impl Database {
                 right: info.config.profile.dimensions,
             });
         }
-        if request.query.norm() == 0.0 {
+        if request.vector_weight > 0.0 && request.query.norm() == 0.0 {
             return Err(Error::ZeroNorm);
         }
         let chunks = table(&catalog, &info.tables.chunks)?;
         let document_table = table(&catalog, &info.tables.documents)?;
         let eligible = filters::eligible_chunks(document_table, chunks, &document_filters)?;
-        if eligible
-            .as_ref()
-            .is_some_and(|rows| !rows.iter().any(|allowed| *allowed))
-        {
+        if eligible.as_ref().is_some_and(Vec::is_empty) {
             return Ok(GraphRagSnapshot {
                 collection: info.config.name,
                 revision: catalog.revision,
                 candidates: Vec::new(),
                 edges: Vec::new(),
+                traversal_seed_ids: Vec::new(),
                 lexical_cache_hit: false,
                 truncated: false,
             });
         }
         let allowed_rows = eligible
-            .as_ref()
-            .map(|rows| {
-                rows.iter()
-                    .enumerate()
-                    .filter_map(|(row, allowed)| allowed.then_some(row))
-                    .collect::<Vec<_>>()
-            })
+            .as_deref()
             .filter(|rows| rows.len() != chunks.rows.len());
-        let lookup = chunks
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| text_at(row, 0).map(|id| (id, index)))
-            .collect::<Result<HashMap<_, _>>>()?;
-        let documents = document_table
-            .rows
-            .iter()
-            .map(|row| text_at(row, 0).map(|id| (id, row)))
-            .collect::<Result<HashMap<_, _>>>()?;
+        let lookup = id_index(chunks)?;
         let mut scores: HashMap<usize, CandidateScore> = HashMap::new();
-        let mut query_similarities = vec![None; chunks.rows.len()];
+        let mut query_similarities = HashMap::new();
         if request.vector_weight > 0.0 {
             let result = run_typed_vector_search_in_rows(
                 chunks,
@@ -863,32 +911,34 @@ impl Database {
                     limit: request.candidate_limit,
                 },
                 &self.compute,
-                allowed_rows.as_deref(),
+                allowed_rows,
             )?;
             for (rank, row) in result.rows.iter().enumerate() {
                 let index = *lookup
-                    .get(text_at(row, 0)?)
+                    .get(&UniqueKey::Text(text_at(row, 0)?.into()))
                     .ok_or_else(|| invalid("vector search returned an unknown chunk"))?;
-                query_similarities[index] = Some((1.0 - number_at(row, 1)?).clamp(-1.0, 1.0));
+                query_similarities.insert(index, (1.0 - number_at(row, 1)?).clamp(-1.0, 1.0));
                 scores.entry(index).or_default().fusion +=
                     request.vector_weight / (RRF_OFFSET + rank as f64 + 1.0);
             }
         }
         let mut lexical_cache_hit = false;
-        let mut lexical_scores = vec![0.0; chunks.rows.len()];
+        let mut lexical_scores = LexicalScores::default();
+        let mut lexical_max = 0.0;
         if request.lexical_weight > 0.0 && !terms.is_empty() {
             let (index, cache_hit) =
                 lexical_index(&self.catalog, &info.config.name, chunks, &terms)?;
             lexical_cache_hit = cache_hit;
-            let (all_scores, lexical_ranks) =
-                index.score(&terms, chunks, request.candidate_limit, eligible.as_deref());
+            let (all_scores, lexical_ranks, maximum) =
+                index.score(&terms, chunks, request.candidate_limit, allowed_rows);
             lexical_scores = all_scores;
+            lexical_max = maximum;
             for (rank, (index, _)) in lexical_ranks.into_iter().enumerate() {
                 scores.entry(index).or_default().fusion +=
                     request.lexical_weight / (RRF_OFFSET + rank as f64 + 1.0);
             }
             for (index, score) in &mut scores {
-                score.lexical = lexical_scores[*index];
+                score.lexical = lexical_scores.get(*index);
             }
         }
         let mut ranked = scores.keys().copied().collect::<Vec<_>>();
@@ -899,19 +949,35 @@ impl Database {
                 .then_with(|| compare_sort_values(&chunks.rows[*left][0], &chunks.rows[*right][0]))
         });
         let edge_table = table(&catalog, &info.tables.edges)?;
-        let (admitted, truncated) = traversal::GraphTraversal {
+        let traversal::Expansion {
+            admitted,
+            traversal_seed_ids,
+            truncated,
+        } = traversal::GraphTraversal {
             request: &request,
             policy: &policy,
             chunks,
             edges: edge_table,
-            lookup: &lookup,
+            lookup,
             scores: &scores,
             lexical_scores: &lexical_scores,
+            lexical_max,
             similarities: query_similarities,
-            eligible: eligible.as_deref(),
+            eligible: allowed_rows,
             max_seeds_per_document,
         }
         .expand(&ranked)?;
+        // Only admitted passages need citations. Reuse the maintained document
+        // index instead of rebuilding a map of every document per query.
+        let document_ids = id_index(document_table)?;
+        let mut documents = HashMap::new();
+        for admission in &admitted {
+            let document_id = text_at(&chunks.rows[admission.row], 1)?;
+            let position = document_ids
+                .get(&UniqueKey::Text(document_id.into()))
+                .ok_or_else(|| invalid("graph chunk references a missing document"))?;
+            documents.insert(document_id, &document_table.rows[*position]);
+        }
         let mut candidates = Vec::with_capacity(admitted.len());
         for admission in admitted {
             let row = &chunks.rows[admission.row];
@@ -923,7 +989,7 @@ impl Database {
                     row,
                     &documents,
                     &document_table.columns,
-                    &request.query,
+                    (request.vector_weight > 0.0).then_some(&request.query),
                     admission.depth,
                 )?,
                 lexical_score: admission.score.lexical,
@@ -955,6 +1021,7 @@ impl Database {
             revision: catalog.revision,
             candidates,
             edges,
+            traversal_seed_ids,
             lexical_cache_hit,
             truncated: truncated || edges_truncated,
         })
@@ -1133,6 +1200,7 @@ impl GraphRagSnapshot {
             revision: self.revision,
             hits,
             edges,
+            traversal_seed_ids: self.traversal_seed_ids,
             lexical_cache_hit: self.lexical_cache_hit,
             truncated,
             context_bytes,

@@ -52,6 +52,15 @@ New to the project? The [guided tutorial](docs/TUTORIAL.md) covers installation,
 every shell command, the web console, SQL and typed API examples, persistence,
 GPU selection, production batching, and troubleshooting.
 
+Version **0.10.0** adds a [PDF upload and RAG chat lab](docs/PDF_RAG_LAB.md)
+for folder imports, cited answers, retrieval diagnostics and repeatable corpus tests.
+The [chatbot and voicebot guide](docs/CHATBOTS.md) covers conversational search,
+strict source evidence, speech-ready responses and repeatable answer checks.
+
+For large deployments, read the [ten-million-document scaling plan](docs/SCALING.md).
+It separates current tested limits from the storage, indexing and distributed
+validation required for that target.
+
 ## Install and launch
 
 The installers detect your processor, verify the release archive checksum,
@@ -59,9 +68,10 @@ install both binaries for the current user, start a durable server, and open
 the web console when a desktop is available. Releases support Linux x86-64 and
 ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
-[v0.9.0](https://github.com/kamilsj/vectors/releases/tag/v0.9.0) adds structured
-GraphRAG document fields and filters, SQL joins and named relationships,
-per-document starting-passage limits, and private local provider-key files.
+[v0.10.0](https://github.com/kamilsj/vectors/releases/tag/v0.10.0) adds PDF folder
+imports, conversational RAG, source-evidence checks, voice-ready text and a
+Playground for comparing retrieval and inspecting answers. It also reduces
+copying and lookup costs during document ingestion and filtered retrieval.
 If you still see the older interface, run the installer below to upgrade the
 server with `--restart` (PowerShell: `-Restart`), then reload the console.
 
@@ -252,11 +262,12 @@ cargo run --release --bin vectors-server -- --data-dir ./vectors-data
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The console separates five
 workspaces:
 
+- **Playground:** upload PDFs, chat with sources, compare retrieval strategies,
+  and explore document relationships. Repeat a question with new settings to
+  compare sources and timing. **Evaluate** runs question sets, reports source
+  matches and latency, and exports results. Keyword retrieval with local ranking
+  needs no embedding key.
 - **Search:** search with text through OpenAI or Voyage AI, or supply a vector.
-- **Connections:** chunk documents, explore their relationships, and retrieve
-  context using hybrid search with optional cross-encoder reranking. Explore
-  connections around a selected passage across page boundaries, without a
-  provider call.
 - **Data:** browse pages, create tables, add documents with embeddings, and
   edit or delete rows with protection against stale edits.
 - **SQL:** run SQL, inspect schemas, and understand queries before execution.
@@ -278,7 +289,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.9.0 | in-memory SQL vector database
+vectors 0.10.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```
@@ -584,7 +595,7 @@ foreign keys or automatically extend GraphRAG traversal. See
 [structured data and relationships](docs/STRUCTURED_DATA.md) for complete
 API and SQL examples, including vector-ranked joins.
 
-Open **Connections** to explore chunks and their semantic links, inspect source
+Open **Playground → Graph** to explore chunks and their semantic links, inspect source
 citations, add labeled relationships, and ingest documents with a chunk preview.
 Choose **Explore connections** on a passage or search result to follow incoming,
 outgoing, or both directions across the collection. Hop rings identify depth;
@@ -758,6 +769,10 @@ and mutations that replace existing rows remain staged against an isolated
 catalog before one WAL commit. Failed validation or I/O leaves the live catalog
 unchanged in either path.
 
+Catalog snapshots share unchanged tables and copy only tables that are mutated.
+New graph documents also use prepared append plans, committing their document,
+chunks and relationships together; replacements and orphan repairs stay staged.
+
 On startup, `vectors` loads `vectors.vdb` into memory and replays newer WAL
 records. A torn final record is safely discarded; checksum errors, invalid
 sequences, and operations that cannot be replayed stop startup rather than
@@ -782,7 +797,7 @@ an 8 MiB vector payload target and at most 65,536 rows; the in-memory dense
 layout independently splits vector slabs around an 8 MiB `f32` payload target.
 
 `Database::save` and `Database::open` remain available for portable standalone
-snapshots. Snapshot saves copy a coherent catalog and perform disk I/O without
+snapshots. Snapshot saves capture a coherent shared catalog and perform disk I/O without
 holding the catalog lock; they are backups or explicit exports, not a substitute
 for WAL durability.
 

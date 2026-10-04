@@ -42,10 +42,20 @@ async function workspace(page, { count = 18, empty = false, dimensions = 3 } = {
     if (path.endsWith("/retrieve")) return reply(route, { collection: "knowledge", revision: fixture.revision, hits: fixture.nodes.slice(0, 3).map((item, index) => ({ ...item, similarity: .89 - index / 10, lexical_score: .3, fusion_score: .028, rerank_score: body.reranker === "voyage" ? .78 : null, selection_score: .6, depth: index ? 1 : 0, seed: index === 0 })), edges: fixture.edges, truncated: false, context_bytes: 700, candidate_count: 18, lexical_cache_hit: false, reranking: { method: body.reranker, model: body.reranker === "voyage" ? "rerank-2.5" : null, total_tokens: 30 }, embedding_usage: { total_tokens: 4 } });
     return reply(route, { error: { code: "not_found", message: "Unexpected graph test request" } }, 404);
   });
-  await page.goto("/"); await expect(page.locator("#status-label")).toHaveText("Connected");
+  await page.goto("/?view=search"); await expect(page.locator("#status-label")).toHaveText("Connected");
   return fixture;
 }
-async function openGraph(page) { await page.locator('.nav-item[data-view="connections"]').click(); await expect(page.locator("#view-title")).toHaveText("Connections"); }
+async function openGraph(page) {
+  await page.locator('.nav-item[data-view="connections"]').click();
+  await expect(page.locator("#view-title")).toHaveText("Playground");
+  await page.locator('[data-playground-tab="graph"]').click();
+}
+async function openRetrieval(page) {
+  await page.locator('.nav-item[data-view="connections"]').click();
+  await page.locator('[data-playground-tab="chat"]').click();
+  if (await page.locator("#playground-settings").isHidden()) await page.locator("#playground-settings-toggle").click();
+  await page.locator(".playground-retrieval-test > summary").click();
+}
 async function selectFirst(page) { await page.locator(".graph-point").first().click(); await expect(page.locator("#graph-details")).toContainText("chunk-1"); }
 
 test("graph draws bounded SVG nodes, accessible list, kinds, selection and source citations", async ({ page }) => {
@@ -81,7 +91,7 @@ test("empty collections can be created without provider generation", async ({ pa
 
 test("preview is lazy and saving a document uses the known revision", async ({ page }) => {
   const fixture = await workspace(page); await openGraph(page); await expect(page.locator(".graph-point")).toHaveCount(18);
-  await page.locator("#graph-add-open").click(); await page.locator("#graph-document-id").fill("new-guide"); await page.locator("#graph-document-title").fill("New guide"); await page.locator("#graph-document-text").fill("A passage about retrieval and context.");
+  await page.locator('[data-playground-tab="documents"]').click(); await page.locator("#graph-add-open").click(); await page.locator("#graph-document-id").fill("new-guide"); await page.locator("#graph-document-title").fill("New guide"); await page.locator("#graph-document-text").fill("A passage about retrieval and context.");
   await page.locator("#graph-preview").click(); await expect(page.locator("#graph-document-status")).toContainText("1 chunks");
   await expect(page.locator("#graph-chunk-preview pre")).toHaveCount(0); await page.locator("#graph-chunk-preview summary").click(); await expect(page.locator("#graph-chunk-preview pre")).toContainText("New guide");
   expect(fixture.calls.filter((call) => call.path.endsWith("/documents"))).toHaveLength(0);
@@ -90,15 +100,15 @@ test("preview is lazy and saving a document uses the known revision", async ({ p
 });
 
 test("profile mismatch stops a paid request", async ({ page }) => {
-  const fixture = await workspace(page, { dimensions: 2 }); await openGraph(page); await page.locator("#graph-question").fill("What connects these ideas?"); await page.locator("#graph-search-submit").click();
+  const fixture = await workspace(page, { dimensions: 2 }); await openRetrieval(page); await page.locator("#graph-question").fill("What connects these ideas?"); await page.locator("#graph-search-submit").click();
   await expect(page.locator("#graph-search-status")).toContainText("Restore that profile"); expect(fixture.calls.some((call) => call.path.endsWith("/retrieve"))).toBe(false);
 });
 
 test("balanced hybrid retrieval reports score types and optional Voyage privacy", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-question").fill("How should I evaluate context?"); await page.locator("#graph-search-submit").click();
-  await expect(page.locator(".graph-hit")).toHaveCount(3); await expect(page.locator("#graph-search-results")).toContainText("Local hybrid ranking"); await expect(page.locator("#graph-search-status")).toContainText("not confidence");
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-question").fill("How should I evaluate context?"); await page.locator("#graph-search-submit").click();
+  await expect(page.locator(".graph-hit")).toHaveCount(3); await expect(page.locator("#graph-search-results")).toContainText("Local ranking"); await expect(page.locator("#graph-search-status")).toContainText("3 passages retrieved");
   const local = fixture.calls.find((call) => call.path.endsWith("/retrieve")); expect(local.body).toMatchObject({ candidate_limit: 40, seed_limit: 12, max_results: 10, max_hops: 1, neighbor_limit: 8, reranker: "local", diversity: .3, max_context_bytes: 24000, max_per_document: 3, vector_weight: 1, lexical_weight: 1 });
-  await page.locator("#graph-reranker").selectOption("voyage"); await expect(page.locator("#graph-search-privacy")).toContainText("candidate passage context"); await page.locator("#graph-search-submit").click(); await expect(page.locator("#graph-search-results")).toContainText("Voyage rerank-2.5"); await expect(page.locator(".graph-scores").first()).toContainText("Rerank 0.7800");
+  await page.locator("#graph-reranker").selectOption("voyage"); await expect(page.locator("#graph-search-privacy")).toContainText("question and candidate passages"); await page.locator("#graph-search-submit").click(); await expect(page.locator("#graph-search-results")).toContainText("Voyage rerank-2.5"); await expect(page.locator(".graph-scores").first()).toContainText("Rerank 0.7800");
 });
 
 test("relationship creation and deletion carry the displayed revision", async ({ page }) => {
@@ -131,7 +141,7 @@ test("a late graph page cannot replace a newer selection", async ({ page }) => {
 test("token changes clear graph drafts, keys and stale retrieval results", async ({ page }) => {
   await workspace(page); const gate = deferred(); let entered = false;
   await page.route("**/retrieve", async (route) => { entered = true; await gate.promise; await reply(route, { hits: [{ text: "Old secret result" }], reranking: { method: "local" }, candidate_count: 1, context_bytes: 17 }); });
-  await openGraph(page); await page.locator("#graph-question").fill("Private question"); await page.locator("#graph-search-submit").click(); await expect.poll(() => entered).toBe(true);
+  await openRetrieval(page); await page.locator("#graph-question").fill("Private question"); await page.locator("#graph-search-submit").click(); await expect.poll(() => entered).toBe(true);
   await page.evaluate(() => { document.querySelector("#rerank-api-key").value = "private-rerank-key"; document.querySelector("#graph-document-text").value = "private draft"; });
   await page.locator("#open-token").click(); await page.locator("#token-input").fill("new-session"); await page.locator("#save-token").click(); gate.resolve();
   await expect(page.locator("#graph-question")).toHaveValue(""); await expect(page.locator("#graph-document-text")).toHaveValue(""); await expect(page.locator("#rerank-api-key")).toHaveValue(""); await expect(page.locator("#graph-search-results")).not.toContainText("Old secret result");
@@ -146,8 +156,8 @@ test("reranking settings write keys once without browser persistence", async ({ 
 });
 
 test("auth failures surface the connection dialog and graph errors remain visible", async ({ page }) => {
-  await workspace(page); await page.route("**/v1/graph/collections", (route) => reply(route, { error: { code: "unauthorized", message: "An API token is required" } }, 401)); await openGraph(page); await expect(page.locator("#token-dialog")).toBeVisible(); await expect(page.locator("#graph-status")).toContainText("API token");
-  await page.getByRole("button", { name: "Close", exact: true }).click(); await page.route("**/v1/graph/collections", (route) => reply(route, { error: { code: "database_busy", message: "Graph capacity is busy; try again later" } }, 503)); await page.locator("#graph-refresh").click(); await expect(page.locator("#graph-status")).toContainText("capacity is busy");
+  await workspace(page); await page.route("**/v1/graph/collections", (route) => reply(route, { error: { code: "unauthorized", message: "An API token is required" } }, 401)); await page.locator('.nav-item[data-view="connections"]').click(); await expect(page.locator("#token-dialog")).toBeVisible(); await expect(page.locator("#graph-status")).toContainText("API token");
+  await page.getByRole("button", { name: "Close", exact: true }).click(); await page.route("**/v1/graph/collections", (route) => reply(route, { error: { code: "database_busy", message: "Graph capacity is busy; try again later" } }, 503)); await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click(); await expect(page.locator("#graph-status")).toContainText("capacity is busy");
 });
 
 test("Connections stays within desktop and mobile viewport widths", async ({ page }, testInfo) => {
@@ -161,7 +171,7 @@ test("Connections stays within desktop and mobile viewport widths", async ({ pag
 
 test("a provider failure preserves the document draft without automatic retries", async ({ page }) => {
   const fixture = await workspace(page); await page.route("**/collections/knowledge/documents", (route) => reply(route, { error: { code: "provider_error", message: "Embedding provider unavailable" } }, 502));
-  await openGraph(page); await expect(page.locator(".graph-point")).toHaveCount(18); await page.locator("#graph-add-open").click();
+  await openGraph(page); await expect(page.locator(".graph-point")).toHaveCount(18); await page.locator('[data-playground-tab="documents"]').click(); await page.locator("#graph-add-open").click();
   await page.locator("#graph-document-id").fill("keep-me"); await page.locator("#graph-document-text").fill("Keep this draft when generation fails."); await page.locator("#graph-document-save").click();
   await expect(page.locator("#graph-document-status")).toContainText("provider unavailable"); await expect(page.locator("#graph-document-text")).toHaveValue("Keep this draft when generation fails.");
   expect(fixture.calls.filter((call) => call.path.endsWith("/documents"))).toHaveLength(1); await expect(page.locator("#graph-document-save")).toBeEnabled();
@@ -176,7 +186,7 @@ test("changing connection during a graph write retains its uncertain outcome not
 });
 
 test("empty retrieval is explicit and impossible result limits do not contact a provider", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-question").fill("Empty context"); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.locator("#graph-candidates").fill("2"); await page.locator("#graph-search-submit").click();
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-question").fill("Empty context"); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.locator("#graph-candidates").fill("2"); await page.locator("#graph-search-submit").click();
   await expect(page.locator("#graph-search-status")).toContainText("must not exceed"); expect(fixture.calls.some((call) => call.path.endsWith("/retrieve"))).toBe(false);
   await page.locator("#graph-candidates").fill("40"); await page.route("**/retrieve", (route) => reply(route, { hits: [], candidate_count: 0, context_bytes: 0, reranking: { method: "local", model: null }, truncated: false })); await page.locator("#graph-search-submit").click(); await expect(page.locator("#graph-search-results")).toContainText("No passages fit");
 });
@@ -194,7 +204,7 @@ test("focused exploration crosses page boundaries and restores the previous page
   const call = fixture.calls.find((item) => item.path.endsWith("/neighborhood"));
   expect(call.query).toEqual({ chunk_id: "chunk-101", max_hops: "1", direction: "both", min_weight: "0", neighbor_limit: "8", max_nodes: "100", max_edges: "500" });
   expect(fixture.calls.filter((item) => item.method === "POST")).toHaveLength(0);
-  await page.getByRole("button", { name: "Back to all passages", exact: false }).click();
+  await page.locator("#graph-back-pages").click();
   await expect(page.locator("#graph-mode")).toHaveText("ALL PASSAGES"); await expect(page.locator("#graph-range")).toHaveText("101–200 of 205 passages");
   await expect(page.locator('.graph-point[data-chunk="chunk-101"]')).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator("#graph-neighborhood-controls")).toBeHidden();
@@ -205,7 +215,7 @@ test("a retrieval result can explore an off-page passage with its exact encoded 
   const hit = { ...fixture.nodes[204], chunk_id: "special /?#& passage", ordinal: undefined };
   fixture.nodes[204] = hit;
   await page.route("**/retrieve", (route) => reply(route, { hits: [{ ...hit, similarity: .8, depth: 0, seed: true }], candidate_count: 1, context_bytes: 240, reranking: { method: "local", model: null }, truncated: false }));
-  await openGraph(page); await page.locator("#graph-question").fill("Find a distant source"); await page.locator("#graph-search-submit").click();
+  await openRetrieval(page); await page.locator("#graph-question").fill("Find a distant source"); await page.locator("#graph-search-submit").click();
   await page.locator(".graph-hit").getByRole("button", { name: "Explore connections", exact: true }).click();
   await expect(page.locator("#graph-focus-title")).toContainText("bytes 61200–61440");
   await expect(page.locator(".graph-point.graph-root")).toHaveAttribute("data-chunk", hit.chunk_id);
@@ -287,14 +297,14 @@ async function askGraph(page, question = "How are these passages connected?") {
 }
 
 test("retrieval sends direction, exact kind and weight with the explicit seed budget", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-retrieval-direction").selectOption("incoming"); await page.locator("#graph-retrieval-kind").fill("supports"); await page.locator("#graph-retrieval-min-weight").fill("0.65"); await page.locator("#graph-seeds").fill("4");
   await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
   expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ direction: "incoming", kind: "supports", min_weight: .65, seed_limit: 4 });
 });
 
 test("per-document starting passage cap is optional and forwarded independently of result limits", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   const cap = page.getByLabel("Starting passages per document");
   await expect(cap).toHaveValue(""); await expect(cap).toHaveAttribute("placeholder", "No cap");
   await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
@@ -309,7 +319,7 @@ test("per-document starting passage cap is optional and forwarded independently 
 });
 
 test("invalid per-document starting passage caps stop before retrieval", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   for (const value of ["0", "-1", "21", "1.5"]) {
     await page.getByLabel("Starting passages per document").fill(value); await askGraph(page);
     await expect(page.locator("#graph-search-status")).toContainText("Starting passages per document must be a whole number between 1 and 20, or blank for no cap.");
@@ -318,7 +328,7 @@ test("invalid per-document starting passage caps stop before retrieval", async (
 });
 
 test("small candidate budgets reserve graph context while explicit seeds remain unchanged", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-candidates").fill("8"); await expect(page.locator("#graph-seeds")).toHaveValue("6"); await page.locator("#graph-result-limit").fill("4"); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3);
   expect(fixture.calls.find((call) => call.path.endsWith("/retrieve")).body).toMatchObject({ candidate_limit: 8, seed_limit: 6 });
   await page.locator("#graph-seeds").fill("7"); await page.locator("#graph-candidates").fill("4"); await expect(page.locator("#graph-seeds")).toHaveValue("7"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Starting passages must not exceed");
@@ -329,7 +339,7 @@ test("small candidate budgets reserve graph context while explicit seeds remain 
 });
 
 test("invalid relationship filters and seed limits stop before retrieval", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
+  const fixture = await workspace(page); await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click();
   await page.locator("#graph-retrieval-kind").fill("Invalid label"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Relationship type must start");
   await page.locator("#graph-retrieval-kind").fill(""); await page.locator("#graph-retrieval-min-weight").fill("1.2"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Minimum relationship weight");
   await page.locator("#graph-retrieval-min-weight").fill("0"); await page.locator("#graph-seeds").fill("0"); await askGraph(page); await expect(page.locator("#graph-search-status")).toContainText("Starting passages must be a whole number");
@@ -338,7 +348,7 @@ test("invalid relationship filters and seed limits stop before retrieval", async
 });
 
 test("legacy retrieval responses omit path explanations and empty kind remains optional", async ({ page }) => {
-  const fixture = await workspace(page); await openGraph(page); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0);
+  const fixture = await workspace(page); await openRetrieval(page); await askGraph(page); await expect(page.locator(".graph-hit")).toHaveCount(3); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0);
   const payload = fixture.calls.find((call) => call.path.endsWith("/retrieve")).body;
   expect(payload).toMatchObject({ direction: "outgoing", min_weight: 0, seed_limit: 12 }); expect(payload).not.toHaveProperty("kind"); expect(payload).not.toHaveProperty("max_seeds_per_document");
 });
@@ -347,7 +357,7 @@ test("a two-hop explanation preserves incoming arrows and identifies unreturned 
   const fixture = await workspace(page);
   const path = { seed_chunk_id: "chunk-1", edges: [ { from_chunk: "chunk-7", to_chunk: "chunk-1", kind: "supports", weight: .9 }, { from_chunk: "chunk-7", to_chunk: "chunk-13", kind: "references", weight: .75 } ] };
   await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
-  await openGraph(page); await askGraph(page); await expect(page.locator(".graph-retrieval-path")).toHaveCount(1); await expect(page.locator(".graph-path-steps")).toHaveCount(0);
+  await openRetrieval(page); await askGraph(page); await expect(page.locator(".graph-retrieval-path")).toHaveCount(1); await expect(page.locator(".graph-path-steps")).toHaveCount(0);
   await page.getByText("How this passage was found", { exact: true }).click(); await expect(page.locator(".graph-path-seed")).toContainText("chunk-1");
   await expect(page.locator(".graph-path-steps > li")).toHaveCount(2); await expect(page.locator(".graph-path-arrow").first()).toHaveText("←"); await expect(page.locator(".graph-path-arrow").last()).toHaveText("→");
   await expect(page.locator(".graph-path-steps")).toContainText("weight 0.9000 · followed incoming"); await expect(page.locator(".graph-path-steps")).toContainText("Connection identifier · source passage not returned");
@@ -364,7 +374,7 @@ test("invalid or disconnected explanations stay bounded and do not claim a path"
     { seed_chunk_id: "chunk-1", edges: [{ ...edge, to_chunk: "chunk-13", weight: 1.1 }] },
   ];
   await page.route("**/retrieve", (route) => reply(route, pathResult(paths.map((path) => pathHit(fixture.nodes[12], path)))));
-  await openGraph(page); await askGraph(page); await expect(page.locator(".graph-retrieval-path")).toHaveCount(4);
+  await openRetrieval(page); await askGraph(page); await expect(page.locator(".graph-retrieval-path")).toHaveCount(4);
   for (const summary of await page.locator(".graph-retrieval-path summary").all()) await summary.click();
   await expect(page.locator(".graph-path-steps")).toHaveCount(0); await expect(page.getByText("The server returned an incomplete connection explanation.", { exact: false })).toHaveCount(4);
   await expect(page.locator(".graph-hit")).toHaveCount(4);
@@ -374,14 +384,14 @@ test("untrusted path identifiers are text and never become HTML or executable li
   const fixture = await workspace(page); const hostile = '<img src=x onerror="window.pathXss=1">';
   const path = { seed_chunk_id: hostile, edges: [{ from_chunk: hostile, to_chunk: "chunk-13", kind: "supports", weight: .8 }] };
   await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
-  await openGraph(page); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
+  await openRetrieval(page); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
   await expect(page.locator(".graph-path-seed code")).toHaveText(hostile); await expect(page.locator(".graph-retrieval-path img, .graph-retrieval-path a")).toHaveCount(0); expect(await page.evaluate(() => window.pathXss)).toBeUndefined();
 });
 
 test("a stale path response after reconnect cannot restore old provenance", async ({ page }) => {
   const fixture = await workspace(page); const gate = deferred(); let entered = false;
   await page.route("**/retrieve", async (route) => { entered = true; await gate.promise; await reply(route, pathResult([pathHit(fixture.nodes[12], { seed_chunk_id: "old-private-seed", edges: [{ from_chunk: "old-private-seed", to_chunk: "chunk-13", kind: "supports", weight: 1 }] })])); });
-  await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.getByLabel("Starting passages per document").fill("2"); await askGraph(page); await expect.poll(() => entered).toBe(true);
+  await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.getByLabel("Starting passages per document").fill("2"); await askGraph(page); await expect.poll(() => entered).toBe(true);
   await page.locator("#open-token").click(); await page.locator("#token-input").fill("new-path-session"); await page.locator("#save-token").click(); gate.resolve();
   await expect(page.locator("#status-label")).toHaveText("Connected"); await expect(page.locator(".graph-retrieval-path")).toHaveCount(0); await expect(page.locator("#graph-search-results")).not.toContainText("old-private-seed");
   await expect(page.locator("#graph-seeds")).toHaveValue("12"); await expect(page.locator("#graph-seeds-per-document")).toHaveValue(""); await expect(page.locator("#graph-retrieval-direction")).toHaveValue("outgoing");
@@ -391,7 +401,25 @@ test("retrieval path details and advanced controls fit desktop and mobile screen
   await page.setViewportSize({ width: 1512, height: 1050 }); const fixture = await workspace(page);
   const path = { seed_chunk_id: "chunk-1", edges: [{ from_chunk: "chunk-7", to_chunk: "chunk-1", kind: "supports", weight: .9 }, { from_chunk: "chunk-7", to_chunk: "chunk-13", kind: "references", weight: .75 }] };
   await page.route("**/retrieve", (route) => reply(route, pathResult([pathHit(fixture.nodes[12], path)])));
-  await openGraph(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.locator("#graph-hops").fill("2"); await page.locator("#graph-retrieval-direction").selectOption("both"); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
-  await page.locator(".graph-retrieval").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-desktop.png") }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.setViewportSize({ width: 390, height: 844 }); await page.locator(".graph-retrieval").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-mobile.png"), style: ".topbar { visibility: hidden; }" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await openRetrieval(page); await page.locator("#graph-search-form summary").filter({ hasText: "Context and diversity" }).click(); await page.locator("#graph-hops").fill("2"); await page.locator("#graph-retrieval-direction").selectOption("both"); await askGraph(page); await page.getByText("How this passage was found", { exact: true }).click();
+  await page.locator("#playground-layout").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-desktop.png") }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 }); await page.locator("#playground-layout").screenshot({ path: testInfo.outputPath("vectors-retrieval-path-mobile.png"), style: ".topbar { visibility: hidden; }" }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("inspecting a retrieved citation preserves its text after the graph changes", async ({ page }) => {
+  const fixture = await workspace(page); await openRetrieval(page); await askGraph(page);
+  await expect(page.locator(".graph-hit")).toHaveCount(3);
+  const citedText = fixture.nodes[0].text;
+  fixture.nodes[0] = { ...fixture.nodes[0], title: "Updated graph document", text: "New graph text that was never part of the retrieved citation." };
+  fixture.revision = 8;
+  await page.locator('[data-playground-tab="graph"]').click(); await page.locator("#graph-refresh").click();
+  await expect(page.locator('.graph-point[data-chunk="chunk-1"]')).toContainText("Updated graph");
+  await page.locator('.graph-point[data-chunk="chunk-1"]').click();
+  await expect(page.locator("#graph-details")).toContainText("New graph text");
+  await page.locator('[data-playground-tab="chat"]').click();
+  await page.locator(".graph-hit").first().getByRole("button", { name: "Inspect passage", exact: true }).click();
+  await expect(page.locator("#graph-details")).toContainText(citedText);
+  await expect(page.locator("#graph-details")).not.toContainText("New graph text");
+  await expect(page.locator("#graph-details")).toContainText(/snapshot|revision|changed/i);
+  expect(fixture.calls.filter((call) => call.path.endsWith("/retrieve"))).toHaveLength(1);
 });

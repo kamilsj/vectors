@@ -6,6 +6,8 @@ use serde_json::Value as JsonValue;
 
 #[path = "graph_neighborhood.rs"]
 mod neighborhood;
+#[path = "graph_validation.rs"]
+mod validation;
 pub use neighborhood::{
     GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
     GraphNeighborhoodResult,
@@ -62,6 +64,36 @@ pub struct GraphCollection {
     pub edge_count: usize,
     pub tables: GraphTables,
     pub document_columns: Vec<GraphDocumentColumn>,
+}
+
+/// Current storage accounting from one coherent collection snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphCollectionCapacity {
+    pub collection: String,
+    pub revision: u64,
+    pub usage: GraphCapacityUsage,
+    pub limits: GraphCapacityLimits,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphCapacityUsage {
+    pub chunks: usize,
+    pub edges: usize,
+    pub vector_elements: usize,
+    /// UTF-8 bytes in every stored text value across documents, chunks and
+    /// relationships, including repeated source text and generated identifiers.
+    pub text_bytes: usize,
+}
+
+/// Enforced storage limits, independent of provider and HTTP request limits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GraphCapacityLimits {
+    pub chunks: usize,
+    pub edges: usize,
+    pub vector_elements: usize,
+    pub text_bytes: usize,
+    pub document_bytes: usize,
+    pub document_chunks: usize,
 }
 
 /// One canonical SQL-backed field supplied through document metadata.
@@ -206,7 +238,8 @@ pub struct GraphHit {
     pub metadata: JsonValue,
     pub start_byte: usize,
     pub end_byte: usize,
-    pub similarity: f64,
+    /// Query cosine when a query embedding was used; absent for lexical-only RAG.
+    pub similarity: Option<f64>,
     pub depth: usize,
     pub seed: bool,
 }
@@ -310,6 +343,44 @@ impl Database {
     pub fn graph_collection(&self, name: &str) -> Result<GraphCollection> {
         let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
         collection(&catalog, name)
+    }
+
+    /// Report exact current usage and enforced limits without provider work.
+    /// Text accounting scans stored values, so callers should request it on
+    /// demand rather than adding it to frequent collection-list polling.
+    pub fn graph_collection_capacity(&self, name: &str) -> Result<GraphCollectionCapacity> {
+        let catalog = self.catalog.read().map_err(|_| Error::LockPoisoned)?;
+        let info = collection(&catalog, name)?;
+        let mut text_bytes = 0usize;
+        for name in [
+            &info.tables.documents,
+            &info.tables.chunks,
+            &info.tables.edges,
+        ] {
+            for row in &table(&catalog, name)?.rows {
+                text_bytes = text_bytes.saturating_add(row_text_bytes(row));
+            }
+        }
+        Ok(GraphCollectionCapacity {
+            collection: info.config.name,
+            revision: catalog.revision,
+            usage: GraphCapacityUsage {
+                chunks: info.chunk_count,
+                edges: info.edge_count,
+                vector_elements: info
+                    .chunk_count
+                    .saturating_mul(info.config.profile.dimensions),
+                text_bytes,
+            },
+            limits: GraphCapacityLimits {
+                chunks: MAX_CHUNKS,
+                edges: MAX_EDGES,
+                vector_elements: MAX_VECTOR_ELEMENTS,
+                text_bytes: MAX_COLLECTION_TEXT_BYTES,
+                document_bytes: MAX_DOCUMENT_BYTES,
+                document_chunks: MAX_DOCUMENT_CHUNKS,
+            },
+        })
     }
 
     pub fn graph_collections(&self) -> Result<Vec<GraphCollection>> {
@@ -430,12 +501,15 @@ impl Database {
         Ok(result)
     }
 
-    /// Replace one document and every incident edge in a single durable commit.
+    /// Add or replace one document and every incident edge in one durable commit.
     /// Provider work must finish before this call; a stale revision fails before
     /// graph generation or mutation. Similarity edges express cosine proximity,
     /// not extracted or verified factual relationships.
     pub fn graph_ingest_document(&self, request: GraphIngestRequest) -> Result<GraphIngestResult> {
         validate_document(&request.document, &request.expected_profile)?;
+        if let Some(result) = self.try_graph_append_document(&request)? {
+            return Ok(result);
+        }
         let document_id = request.document.id.clone();
         let (mut result, revision) =
             self.graph_transaction(Some(request.expected_revision), |catalog, wal| {
@@ -448,130 +522,234 @@ impl Database {
                 )?;
                 let replaced = read_document(catalog, &info.tables, &document_id)?.is_some();
                 remove_document(catalog, &info.tables, &document_id, wal)?;
-                if table(catalog, &info.tables.chunks)?
-                    .rows
-                    .len()
-                    .saturating_add(request.document.chunks.len())
-                    > MAX_CHUNKS
-                {
-                    return Err(invalid(
-                        "a graph collection can contain at most 10000 chunks",
-                    ));
-                }
-                if table(catalog, &info.tables.chunks)?
-                    .rows
-                    .len()
-                    .saturating_add(request.document.chunks.len())
-                    .saturating_mul(info.config.profile.dimensions)
-                    > MAX_VECTOR_ELEMENTS
-                {
-                    return Err(invalid("graph vector storage exceeds 33554432 elements"));
-                }
-                let document = &request.document;
-                let profile_key = profile_key(&info.config.profile)?;
-                let rows: Vec<Vec<Value>> = document
-                    .chunks
-                    .iter()
-                    .enumerate()
-                    .map(|(ordinal, chunk)| {
-                        vec![
-                            Value::Text(chunk_id(&document.id, ordinal)),
-                            Value::Text(document.id.clone()),
-                            Value::Integer(ordinal as i64),
-                            Value::Integer(chunk.start_byte as i64),
-                            Value::Integer(chunk.end_byte as i64),
-                            Value::Text(chunk.text.clone()),
-                            Value::Text(chunk.embedding_text.clone()),
-                            Value::Text(profile_key.clone()),
-                            Value::Vector(chunk.embedding.clone()),
-                        ]
-                    })
-                    .collect();
-                let (metadata, field_values) = document_fields(
-                    table(catalog, &info.tables.documents)?,
-                    &document.id,
-                    &document.metadata,
-                )?;
-                let mut document_row = vec![
-                    Value::Text(document.id.clone()),
-                    Value::Text(document.title.clone()),
-                    Value::Text(document.source.clone()),
-                    Value::Text(document.text.clone()),
-                    Value::Text(metadata.to_string()),
-                    Value::Text(document.chunking.to_string()),
-                ];
-                let fingerprint =
-                    chunk_fingerprint(&document_row, &rows.iter().collect::<Vec<_>>());
-                document_row.push(Value::Text(fingerprint));
-                document_row.extend(field_values);
-                insert(catalog, &info.tables.documents, vec![document_row], wal)?;
-                let mut edges = Vec::new();
-                for ordinal in 1..document.chunks.len() {
-                    let previous = chunk_id(&document.id, ordinal - 1);
-                    let current = chunk_id(&document.id, ordinal);
-                    edges.push(edge(previous.clone(), current.clone(), "adjacent", 1.0));
-                    edges.push(edge(current, previous, "adjacent", 1.0));
-                }
-                // At most one exact bounded search per new chunk, never an all-pairs
-                // rebuild of the existing graph. Search before inserting the
-                // replacement chunks: the old document is already absent, so
-                // the dense/GPU path needs no residual exclusion predicate.
-                if info.config.semantic_neighbors > 0 {
-                    let chunks = table(catalog, &info.tables.chunks)?;
-                    for (ordinal, chunk) in document.chunks.iter().enumerate() {
-                        let neighbors = run_typed_vector_search(
-                            chunks,
-                            VectorSearch {
-                                table: info.tables.chunks.clone(),
-                                vector_column: "embedding".into(),
-                                query: chunk.embedding.clone(),
-                                metric: VectorSearchMetric::Cosine,
-                                select: vec!["chunk_id".into()],
-                                filters: Vec::new(),
-                                limit: info.config.semantic_neighbors,
-                            },
-                            &self.compute,
-                        )?;
-                        for row in neighbors.rows {
-                            let similarity = (1.0 - number_at(&row, 1)?).clamp(-1.0, 1.0);
-                            if similarity < info.config.semantic_threshold {
-                                continue;
-                            }
-                            let from = chunk_id(&document.id, ordinal);
-                            let to = text_at(&row, 0)?.to_owned();
-                            edges.push(edge(from.clone(), to.clone(), "semantic", similarity));
-                            edges.push(edge(to, from, "semantic", similarity));
-                        }
-                    }
-                }
-                insert(catalog, &info.tables.chunks, rows, wal)?;
-                let count = edges.len();
-                if table(catalog, &info.tables.edges)?
-                    .rows
-                    .len()
-                    .saturating_add(count)
-                    > MAX_EDGES
-                {
-                    return Err(invalid("graph edge capacity exceeded"));
-                }
-                insert(
-                    catalog,
-                    &info.tables.edges,
-                    edges.iter().map(edge_row).collect(),
-                    wal,
-                )?;
+                let rows = self.prepare_graph_document_rows(catalog, &info, &request.document)?;
+                let edges_created = rows.edges.len();
+                insert(catalog, &info.tables.documents, rows.documents, wal)?;
+                insert(catalog, &info.tables.chunks, rows.chunks, wal)?;
+                insert(catalog, &info.tables.edges, rows.edges, wal)?;
                 validate_text_capacity(catalog, &info.tables)?;
                 Ok(GraphIngestResult {
                     collection: info.config.name,
                     document_id: document_id.clone(),
                     revision: 0,
-                    chunks: document.chunks.len(),
-                    edges_created: count,
+                    chunks: request.document.chunks.len(),
+                    edges_created,
                     replaced,
                 })
             })?;
         result.revision = revision;
         Ok(result)
+    }
+
+    // New documents only append rows. Validate every table before mutation and
+    // prepare every fallible operation before
+    // the WAL commit so this path needs neither a staged catalog nor copies of
+    // the existing graph. Replacements and raw-SQL orphan repairs retain the
+    // staged transaction below, including incident-edge cleanup.
+    fn try_graph_append_document(
+        &self,
+        request: &GraphIngestRequest,
+    ) -> Result<Option<GraphIngestResult>> {
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        if catalog.revision != request.expected_revision {
+            return Err(Error::RevisionConflict {
+                expected: request.expected_revision,
+                actual: catalog.revision,
+            });
+        }
+        let info = collection(&catalog, &request.collection)?;
+        check_profile(&info.config.profile, &request.expected_profile)?;
+        let documents = table(&catalog, &info.tables.documents)?;
+        if id_index(documents)?.contains_key(&UniqueKey::Text(request.document.id.clone()))
+            || !document_chunk_ids(&catalog, &info.tables, &request.document.id)?
+                .0
+                .is_empty()
+        {
+            return Ok(None);
+        }
+        check_ingest_capacity(
+            &catalog,
+            &info,
+            &GraphDocumentPreview::from(&request.document),
+        )?;
+        let rows = self.prepare_graph_document_rows(&catalog, &info, &request.document)?;
+        let validated_profile = profile_key(&info.config.profile)?;
+        let edges_created = rows.edges.len();
+        let mut wal = self.persistent.as_ref().map(|_| String::new());
+        let mut plans = Vec::with_capacity(3);
+        let mut text_bytes = 0_usize;
+        for (name, pending) in [
+            (&info.tables.documents, rows.documents),
+            (&info.tables.chunks, rows.chunks),
+            (&info.tables.edges, rows.edges),
+        ] {
+            let stored = table(&catalog, name)?;
+            let pending = prepare_typed_rows(stored, pending)?;
+            text_bytes = stored
+                .rows
+                .iter()
+                .chain(&pending)
+                .fold(text_bytes, |bytes, row| {
+                    bytes.saturating_add(row_text_bytes(row))
+                });
+            append_insert_wal(name, &pending, &mut wal);
+            plans.push((
+                name,
+                prepare_durable_insert(stored, pending, InsertConflictPlan::Fail)?,
+            ));
+        }
+        if text_bytes > MAX_COLLECTION_TEXT_BYTES {
+            return Err(invalid("graph text storage exceeds 64 MiB"));
+        }
+        let (sequence, checkpoint_needed) = if let (Some(persistent), Some(sql)) =
+            (&self.persistent, wal)
+        {
+            let sequence = next_durable_sequence(catalog.durable_sequence)?;
+            let checkpoint = persistent.append(sequence, PersistentStorage::prepare_sql(&sql)?)?;
+            (Some(sequence), checkpoint)
+        } else {
+            (None, false)
+        };
+        // The catalog write lock keeps all validated schemas and uniqueness
+        // indexes unchanged. From the durable append onward, apply is infallible.
+        for (name, plan) in plans {
+            plan.apply(
+                catalog
+                    .tables
+                    .get_mut(name)
+                    .expect("graph table exists while write lock is held"),
+            );
+        }
+        // Existing rows were validated by collection() under this same lock;
+        // every appended chunk was built with this canonical profile key.
+        validation::remember_valid_profiles(
+            catalog
+                .tables
+                .get(&info.tables.chunks)
+                .expect("graph table exists while write lock is held"),
+            &validated_profile,
+        );
+        if let Some(sequence) = sequence {
+            catalog.durable_sequence = sequence;
+            catalog.revision = sequence;
+        } else {
+            catalog.mark_changed();
+        }
+        let revision = catalog.revision;
+        drop(catalog);
+        if checkpoint_needed {
+            let _ = self.checkpoint();
+        }
+        Ok(Some(GraphIngestResult {
+            collection: info.config.name,
+            document_id: request.document.id.clone(),
+            revision,
+            chunks: request.document.chunks.len(),
+            edges_created,
+            replaced: false,
+        }))
+    }
+
+    fn prepare_graph_document_rows(
+        &self,
+        catalog: &Catalog,
+        info: &GraphCollection,
+        document: &GraphDocumentInput,
+    ) -> Result<GraphDocumentRows> {
+        let chunks = table(catalog, &info.tables.chunks)?;
+        let next_chunks = chunks.rows.len().saturating_add(document.chunks.len());
+        if next_chunks > MAX_CHUNKS {
+            return Err(invalid(
+                "a graph collection can contain at most 10000 chunks",
+            ));
+        }
+        if next_chunks.saturating_mul(info.config.profile.dimensions) > MAX_VECTOR_ELEMENTS {
+            return Err(invalid("graph vector storage exceeds 33554432 elements"));
+        }
+        let profile_key = profile_key(&info.config.profile)?;
+        let rows: Vec<Vec<Value>> = document
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(ordinal, chunk)| {
+                vec![
+                    Value::Text(chunk_id(&document.id, ordinal)),
+                    Value::Text(document.id.clone()),
+                    Value::Integer(ordinal as i64),
+                    Value::Integer(chunk.start_byte as i64),
+                    Value::Integer(chunk.end_byte as i64),
+                    Value::Text(chunk.text.clone()),
+                    Value::Text(chunk.embedding_text.clone()),
+                    Value::Text(profile_key.clone()),
+                    Value::Vector(chunk.embedding.clone()),
+                ]
+            })
+            .collect();
+        let (metadata, field_values) = document_fields(
+            table(catalog, &info.tables.documents)?,
+            &document.id,
+            &document.metadata,
+        )?;
+        let mut document_row = vec![
+            Value::Text(document.id.clone()),
+            Value::Text(document.title.clone()),
+            Value::Text(document.source.clone()),
+            Value::Text(document.text.clone()),
+            Value::Text(metadata.to_string()),
+            Value::Text(document.chunking.to_string()),
+        ];
+        let fingerprint = chunk_fingerprint(&document_row, &rows.iter().collect::<Vec<_>>());
+        document_row.push(Value::Text(fingerprint));
+        document_row.extend(field_values);
+        let mut edges = Vec::new();
+        for ordinal in 1..document.chunks.len() {
+            let previous = chunk_id(&document.id, ordinal - 1);
+            let current = chunk_id(&document.id, ordinal);
+            edges.push(edge(previous.clone(), current.clone(), "adjacent", 1.0));
+            edges.push(edge(current, previous, "adjacent", 1.0));
+        }
+        // Search only the stored chunks, before adding the new document. For
+        // replacement transactions the old document has already been removed.
+        if info.config.semantic_neighbors > 0 {
+            for (ordinal, chunk) in document.chunks.iter().enumerate() {
+                let neighbors = run_typed_vector_search(
+                    chunks,
+                    VectorSearch {
+                        table: info.tables.chunks.clone(),
+                        vector_column: "embedding".into(),
+                        query: chunk.embedding.clone(),
+                        metric: VectorSearchMetric::Cosine,
+                        select: vec!["chunk_id".into()],
+                        filters: Vec::new(),
+                        limit: info.config.semantic_neighbors,
+                    },
+                    &self.compute,
+                )?;
+                for row in neighbors.rows {
+                    let similarity = (1.0 - number_at(&row, 1)?).clamp(-1.0, 1.0);
+                    if similarity < info.config.semantic_threshold {
+                        continue;
+                    }
+                    let from = chunk_id(&document.id, ordinal);
+                    let to = text_at(&row, 0)?.to_owned();
+                    edges.push(edge(from.clone(), to.clone(), "semantic", similarity));
+                    edges.push(edge(to, from, "semantic", similarity));
+                }
+            }
+        }
+        if table(catalog, &info.tables.edges)?
+            .rows
+            .len()
+            .saturating_add(edges.len())
+            > MAX_EDGES
+        {
+            return Err(invalid("graph edge capacity exceeded"));
+        }
+        Ok(GraphDocumentRows {
+            documents: vec![document_row],
+            chunks: rows,
+            edges: edges.iter().map(edge_row).collect(),
+        })
     }
 
     pub fn graph_delete_document(
@@ -672,7 +850,7 @@ impl Database {
                 chunk,
                 &document_lookup,
                 &documents.columns,
-                &request.query,
+                Some(&request.query),
                 depth,
             )?);
             if depth >= request.max_hops {
@@ -813,6 +991,12 @@ impl Database {
         }
         Ok((result, revision))
     }
+}
+
+struct GraphDocumentRows {
+    documents: Vec<Vec<Value>>,
+    chunks: Vec<Vec<Value>>,
+    edges: Vec<Vec<Value>>,
 }
 
 fn invalid(message: &str) -> Error {
@@ -1094,6 +1278,15 @@ fn table<'a>(catalog: &'a Catalog, name: &str) -> Result<&'a Table> {
         .ok_or_else(|| Error::TableNotFound(name.into()))
 }
 
+// These maps are maintained atomically by all SQL/typed writes and rebuilt on
+// recovery. Borrow them under the same catalog lock as the graph traversal.
+fn id_index(table: &Table) -> Result<&HashMap<UniqueKey, usize>> {
+    table
+        .unique_keys
+        .get(&0)
+        .ok_or_else(|| invalid("graph unique id index is missing"))
+}
+
 fn validate_text_capacity(catalog: &Catalog, tables: &GraphTables) -> Result<()> {
     let mut bytes = 0_usize;
     for name in [&tables.documents, &tables.chunks, &tables.edges] {
@@ -1290,13 +1483,7 @@ fn collection(catalog: &Catalog, name: &str) -> Result<GraphCollection> {
     if chunks.rows.len() > MAX_CHUNKS || table(catalog, &tables.edges)?.rows.len() > MAX_EDGES {
         return Err(invalid("graph collection exceeds its supported capacity"));
     }
-    for row in &chunks.rows {
-        if text_at(row, 7)? != key {
-            return Err(invalid(
-                "stored chunks do not match the collection embedding profile",
-            ));
-        }
-    }
+    validation::validate_profiles(chunks, &key)?;
     Ok(GraphCollection {
         config,
         revision: catalog.revision,
@@ -1519,6 +1706,19 @@ fn insert(
     if rows.is_empty() {
         return Ok(());
     }
+    append_insert_wal(name, &rows, wal);
+    let table = catalog
+        .tables
+        .get_mut(name)
+        .ok_or_else(|| Error::TableNotFound(name.into()))?;
+    let rows = prepare_typed_rows(table, rows)?;
+    apply_insert_plan(table, rows, InsertConflictPlan::Fail)?;
+    Ok(())
+}
+fn append_insert_wal(name: &str, rows: &[Vec<Value>], wal: &mut Option<String>) {
+    if rows.is_empty() {
+        return;
+    }
     if let Some(wal) = wal {
         wal.push_str(&format!("INSERT INTO {} VALUES ", quote(name)));
         for (index, row) in rows.iter().enumerate() {
@@ -1536,14 +1736,8 @@ fn insert(
         }
         wal.push(';');
     }
-    let table = catalog
-        .tables
-        .get_mut(name)
-        .ok_or_else(|| Error::TableNotFound(name.into()))?;
-    let rows = prepare_typed_rows(table, rows)?;
-    apply_insert_plan(table, rows, InsertConflictPlan::Fail)?;
-    Ok(())
 }
+
 fn sql_value(value: &Value) -> String {
     match value {
         Value::Null => "NULL".into(),
@@ -1640,7 +1834,7 @@ fn hit(
     chunk: &[Value],
     documents: &HashMap<&str, &Vec<Value>>,
     document_columns: &[Column],
-    query: &Vector,
+    query: Option<&Vector>,
     depth: usize,
 ) -> Result<GraphHit> {
     let document_id = text_at(chunk, 1)?;
@@ -1658,7 +1852,13 @@ fn hit(
     let Some(Value::Vector(embedding)) = chunk.get(8) else {
         return Err(invalid("graph chunk embedding is missing"));
     };
-    let similarity = (1.0 - f64::from(query.cosine_distance(embedding)?)).clamp(-1.0, 1.0);
+    let similarity = query
+        .map(|query| {
+            query
+                .cosine_distance(embedding)
+                .map(|distance| (1.0 - f64::from(distance)).clamp(-1.0, 1.0))
+        })
+        .transpose()?;
     Ok(GraphHit {
         chunk_id: text_at(chunk, 0)?.into(),
         document_id: document_id.into(),

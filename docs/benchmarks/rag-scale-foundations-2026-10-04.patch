@@ -1,0 +1,1310 @@
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -21,6 +21,7 @@
+ 
+ mod graph;
+ mod join;
++mod table_map;
+ pub use graph::{
+     GraphBrowseRequest, GraphBrowseResult, GraphCapacityLimits, GraphCapacityUsage,
+     GraphChunkInput, GraphChunkPreview, GraphCollection, GraphCollectionCapacity,
+@@ -33,6 +34,7 @@
+     GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
+     GraphSearchRequest, GraphSearchResult, GraphTables,
+ };
++pub(crate) use table_map::TableMap;
+ 
+ /// Logical types supported by the in-memory storage engine.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+@@ -501,7 +503,7 @@
+ 
+ #[derive(Clone, Default, Debug)]
+ pub(crate) struct Catalog {
+-    pub(crate) tables: HashMap<String, Table>,
++    pub(crate) tables: TableMap,
+     pub(crate) revision: u64,
+     pub(crate) durable_sequence: u64,
+ }
+@@ -868,6 +870,10 @@
+             .read()
+             .map_err(|_| Error::LockPoisoned)?
+             .clone();
++        // Release the staging references before publishing, so another writer
++        // does not copy a table merely because this completed transaction still
++        // owns its private snapshot while checkpoint maintenance runs.
++        drop(staging);
+         let changed = committed.revision != catalog.revision;
+         let checkpoint_needed = if changed {
+             if let Some(persistent) = &self.persistent {
+@@ -1595,10 +1601,7 @@
+         let names = names.iter().map(object_name).collect::<Vec<_>>();
+         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+         if !if_exists {
+-            if let Some(missing) = names
+-                .iter()
+-                .find(|name| !catalog.tables.contains_key(*name))
+-            {
++            if let Some(missing) = names.iter().find(|name| !catalog.tables.contains_key(name)) {
+                 return Err(Error::TableNotFound(missing.clone()));
+             }
+         }
+@@ -1689,11 +1692,18 @@
+         }
+         let mut rows_affected = 0;
+         for name in names {
+-            for table in catalog.tables.values_mut() {
+-                if table.indexes.remove(&name).is_some() {
+-                    rows_affected += 1;
+-                    break;
+-                }
++            // Find the owner without requesting mutable access to unrelated
++            // tables: a staged catalog shares those with the live catalog.
++            let owner = catalog.tables.iter().find_map(|(table_name, table)| {
++                table
++                    .indexes
++                    .contains_key(&name)
++                    .then(|| table_name.clone())
++            });
++            if let Some(owner) = owner {
++                let table = catalog.tables.get_mut(&owner).expect("index owner exists");
++                table.indexes.remove(&name);
++                rows_affected += 1;
+             }
+         }
+         if rows_affected > 0 {
+--- a/src/storage.rs
++++ b/src/storage.rs
+@@ -9,7 +9,7 @@
+ 
+ use crate::engine::{
+     extend_vector_columns, rebuild_relational_indexes, validate_row, validate_unique, Catalog,
+-    Column, DataType, HashIndex, Table, Value, MAX_TABLE_ROWS,
++    Column, DataType, HashIndex, Table, TableMap, Value, MAX_TABLE_ROWS,
+ };
+ use crate::{Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
+ 
+@@ -61,7 +61,7 @@
+     }
+ 
+     let table_count = read_count(&mut reader, "table count", MAX_TABLES)?;
+-    let mut tables = std::collections::HashMap::new();
++    let mut tables = TableMap::default();
+     let mut global_index_names = HashSet::new();
+     for _ in 0..table_count {
+         let name = read_string(&mut reader)?;
+--- a/src/engine/graph.rs
++++ b/src/engine/graph.rs
+@@ -6,6 +6,8 @@
+ 
+ #[path = "graph_neighborhood.rs"]
+ mod neighborhood;
++#[path = "graph_validation.rs"]
++mod validation;
+ pub use neighborhood::{
+     GraphNeighborhoodDirection, GraphNeighborhoodNode, GraphNeighborhoodRequest,
+     GraphNeighborhoodResult,
+@@ -499,12 +501,15 @@
+         Ok(result)
+     }
+ 
+-    /// Replace one document and every incident edge in a single durable commit.
++    /// Add or replace one document and every incident edge in one durable commit.
+     /// Provider work must finish before this call; a stale revision fails before
+     /// graph generation or mutation. Similarity edges express cosine proximity,
+     /// not extracted or verified factual relationships.
+     pub fn graph_ingest_document(&self, request: GraphIngestRequest) -> Result<GraphIngestResult> {
+         validate_document(&request.document, &request.expected_profile)?;
++        if let Some(result) = self.try_graph_append_document(&request)? {
++            return Ok(result);
++        }
+         let document_id = request.document.id.clone();
+         let (mut result, revision) =
+             self.graph_transaction(Some(request.expected_revision), |catalog, wal| {
+@@ -517,130 +522,234 @@
+                 )?;
+                 let replaced = read_document(catalog, &info.tables, &document_id)?.is_some();
+                 remove_document(catalog, &info.tables, &document_id, wal)?;
+-                if table(catalog, &info.tables.chunks)?
+-                    .rows
+-                    .len()
+-                    .saturating_add(request.document.chunks.len())
+-                    > MAX_CHUNKS
+-                {
+-                    return Err(invalid(
+-                        "a graph collection can contain at most 10000 chunks",
+-                    ));
+-                }
+-                if table(catalog, &info.tables.chunks)?
+-                    .rows
+-                    .len()
+-                    .saturating_add(request.document.chunks.len())
+-                    .saturating_mul(info.config.profile.dimensions)
+-                    > MAX_VECTOR_ELEMENTS
+-                {
+-                    return Err(invalid("graph vector storage exceeds 33554432 elements"));
+-                }
+-                let document = &request.document;
+-                let profile_key = profile_key(&info.config.profile)?;
+-                let rows: Vec<Vec<Value>> = document
+-                    .chunks
+-                    .iter()
+-                    .enumerate()
+-                    .map(|(ordinal, chunk)| {
+-                        vec![
+-                            Value::Text(chunk_id(&document.id, ordinal)),
+-                            Value::Text(document.id.clone()),
+-                            Value::Integer(ordinal as i64),
+-                            Value::Integer(chunk.start_byte as i64),
+-                            Value::Integer(chunk.end_byte as i64),
+-                            Value::Text(chunk.text.clone()),
+-                            Value::Text(chunk.embedding_text.clone()),
+-                            Value::Text(profile_key.clone()),
+-                            Value::Vector(chunk.embedding.clone()),
+-                        ]
+-                    })
+-                    .collect();
+-                let (metadata, field_values) = document_fields(
+-                    table(catalog, &info.tables.documents)?,
+-                    &document.id,
+-                    &document.metadata,
+-                )?;
+-                let mut document_row = vec![
+-                    Value::Text(document.id.clone()),
+-                    Value::Text(document.title.clone()),
+-                    Value::Text(document.source.clone()),
+-                    Value::Text(document.text.clone()),
+-                    Value::Text(metadata.to_string()),
+-                    Value::Text(document.chunking.to_string()),
+-                ];
+-                let fingerprint =
+-                    chunk_fingerprint(&document_row, &rows.iter().collect::<Vec<_>>());
+-                document_row.push(Value::Text(fingerprint));
+-                document_row.extend(field_values);
+-                insert(catalog, &info.tables.documents, vec![document_row], wal)?;
+-                let mut edges = Vec::new();
+-                for ordinal in 1..document.chunks.len() {
+-                    let previous = chunk_id(&document.id, ordinal - 1);
+-                    let current = chunk_id(&document.id, ordinal);
+-                    edges.push(edge(previous.clone(), current.clone(), "adjacent", 1.0));
+-                    edges.push(edge(current, previous, "adjacent", 1.0));
+-                }
+-                // At most one exact bounded search per new chunk, never an all-pairs
+-                // rebuild of the existing graph. Search before inserting the
+-                // replacement chunks: the old document is already absent, so
+-                // the dense/GPU path needs no residual exclusion predicate.
+-                if info.config.semantic_neighbors > 0 {
+-                    let chunks = table(catalog, &info.tables.chunks)?;
+-                    for (ordinal, chunk) in document.chunks.iter().enumerate() {
+-                        let neighbors = run_typed_vector_search(
+-                            chunks,
+-                            VectorSearch {
+-                                table: info.tables.chunks.clone(),
+-                                vector_column: "embedding".into(),
+-                                query: chunk.embedding.clone(),
+-                                metric: VectorSearchMetric::Cosine,
+-                                select: vec!["chunk_id".into()],
+-                                filters: Vec::new(),
+-                                limit: info.config.semantic_neighbors,
+-                            },
+-                            &self.compute,
+-                        )?;
+-                        for row in neighbors.rows {
+-                            let similarity = (1.0 - number_at(&row, 1)?).clamp(-1.0, 1.0);
+-                            if similarity < info.config.semantic_threshold {
+-                                continue;
+-                            }
+-                            let from = chunk_id(&document.id, ordinal);
+-                            let to = text_at(&row, 0)?.to_owned();
+-                            edges.push(edge(from.clone(), to.clone(), "semantic", similarity));
+-                            edges.push(edge(to, from, "semantic", similarity));
+-                        }
+-                    }
+-                }
+-                insert(catalog, &info.tables.chunks, rows, wal)?;
+-                let count = edges.len();
+-                if table(catalog, &info.tables.edges)?
+-                    .rows
+-                    .len()
+-                    .saturating_add(count)
+-                    > MAX_EDGES
+-                {
+-                    return Err(invalid("graph edge capacity exceeded"));
+-                }
+-                insert(
+-                    catalog,
+-                    &info.tables.edges,
+-                    edges.iter().map(edge_row).collect(),
+-                    wal,
+-                )?;
++                let rows = self.prepare_graph_document_rows(catalog, &info, &request.document)?;
++                let edges_created = rows.edges.len();
++                insert(catalog, &info.tables.documents, rows.documents, wal)?;
++                insert(catalog, &info.tables.chunks, rows.chunks, wal)?;
++                insert(catalog, &info.tables.edges, rows.edges, wal)?;
+                 validate_text_capacity(catalog, &info.tables)?;
+                 Ok(GraphIngestResult {
+                     collection: info.config.name,
+                     document_id: document_id.clone(),
+                     revision: 0,
+-                    chunks: document.chunks.len(),
+-                    edges_created: count,
++                    chunks: request.document.chunks.len(),
++                    edges_created,
+                     replaced,
+                 })
+             })?;
+         result.revision = revision;
+         Ok(result)
++    }
++
++    // New documents only append rows. Validate every table before mutation and
++    // prepare every fallible operation before
++    // the WAL commit so this path needs neither a staged catalog nor copies of
++    // the existing graph. Replacements and raw-SQL orphan repairs retain the
++    // staged transaction below, including incident-edge cleanup.
++    fn try_graph_append_document(
++        &self,
++        request: &GraphIngestRequest,
++    ) -> Result<Option<GraphIngestResult>> {
++        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
++        if catalog.revision != request.expected_revision {
++            return Err(Error::RevisionConflict {
++                expected: request.expected_revision,
++                actual: catalog.revision,
++            });
++        }
++        let info = collection(&catalog, &request.collection)?;
++        check_profile(&info.config.profile, &request.expected_profile)?;
++        let documents = table(&catalog, &info.tables.documents)?;
++        if id_index(documents)?.contains_key(&UniqueKey::Text(request.document.id.clone()))
++            || !document_chunk_ids(&catalog, &info.tables, &request.document.id)?
++                .0
++                .is_empty()
++        {
++            return Ok(None);
++        }
++        check_ingest_capacity(
++            &catalog,
++            &info,
++            &GraphDocumentPreview::from(&request.document),
++        )?;
++        let rows = self.prepare_graph_document_rows(&catalog, &info, &request.document)?;
++        let validated_profile = profile_key(&info.config.profile)?;
++        let edges_created = rows.edges.len();
++        let mut wal = self.persistent.as_ref().map(|_| String::new());
++        let mut plans = Vec::with_capacity(3);
++        let mut text_bytes = 0_usize;
++        for (name, pending) in [
++            (&info.tables.documents, rows.documents),
++            (&info.tables.chunks, rows.chunks),
++            (&info.tables.edges, rows.edges),
++        ] {
++            let stored = table(&catalog, name)?;
++            let pending = prepare_typed_rows(stored, pending)?;
++            text_bytes = stored
++                .rows
++                .iter()
++                .chain(&pending)
++                .fold(text_bytes, |bytes, row| {
++                    bytes.saturating_add(row_text_bytes(row))
++                });
++            append_insert_wal(name, &pending, &mut wal);
++            plans.push((
++                name,
++                prepare_durable_insert(stored, pending, InsertConflictPlan::Fail)?,
++            ));
++        }
++        if text_bytes > MAX_COLLECTION_TEXT_BYTES {
++            return Err(invalid("graph text storage exceeds 64 MiB"));
++        }
++        let (sequence, checkpoint_needed) = if let (Some(persistent), Some(sql)) =
++            (&self.persistent, wal)
++        {
++            let sequence = next_durable_sequence(catalog.durable_sequence)?;
++            let checkpoint = persistent.append(sequence, PersistentStorage::prepare_sql(&sql)?)?;
++            (Some(sequence), checkpoint)
++        } else {
++            (None, false)
++        };
++        // The catalog write lock keeps all validated schemas and uniqueness
++        // indexes unchanged. From the durable append onward, apply is infallible.
++        for (name, plan) in plans {
++            plan.apply(
++                catalog
++                    .tables
++                    .get_mut(name)
++                    .expect("graph table exists while write lock is held"),
++            );
++        }
++        // Existing rows were validated by collection() under this same lock;
++        // every appended chunk was built with this canonical profile key.
++        validation::remember_valid_profiles(
++            catalog
++                .tables
++                .get(&info.tables.chunks)
++                .expect("graph table exists while write lock is held"),
++            &validated_profile,
++        );
++        if let Some(sequence) = sequence {
++            catalog.durable_sequence = sequence;
++            catalog.revision = sequence;
++        } else {
++            catalog.mark_changed();
++        }
++        let revision = catalog.revision;
++        drop(catalog);
++        if checkpoint_needed {
++            let _ = self.checkpoint();
++        }
++        Ok(Some(GraphIngestResult {
++            collection: info.config.name,
++            document_id: request.document.id.clone(),
++            revision,
++            chunks: request.document.chunks.len(),
++            edges_created,
++            replaced: false,
++        }))
++    }
++
++    fn prepare_graph_document_rows(
++        &self,
++        catalog: &Catalog,
++        info: &GraphCollection,
++        document: &GraphDocumentInput,
++    ) -> Result<GraphDocumentRows> {
++        let chunks = table(catalog, &info.tables.chunks)?;
++        let next_chunks = chunks.rows.len().saturating_add(document.chunks.len());
++        if next_chunks > MAX_CHUNKS {
++            return Err(invalid(
++                "a graph collection can contain at most 10000 chunks",
++            ));
++        }
++        if next_chunks.saturating_mul(info.config.profile.dimensions) > MAX_VECTOR_ELEMENTS {
++            return Err(invalid("graph vector storage exceeds 33554432 elements"));
++        }
++        let profile_key = profile_key(&info.config.profile)?;
++        let rows: Vec<Vec<Value>> = document
++            .chunks
++            .iter()
++            .enumerate()
++            .map(|(ordinal, chunk)| {
++                vec![
++                    Value::Text(chunk_id(&document.id, ordinal)),
++                    Value::Text(document.id.clone()),
++                    Value::Integer(ordinal as i64),
++                    Value::Integer(chunk.start_byte as i64),
++                    Value::Integer(chunk.end_byte as i64),
++                    Value::Text(chunk.text.clone()),
++                    Value::Text(chunk.embedding_text.clone()),
++                    Value::Text(profile_key.clone()),
++                    Value::Vector(chunk.embedding.clone()),
++                ]
++            })
++            .collect();
++        let (metadata, field_values) = document_fields(
++            table(catalog, &info.tables.documents)?,
++            &document.id,
++            &document.metadata,
++        )?;
++        let mut document_row = vec![
++            Value::Text(document.id.clone()),
++            Value::Text(document.title.clone()),
++            Value::Text(document.source.clone()),
++            Value::Text(document.text.clone()),
++            Value::Text(metadata.to_string()),
++            Value::Text(document.chunking.to_string()),
++        ];
++        let fingerprint = chunk_fingerprint(&document_row, &rows.iter().collect::<Vec<_>>());
++        document_row.push(Value::Text(fingerprint));
++        document_row.extend(field_values);
++        let mut edges = Vec::new();
++        for ordinal in 1..document.chunks.len() {
++            let previous = chunk_id(&document.id, ordinal - 1);
++            let current = chunk_id(&document.id, ordinal);
++            edges.push(edge(previous.clone(), current.clone(), "adjacent", 1.0));
++            edges.push(edge(current, previous, "adjacent", 1.0));
++        }
++        // Search only the stored chunks, before adding the new document. For
++        // replacement transactions the old document has already been removed.
++        if info.config.semantic_neighbors > 0 {
++            for (ordinal, chunk) in document.chunks.iter().enumerate() {
++                let neighbors = run_typed_vector_search(
++                    chunks,
++                    VectorSearch {
++                        table: info.tables.chunks.clone(),
++                        vector_column: "embedding".into(),
++                        query: chunk.embedding.clone(),
++                        metric: VectorSearchMetric::Cosine,
++                        select: vec!["chunk_id".into()],
++                        filters: Vec::new(),
++                        limit: info.config.semantic_neighbors,
++                    },
++                    &self.compute,
++                )?;
++                for row in neighbors.rows {
++                    let similarity = (1.0 - number_at(&row, 1)?).clamp(-1.0, 1.0);
++                    if similarity < info.config.semantic_threshold {
++                        continue;
++                    }
++                    let from = chunk_id(&document.id, ordinal);
++                    let to = text_at(&row, 0)?.to_owned();
++                    edges.push(edge(from.clone(), to.clone(), "semantic", similarity));
++                    edges.push(edge(to, from, "semantic", similarity));
++                }
++            }
++        }
++        if table(catalog, &info.tables.edges)?
++            .rows
++            .len()
++            .saturating_add(edges.len())
++            > MAX_EDGES
++        {
++            return Err(invalid("graph edge capacity exceeded"));
++        }
++        Ok(GraphDocumentRows {
++            documents: vec![document_row],
++            chunks: rows,
++            edges: edges.iter().map(edge_row).collect(),
++        })
+     }
+ 
+     pub fn graph_delete_document(
+@@ -884,6 +993,12 @@
+     }
+ }
+ 
++struct GraphDocumentRows {
++    documents: Vec<Vec<Value>>,
++    chunks: Vec<Vec<Value>>,
++    edges: Vec<Vec<Value>>,
++}
++
+ fn invalid(message: &str) -> Error {
+     Error::InvalidQuery(message.into())
+ }
+@@ -1368,13 +1483,7 @@
+     if chunks.rows.len() > MAX_CHUNKS || table(catalog, &tables.edges)?.rows.len() > MAX_EDGES {
+         return Err(invalid("graph collection exceeds its supported capacity"));
+     }
+-    for row in &chunks.rows {
+-        if text_at(row, 7)? != key {
+-            return Err(invalid(
+-                "stored chunks do not match the collection embedding profile",
+-            ));
+-        }
+-    }
++    validation::validate_profiles(chunks, &key)?;
+     Ok(GraphCollection {
+         config,
+         revision: catalog.revision,
+@@ -1597,6 +1706,19 @@
+     if rows.is_empty() {
+         return Ok(());
+     }
++    append_insert_wal(name, &rows, wal);
++    let table = catalog
++        .tables
++        .get_mut(name)
++        .ok_or_else(|| Error::TableNotFound(name.into()))?;
++    let rows = prepare_typed_rows(table, rows)?;
++    apply_insert_plan(table, rows, InsertConflictPlan::Fail)?;
++    Ok(())
++}
++fn append_insert_wal(name: &str, rows: &[Vec<Value>], wal: &mut Option<String>) {
++    if rows.is_empty() {
++        return;
++    }
+     if let Some(wal) = wal {
+         wal.push_str(&format!("INSERT INTO {} VALUES ", quote(name)));
+         for (index, row) in rows.iter().enumerate() {
+@@ -1614,14 +1736,8 @@
+         }
+         wal.push(';');
+     }
+-    let table = catalog
+-        .tables
+-        .get_mut(name)
+-        .ok_or_else(|| Error::TableNotFound(name.into()))?;
+-    let rows = prepare_typed_rows(table, rows)?;
+-    apply_insert_plan(table, rows, InsertConflictPlan::Fail)?;
+-    Ok(())
+-}
++}
++
+ fn sql_value(value: &Value) -> String {
+     match value {
+         Value::Null => "NULL".into(),
+--- a/src/engine/graph_filters.rs
++++ b/src/engine/graph_filters.rs
+@@ -48,18 +48,28 @@
+     documents: &Table,
+     chunks: &Table,
+     filters: &[VectorSearchFilter],
+-) -> Result<Option<Vec<bool>>> {
++) -> Result<Option<Vec<usize>>> {
+     let Some(selection) = predicate(documents, filters)? else {
+         return Ok(None);
+     };
+     let indexed = indexed_candidate_rows(documents, &selection);
+-    let mut allowed = HashSet::new();
++    // The managed document_id index already maps each selected document to
++    // its chunk rows. Do not scan or allocate a mask for unrelated chunks.
++    let chunk_documents = chunks
++        .indexes
++        .values()
++        .find(|index| index.column == 1)
++        .ok_or_else(|| invalid("graph chunk document index is missing"))?;
++    let mut allowed = Vec::new();
+     let mut consider = |index: usize| -> Result<()> {
+         let row = &documents.rows[index];
+         if evaluate(&selection, &EvalContext::new(&documents.columns, row))?.as_bool()?
+             == Some(true)
+         {
+-            allowed.insert(text_at(row, 0)?);
++            let key = UniqueKey::Text(text_at(row, 0)?.into());
++            if let Some(rows) = chunk_documents.buckets.get(&key) {
++                allowed.extend_from_slice(rows);
++            }
+         }
+         Ok(())
+     };
+@@ -72,16 +82,9 @@
+             consider(row)?;
+         }
+     }
+-    // An indexed miss needs no chunk ID reads or lexical/vector work. Keep a
+-    // mask of the snapshot's shape so the caller can use the same empty path
+-    // for misses found by indexes and by residual predicate evaluation.
+-    if allowed.is_empty() {
+-        return Ok(Some(vec![false; chunks.rows.len()]));
+-    }
+-    chunks
+-        .rows
+-        .iter()
+-        .map(|row| Ok(allowed.contains(text_at(row, 1)?)))
+-        .collect::<Result<Vec<_>>>()
+-        .map(Some)
++    // Vector scans require sorted, unique positions. The same snapshot-owned
++    // set also gates lexical scoring and every graph hop before ranking.
++    allowed.sort_unstable();
++    allowed.dedup();
++    Ok(Some(allowed))
+ }
+--- a/src/engine/graph_rag.rs
++++ b/src/engine/graph_rag.rs
+@@ -481,6 +481,48 @@
+     length_factors: Vec<f64>,
+     postings: HashMap<String, Vec<(usize, usize)>>,
+ }
++
++// Rare terms and selective filters should not allocate one score per stored
++// chunk. Dense storage remains cheaper for broad matches, so choose it only
++// when the posting/eligibility upper bound can cover a substantial fraction.
++enum LexicalScores {
++    Sparse(HashMap<usize, f64>),
++    Dense(Vec<f64>),
++}
++
++impl Default for LexicalScores {
++    fn default() -> Self {
++        Self::Sparse(HashMap::new())
++    }
++}
++
++impl LexicalScores {
++    fn get(&self, row: usize) -> f64 {
++        match self {
++            Self::Sparse(scores) => scores.get(&row).copied().unwrap_or(0.0),
++            Self::Dense(scores) => scores[row],
++        }
++    }
++
++    fn add(&mut self, row: usize, score: f64) {
++        match self {
++            Self::Sparse(scores) => *scores.entry(row).or_default() += score,
++            Self::Dense(scores) => scores[row] += score,
++        }
++    }
++
++    fn positive(&self) -> Vec<(usize, f64)> {
++        match self {
++            Self::Sparse(scores) => scores.iter().map(|(&row, &score)| (row, score)).collect(),
++            Self::Dense(scores) => scores
++                .iter()
++                .copied()
++                .enumerate()
++                .filter(|(_, score)| *score > 0.0)
++                .collect(),
++        }
++    }
++}
+ struct LexicalCacheEntry {
+     owner: Weak<RwLock<Catalog>>,
+     collection: String,
+@@ -596,9 +638,18 @@
+         terms: &BTreeSet<String>,
+         chunks: &Table,
+         limit: usize,
+-        eligible: Option<&[bool]>,
+-    ) -> (Vec<f64>, Vec<(usize, f64)>) {
+-        let mut scores = vec![0.0; self.length_factors.len()];
++        eligible: Option<&[usize]>,
++    ) -> (LexicalScores, Vec<(usize, f64)>, f64) {
++        let upper_bound = terms
++            .iter()
++            .filter_map(|term| self.postings.get(term))
++            .fold(0usize, |count, rows| count.saturating_add(rows.len()))
++            .min(eligible.map_or(self.length_factors.len(), <[usize]>::len));
++        let mut scores = if upper_bound.saturating_mul(8) < self.length_factors.len() {
++            LexicalScores::default()
++        } else {
++            LexicalScores::Dense(vec![0.0; self.length_factors.len()])
++        };
+         let count = self.length_factors.len() as f64;
+         // Sorted query terms ensure stable floating-point accumulation.
+         for term in terms {
+@@ -607,21 +658,32 @@
+             };
+             let frequency = postings.len() as f64;
+             let idf = (1.0 + (count - frequency + 0.5) / (frequency + 0.5)).ln();
+-            for &(row, frequency) in postings {
+-                if eligible.is_some_and(|rows| !rows[row]) {
+-                    continue;
+-                }
++            let mut add = |row: usize, frequency: usize| {
+                 let tf = frequency as f64;
+                 let denominator = tf + self.length_factors[row];
+-                scores[row] += idf * tf * 2.2 / denominator;
++                scores.add(row, idf * tf * 2.2 / denominator);
++            };
++            if let Some(rows) =
++                eligible.filter(|rows| rows.len().saturating_mul(8) < postings.len())
++            {
++                // Postings retain row order. Probe a small eligible set rather
++                // than walking a common term across the entire collection;
++                // global document frequency and length normalization stay intact.
++                for &row in rows {
++                    if let Ok(position) = postings.binary_search_by_key(&row, |(row, _)| *row) {
++                        add(row, postings[position].1);
++                    }
++                }
++            } else {
++                for &(row, frequency) in postings {
++                    if eligible.is_none_or(|rows| rows.binary_search(&row).is_ok()) {
++                        add(row, frequency);
++                    }
++                }
+             }
+         }
+-        let mut ranked = scores
+-            .iter()
+-            .copied()
+-            .enumerate()
+-            .filter(|(_, score)| *score > 0.0)
+-            .collect::<Vec<_>>();
++        let mut ranked = scores.positive();
++        let maximum = ranked.iter().map(|(_, score)| *score).fold(0.0, f64::max);
+         let compare = |(left, a): &(usize, f64), (right, b): &(usize, f64)| {
+             b.total_cmp(a)
+                 .then_with(|| compare_sort_values(&chunks.rows[*left][0], &chunks.rows[*right][0]))
+@@ -631,7 +693,7 @@
+             ranked.truncate(limit);
+         }
+         ranked.sort_by(compare);
+-        (scores, ranked)
++        (scores, ranked, maximum)
+     }
+ }
+ 
+@@ -819,10 +881,7 @@
+         let chunks = table(&catalog, &info.tables.chunks)?;
+         let document_table = table(&catalog, &info.tables.documents)?;
+         let eligible = filters::eligible_chunks(document_table, chunks, &document_filters)?;
+-        if eligible
+-            .as_ref()
+-            .is_some_and(|rows| !rows.iter().any(|allowed| *allowed))
+-        {
++        if eligible.as_ref().is_some_and(Vec::is_empty) {
+             return Ok(GraphRagSnapshot {
+                 collection: info.config.name,
+                 revision: catalog.revision,
+@@ -834,22 +893,11 @@
+             });
+         }
+         let allowed_rows = eligible
+-            .as_ref()
+-            .map(|rows| {
+-                rows.iter()
+-                    .enumerate()
+-                    .filter_map(|(row, allowed)| allowed.then_some(row))
+-                    .collect::<Vec<_>>()
+-            })
++            .as_deref()
+             .filter(|rows| rows.len() != chunks.rows.len());
+         let lookup = id_index(chunks)?;
+-        let documents = document_table
+-            .rows
+-            .iter()
+-            .map(|row| text_at(row, 0).map(|id| (id, row)))
+-            .collect::<Result<HashMap<_, _>>>()?;
+         let mut scores: HashMap<usize, CandidateScore> = HashMap::new();
+-        let mut query_similarities = vec![None; chunks.rows.len()];
++        let mut query_similarities = HashMap::new();
+         if request.vector_weight > 0.0 {
+             let result = run_typed_vector_search_in_rows(
+                 chunks,
+@@ -863,32 +911,34 @@
+                     limit: request.candidate_limit,
+                 },
+                 &self.compute,
+-                allowed_rows.as_deref(),
++                allowed_rows,
+             )?;
+             for (rank, row) in result.rows.iter().enumerate() {
+                 let index = *lookup
+                     .get(&UniqueKey::Text(text_at(row, 0)?.into()))
+                     .ok_or_else(|| invalid("vector search returned an unknown chunk"))?;
+-                query_similarities[index] = Some((1.0 - number_at(row, 1)?).clamp(-1.0, 1.0));
++                query_similarities.insert(index, (1.0 - number_at(row, 1)?).clamp(-1.0, 1.0));
+                 scores.entry(index).or_default().fusion +=
+                     request.vector_weight / (RRF_OFFSET + rank as f64 + 1.0);
+             }
+         }
+         let mut lexical_cache_hit = false;
+-        let mut lexical_scores = vec![0.0; chunks.rows.len()];
++        let mut lexical_scores = LexicalScores::default();
++        let mut lexical_max = 0.0;
+         if request.lexical_weight > 0.0 && !terms.is_empty() {
+             let (index, cache_hit) =
+                 lexical_index(&self.catalog, &info.config.name, chunks, &terms)?;
+             lexical_cache_hit = cache_hit;
+-            let (all_scores, lexical_ranks) =
+-                index.score(&terms, chunks, request.candidate_limit, eligible.as_deref());
++            let (all_scores, lexical_ranks, maximum) =
++                index.score(&terms, chunks, request.candidate_limit, allowed_rows);
+             lexical_scores = all_scores;
++            lexical_max = maximum;
+             for (rank, (index, _)) in lexical_ranks.into_iter().enumerate() {
+                 scores.entry(index).or_default().fusion +=
+                     request.lexical_weight / (RRF_OFFSET + rank as f64 + 1.0);
+             }
+             for (index, score) in &mut scores {
+-                score.lexical = lexical_scores[*index];
++                score.lexical = lexical_scores.get(*index);
+             }
+         }
+         let mut ranked = scores.keys().copied().collect::<Vec<_>>();
+@@ -911,11 +961,23 @@
+             lookup,
+             scores: &scores,
+             lexical_scores: &lexical_scores,
++            lexical_max,
+             similarities: query_similarities,
+-            eligible: eligible.as_deref(),
++            eligible: allowed_rows,
+             max_seeds_per_document,
+         }
+         .expand(&ranked)?;
++        // Only admitted passages need citations. Reuse the maintained document
++        // index instead of rebuilding a map of every document per query.
++        let document_ids = id_index(document_table)?;
++        let mut documents = HashMap::new();
++        for admission in &admitted {
++            let document_id = text_at(&chunks.rows[admission.row], 1)?;
++            let position = document_ids
++                .get(&UniqueKey::Text(document_id.into()))
++                .ok_or_else(|| invalid("graph chunk references a missing document"))?;
++            documents.insert(document_id, &document_table.rows[*position]);
++        }
+         let mut candidates = Vec::with_capacity(admitted.len());
+         for admission in admitted {
+             let row = &chunks.rows[admission.row];
+--- a/src/engine/graph_traversal.rs
++++ b/src/engine/graph_traversal.rs
+@@ -38,9 +38,10 @@
+     pub edges: &'a Table,
+     pub lookup: &'a HashMap<UniqueKey, usize>,
+     pub scores: &'a HashMap<usize, CandidateScore>,
+-    pub lexical_scores: &'a [f64],
+-    pub similarities: Vec<Option<f64>>,
+-    pub eligible: Option<&'a [bool]>,
++    pub lexical_scores: &'a LexicalScores,
++    pub lexical_max: f64,
++    pub similarities: HashMap<usize, f64>,
++    pub eligible: Option<&'a [usize]>,
+     pub max_seeds_per_document: Option<usize>,
+ }
+ 
+@@ -87,6 +88,13 @@
+                 retrieval_path: None,
+             })
+             .collect::<Vec<_>>();
++        if request.max_hops == 0 {
++            return Ok(Expansion {
++                admitted,
++                traversal_seed_ids,
++                truncated: ranked.len() > request.candidate_limit,
++            });
++        }
+         let direct = admitted
+             .iter()
+             .enumerate()
+@@ -105,12 +113,15 @@
+                 },
+             })
+             .collect::<Vec<_>>();
+-        let mut best_path = vec![0.0f64; self.chunks.rows.len()];
++        let mut best_path = HashMap::new();
+         for candidate in &frontier {
+-            best_path[candidate.row] = candidate.strength;
++            best_path.insert(candidate.row, candidate.strength);
+         }
+         let mut context: HashMap<usize, Evidence> = HashMap::new();
+-        let lexical_max = self.lexical_scores.iter().copied().fold(0.0, f64::max);
++        let lexical_max = self.lexical_max;
++        // Memoization only avoids repeated exact cosine work. Bound it by the
++        // query beam, even when an expanded hub has collection-sized degree.
++        let similarity_cache_limit = request.candidate_limit * (request.max_hops + 1);
+         let outgoing = self
+             .edges
+             .indexes
+@@ -147,7 +158,10 @@
+                             .lookup
+                             .get(&UniqueKey::Text(text_at(row, *endpoint)?.into()))
+                             .ok_or_else(|| invalid("graph edge references a missing chunk"))?;
+-                        if self.eligible.is_some_and(|rows| !rows[target]) {
++                        if self
++                            .eligible
++                            .is_some_and(|rows| rows.binary_search(&target).is_err())
++                        {
+                             continue;
+                         }
+                         targets
+@@ -167,17 +181,17 @@
+                 let mut neighbors = Vec::with_capacity(targets.len());
+                 for (row, (weight, edge_index)) in targets {
+                     let original = self.scores.get(&row).copied().unwrap_or(CandidateScore {
+-                        lexical: self.lexical_scores[row],
++                        lexical: self.lexical_scores.get(row),
+                         fusion: 0.0,
+                     });
+                     // Separate structural strength from query fit so a weakly
+                     // matching bridge can still lead to useful evidence.
+                     let strength = (source.strength * 0.5 * weight).max(original.fusion);
+-                    if strength <= best_path[row] {
++                    if strength <= best_path.get(&row).copied().unwrap_or(0.0) {
+                         continue;
+                     }
+                     let vector_fit = if request.vector_weight > 0.0 {
+-                        if let Some(similarity) = self.similarities[row] {
++                        if let Some(&similarity) = self.similarities.get(&row) {
+                             similarity.max(0.0)
+                         } else {
+                             let Some(Value::Vector(vector)) = self.chunks.rows[row].get(8) else {
+@@ -186,14 +200,16 @@
+                             let similarity = (1.0
+                                 - f64::from(request.query.cosine_distance(vector)?))
+                             .clamp(-1.0, 1.0);
+-                            self.similarities[row] = Some(similarity);
++                            if self.similarities.len() < similarity_cache_limit {
++                                self.similarities.insert(row, similarity);
++                            }
+                             similarity.max(0.0)
+                         }
+                     } else {
+                         0.0
+                     };
+                     let lexical_fit = if request.lexical_weight > 0.0 && lexical_max > 0.0 {
+-                        (self.lexical_scores[row] / lexical_max).clamp(0.0, 1.0)
++                        (self.lexical_scores.get(row) / lexical_max).clamp(0.0, 1.0)
+                     } else {
+                         0.0
+                     };
+@@ -230,7 +246,7 @@
+             truncated |= next.len() > request.candidate_limit;
+             top_evidence(&mut next, request.candidate_limit, self.chunks);
+             for proposal in &next {
+-                best_path[proposal.row] = proposal.strength;
++                best_path.insert(proposal.row, proposal.strength);
+                 if let Some(&position) = direct.get(&proposal.row) {
+                     admitted[position].score.fusion =
+                         admitted[position].score.fusion.max(proposal.score.fusion);
+--- /dev/null
++++ b/src/engine/graph_validation.rs
+@@ -0,0 +1,111 @@
++//! Reuse successful profile checks for an unchanged chunk-table generation.
++
++use super::*;
++use std::sync::OnceLock;
++
++const MAX_VALIDATED_GENERATIONS: usize = 128;
++
++#[derive(Default)]
++struct ProfileCache(VecDeque<(u64, usize, String)>);
++
++impl ProfileCache {
++    fn contains(&mut self, storage_id: u64, rows: usize, profile: &str) -> bool {
++        let Some(position) = self
++            .0
++            .iter()
++            .position(|entry| entry.0 == storage_id && entry.1 == rows && entry.2 == profile)
++        else {
++            return false;
++        };
++        let entry = self.0.remove(position).expect("existing cache entry");
++        self.0.push_back(entry);
++        true
++    }
++
++    fn insert(&mut self, storage_id: u64, rows: usize, profile: &str) {
++        if self.contains(storage_id, rows, profile) {
++            return;
++        }
++        while self.0.len() >= MAX_VALIDATED_GENERATIONS {
++            self.0.pop_front();
++        }
++        self.0.push_back((storage_id, rows, profile.into()));
++    }
++}
++
++static PROFILES: OnceLock<Mutex<ProfileCache>> = OnceLock::new();
++
++pub(super) fn validate_profiles(chunks: &Table, profile: &str) -> Result<()> {
++    // Dense storage IDs are globally unique content generations, not addresses.
++    // Append and every UPDATE/DELETE (including profile/text-only edits) change
++    // them; restore/recreate allocates fresh IDs. Catalog clones preserve IDs
++    // only while the chunk contents are unchanged. This is also the lexical
++    // cache's invalidation contract; selective rebuilds must preserve it.
++    let generation = chunks
++        .vector_columns
++        .get(&8)
++        .filter(|storage| storage.row_count == chunks.rows.len())
++        .map(|storage| storage.storage_id);
++    let cache = PROFILES.get_or_init(|| Mutex::new(ProfileCache::default()));
++    if let Some(id) = generation {
++        if cache
++            .lock()
++            .is_ok_and(|mut cache| cache.contains(id, chunks.rows.len(), profile))
++        {
++            return Ok(());
++        }
++    }
++    // Do not retain failed checks or hold the cache mutex while scanning.
++    for row in &chunks.rows {
++        if text_at(row, 7)? != profile {
++            return Err(invalid(
++                "stored chunks do not match the collection embedding profile",
++            ));
++        }
++    }
++    remember_valid_profiles(chunks, profile);
++    Ok(())
++}
++
++/// Record a proven-valid generation. In addition to the full check above, a
++/// graph append can call this while holding the write lock: the old generation
++/// was checked by collection(), and every appended profile was constructed
++/// from that same validated profile. Never call for arbitrary SQL mutations.
++pub(super) fn remember_valid_profiles(chunks: &Table, profile: &str) {
++    if let Some(storage) = chunks
++        .vector_columns
++        .get(&8)
++        .filter(|storage| storage.row_count == chunks.rows.len())
++    {
++        if let Ok(mut cache) = PROFILES
++            .get_or_init(|| Mutex::new(ProfileCache::default()))
++            .lock()
++        {
++            cache.insert(storage.storage_id, chunks.rows.len(), profile);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn successful_generations_are_bounded_and_profile_specific() {
++        let mut cache = ProfileCache::default();
++        cache.insert(1, 2, "profile-a");
++        assert!(cache.contains(1, 2, "profile-a"));
++        assert!(!cache.contains(2, 2, "profile-a"));
++        assert!(!cache.contains(1, 3, "profile-a"));
++        assert!(!cache.contains(1, 2, "profile-b"));
++        for generation in 2..=MAX_VALIDATED_GENERATIONS as u64 + 1 {
++            cache.insert(generation, 2, "profile-a");
++        }
++        assert_eq!(cache.0.len(), MAX_VALIDATED_GENERATIONS);
++        assert!(!cache.contains(1, 2, "profile-a"));
++        assert!(cache.contains(2, 2, "profile-a"));
++        cache.insert(1000, 2, "profile-a");
++        assert!(!cache.contains(3, 2, "profile-a"));
++        assert!(cache.contains(2, 2, "profile-a"));
++    }
++}
+--- /dev/null
++++ b/src/engine/table_map.rs
+@@ -0,0 +1,262 @@
++//! Catalog snapshots share unchanged tables. Mutable access detaches only the
++//! requested table, preserving transaction rollback and snapshot isolation.
++
++use std::collections::HashMap;
++use std::ops::Index;
++use std::sync::Arc;
++
++use super::Table;
++
++#[derive(Clone, Default, Debug)]
++pub(crate) struct TableMap {
++    tables: HashMap<String, Arc<Table>>,
++}
++
++impl TableMap {
++    pub(crate) fn len(&self) -> usize {
++        self.tables.len()
++    }
++
++    pub(crate) fn contains_key(&self, name: &str) -> bool {
++        self.tables.contains_key(name)
++    }
++
++    pub(crate) fn get(&self, name: &str) -> Option<&Table> {
++        self.tables.get(name).map(Arc::as_ref)
++    }
++
++    pub(crate) fn get_mut(&mut self, name: &str) -> Option<&mut Table> {
++        self.tables.get_mut(name).map(Arc::make_mut)
++    }
++
++    pub(crate) fn insert(&mut self, name: String, table: Table) -> Option<Arc<Table>> {
++        self.tables.insert(name, Arc::new(table))
++    }
++
++    pub(crate) fn remove(&mut self, name: &str) -> Option<Arc<Table>> {
++        self.tables.remove(name)
++    }
++
++    pub(crate) fn keys(&self) -> impl ExactSizeIterator<Item = &String> {
++        self.tables.keys()
++    }
++
++    pub(crate) fn values(&self) -> impl ExactSizeIterator<Item = &Table> {
++        self.tables.values().map(Arc::as_ref)
++    }
++
++    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (&String, &Table)> {
++        self.tables
++            .iter()
++            .map(|(name, table)| (name, table.as_ref()))
++    }
++}
++
++impl Index<&str> for TableMap {
++    type Output = Table;
++
++    fn index(&self, name: &str) -> &Self::Output {
++        &self.tables[name]
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::engine::{Catalog, Column, DataType, Database, ExecutionResult, Value};
++
++    fn fixture() -> Database {
++        let database = Database::new();
++        database
++            .execute(
++                "CREATE TABLE items (id INTEGER PRIMARY KEY, title TEXT, embedding VECTOR(2));
++                 CREATE INDEX items_title ON items (title);
++                 INSERT INTO items VALUES (1, 'before', [1, 0]), (2, 'second', [0, 1]);
++                 CREATE TABLE unrelated (id INTEGER PRIMARY KEY, title TEXT);
++                 INSERT INTO unrelated VALUES (7, 'untouched')",
++            )
++            .unwrap();
++        database
++    }
++
++    #[test]
++    fn cloned_catalog_shares_tables_until_first_mutable_access() {
++        let database = fixture();
++        let original = database.catalog.read().unwrap().clone();
++        let mut staged = original.clone();
++        for name in original.tables.keys() {
++            assert!(std::ptr::eq(
++                original.tables.get(name).unwrap(),
++                staged.tables.get(name).unwrap()
++            ));
++        }
++
++        staged.tables.get_mut("items").unwrap().rows[0][1] = Value::Text("staged".into());
++        let detached = std::ptr::from_ref(&staged.tables["items"]);
++        assert!(!std::ptr::eq(&original.tables["items"], detached));
++        assert!(std::ptr::eq(
++            &original.tables["unrelated"],
++            &staged.tables["unrelated"]
++        ));
++        assert_eq!(
++            original.tables["items"].rows[0][1],
++            Value::Text("before".into())
++        );
++        // Once detached, another mutable access must not copy the table again.
++        assert!(std::ptr::eq(
++            staged.tables.get_mut("items").unwrap(),
++            detached
++        ));
++        assert!(staged.tables.get_mut("missing").is_none());
++    }
++
++    #[test]
++    fn successful_transaction_detaches_only_changed_tables_and_indexes() {
++        let database = fixture();
++        let before = database.catalog.read().unwrap().clone();
++        database
++            .execute(
++                "UPDATE items SET id = 3, title = 'after', embedding = [2, 3] WHERE id = 1;
++                 DROP INDEX items_title; CREATE INDEX items_id ON items (id)",
++            )
++            .unwrap();
++        let after = database.catalog.read().unwrap();
++        assert!(std::ptr::eq(
++            &before.tables["unrelated"],
++            &after.tables["unrelated"]
++        ));
++        assert!(!std::ptr::eq(
++            &before.tables["items"],
++            &after.tables["items"]
++        ));
++        assert_eq!(before.tables["items"].rows[0][0], Value::Integer(1));
++        assert_eq!(after.tables["items"].rows[0][0], Value::Integer(3));
++        assert!(before.tables["items"].indexes.contains_key("items_title"));
++        assert!(!before.tables["items"].indexes.contains_key("items_id"));
++        assert!(!after.tables["items"].indexes.contains_key("items_title"));
++        assert!(after.tables["items"].indexes.contains_key("items_id"));
++        assert_eq!(
++            before.tables["items"].vector_columns[&2]
++                .get(0)
++                .unwrap()
++                .values,
++            [1.0, 0.0]
++        );
++        assert_eq!(
++            after.tables["items"].vector_columns[&2]
++                .get(0)
++                .unwrap()
++                .values,
++            [2.0, 3.0]
++        );
++    }
++
++    #[test]
++    fn failed_transaction_keeps_original_table_identity_data_and_revision() {
++        let database = fixture();
++        let before = database.catalog.read().unwrap().clone();
++        assert!(database
++            .execute(
++                "UPDATE items SET title = 'discard', embedding = [9, 9] WHERE id = 1;
++                 DROP INDEX items_title;
++                 DROP TABLE unrelated;
++                 CREATE TABLE transient (id INTEGER);
++                 INSERT INTO items VALUES (2, 'duplicate', [5, 5])",
++            )
++            .is_err());
++        let after = database.catalog.read().unwrap();
++        assert_eq!(before.revision, after.revision);
++        assert_eq!(before.durable_sequence, after.durable_sequence);
++        assert_eq!(before.tables.len(), after.tables.len());
++        for name in before.tables.keys() {
++            assert!(std::ptr::eq(
++                before.tables.get(name).unwrap(),
++                after.tables.get(name).unwrap()
++            ));
++        }
++        assert!(!after.tables.contains_key("transient"));
++    }
++
++    #[test]
++    fn frozen_snapshot_remains_serializable_after_live_mutations() {
++        let database = fixture();
++        let before = database.catalog.read().unwrap().clone();
++        database
++            .execute(
++                "DELETE FROM items WHERE id = 1;
++                 INSERT INTO items VALUES (3, 'new', [3, 4]);
++                 DROP INDEX items_title;
++                 DROP TABLE unrelated",
++            )
++            .unwrap();
++        let path = std::env::temp_dir().join(format!(
++            "vectors-cow-snapshot-{}-{}.vdb",
++            std::process::id(),
++            crate::engine::next_vector_storage_id()
++        ));
++        crate::storage::save(&before, &path).unwrap();
++        let restored = Database::open(&path).unwrap();
++        std::fs::remove_file(path).unwrap();
++        assert_eq!(restored.tables().unwrap(), ["items", "unrelated"]);
++        let ExecutionResult::Query(result) = restored
++            .execute("SELECT id, embedding FROM items WHERE title = 'before'")
++            .unwrap()
++            .remove(0)
++        else {
++            panic!("expected query result");
++        };
++        assert_eq!(
++            result.rows,
++            vec![vec![
++                Value::Integer(1),
++                before.tables["items"].rows[0][2].clone()
++            ]]
++        );
++        assert_eq!(restored.indexes("items").unwrap()[0].name, "items_title");
++        assert!(restored
++            .execute("INSERT INTO items VALUES (1, 'duplicate', [0, 0])")
++            .is_err());
++    }
++
++    #[test]
++    #[ignore = "manual catalog clone microbenchmark; run with --release --ignored --nocapture"]
++    fn catalog_clone_benchmark() {
++        let mut catalog = Catalog::default();
++        for table_index in 0..16 {
++            let columns = vec![Column {
++                name: "text".into(),
++                data_type: DataType::Text,
++                nullable: false,
++                unique: false,
++            }];
++            let rows = (0..2_000)
++                .map(|row| {
++                    vec![Value::Text(format!(
++                        "{table_index}:{row}:{}",
++                        "x".repeat(256)
++                    ))]
++                })
++                .collect();
++            catalog.tables.insert(
++                format!("table_{table_index}"),
++                Table::new(columns, rows, HashMap::new()),
++            );
++        }
++        let legacy_started = std::time::Instant::now();
++        for _ in 0..30 {
++            let deep_copy = catalog
++                .tables
++                .iter()
++                .map(|(name, table)| (name.clone(), table.clone()))
++                .collect::<HashMap<_, _>>();
++            std::hint::black_box(deep_copy);
++        }
++        let legacy_us = legacy_started.elapsed().as_secs_f64() * 1_000_000.0 / 30.0;
++        let shared_started = std::time::Instant::now();
++        for _ in 0..30_000 {
++            std::hint::black_box(catalog.clone());
++        }
++        let shared_us = shared_started.elapsed().as_secs_f64() * 1_000_000.0 / 30_000.0;
++        println!("catalog clone: 16 tables, 32000 text rows; deep clone {legacy_us:.2} us; shared clone {shared_us:.2} us");
++    }
++}

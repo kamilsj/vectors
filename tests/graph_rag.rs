@@ -158,6 +158,169 @@ fn hybrid_rrf_recovers_rare_lexical_match_and_is_deterministic() {
 }
 
 #[test]
+fn keyword_graph_retrieval_ignores_query_vector_and_keeps_mmr_and_provenance() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let db = database();
+    ingest(&db, doc("seed", &[("ZX419 journal", [1.0, 0.0, 0.0])]));
+    ingest(
+        &db,
+        doc("context", &[("recovery procedure", [0.0, 1.0, 0.0])]),
+    );
+    relationship(&db, "4:seed:0", "7:context:0", "supports", 0.8);
+    let mut query = request();
+    query.query_text = "ZX419".into();
+    query.vector_weight = 0.0;
+    query.max_hops = 1;
+    query.query = Vector::new(vec![0.0; 3]).unwrap();
+    let mut diverse = selection();
+    diverse.diversity = 0.3;
+    let mut first = db
+        .graph_rag_candidates(query.clone())
+        .unwrap()
+        .finalize(diverse.clone(), None)
+        .unwrap();
+    assert_eq!(first.hits.len(), 2);
+    assert_eq!(first.hits[0].hit.document_id, "seed");
+    assert!(first.hits.iter().all(|hit| hit.hit.similarity.is_none()));
+    assert_eq!(first.traversal_seed_ids, vec!["4:seed:0"]);
+    let context = first
+        .hits
+        .iter()
+        .find(|hit| hit.hit.document_id == "context")
+        .unwrap();
+    assert_eq!(context.hit.depth, 1);
+    let path = context.retrieval_path.as_ref().unwrap();
+    assert_eq!(path.seed_chunk_id, "4:seed:0");
+    assert_eq!(path.edges, first.edges);
+    query.query = Vector::new(vec![-1.0, 2.0, 3.0]).unwrap();
+    let second = db
+        .graph_rag_candidates(query.clone())
+        .unwrap()
+        .finalize(diverse, None)
+        .unwrap();
+    first.lexical_cache_hit = second.lexical_cache_hit;
+    assert_eq!(first, second);
+    query.query = Vector::new(vec![0.0; 2]).unwrap();
+    assert!(matches!(
+        db.graph_rag_candidates(query.clone()),
+        Err(Error::DimensionMismatch { .. })
+    ));
+    query.query = Vector::new(vec![0.0; 3]).unwrap();
+    query.vector_weight = 1.0;
+    assert!(matches!(
+        db.graph_rag_candidates(query),
+        Err(Error::ZeroNorm)
+    ));
+}
+
+#[test]
+fn rag_id_lookups_follow_sql_renames_row_compaction_replacement_and_reopen() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let db = database();
+    ingest(&db, doc("first", &[("unrelated", [1.0, 0.0, 0.0])]));
+    ingest(&db, doc("seed", &[("needle", [0.0, 0.0, 1.0])]));
+    ingest(
+        &db,
+        doc("context", &[("original context", [0.0, 1.0, 0.0])]),
+    );
+    relationship(&db, "4:seed:0", "7:context:0", "supports", 0.8);
+    let mut keyword = request();
+    keyword.query_text = "needle".into();
+    keyword.vector_weight = 0.0;
+    keyword.max_hops = 1;
+    let before = db.graph_rag_candidates(keyword.clone()).unwrap();
+    assert_eq!(before.traversal_seed_ids, vec!["4:seed:0"]);
+    assert_eq!(before.candidates.len(), 2);
+    db.execute(
+        "UPDATE graph_rag_chunks SET chunk_id = 'renamed-seed' WHERE document_id = 'seed'; \
+        UPDATE graph_rag_edges SET from_chunk = 'renamed-seed' WHERE from_chunk = '4:seed:0'",
+    )
+    .unwrap();
+    db.graph_delete_document("rag", "first", db.revision().unwrap())
+        .unwrap();
+    let assert_current = |db: &Database, expected_text: &str| {
+        let result = db
+            .graph_rag_candidates(keyword.clone())
+            .unwrap()
+            .finalize(selection(), None)
+            .unwrap();
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].hit.chunk_id, "renamed-seed");
+        assert_eq!(result.traversal_seed_ids, vec!["renamed-seed"]);
+        let context = result
+            .hits
+            .iter()
+            .find(|hit| hit.hit.document_id == "context")
+            .unwrap();
+        assert_eq!(context.hit.text, expected_text);
+        let path = context.retrieval_path.as_ref().unwrap();
+        assert_eq!(path.seed_chunk_id, "renamed-seed");
+        assert_eq!(path.edges[0].to_chunk, "7:context:0");
+        assert_eq!(result.edges, path.edges);
+        let mut vector_query = request();
+        vector_query.query = Vector::new(vec![0.0, 0.0, 1.0]).unwrap();
+        vector_query.lexical_weight = 0.0;
+        let vector = db.graph_rag_candidates(vector_query).unwrap();
+        assert_eq!(vector.candidates[0].hit.chunk_id, "renamed-seed");
+        assert_eq!(vector.candidates[0].hit.document_id, "seed");
+    };
+    assert_current(&db, "original context");
+    ingest(
+        &db,
+        doc("context", &[("replacement context", [0.0, 1.0, 0.0])]),
+    );
+    relationship(&db, "renamed-seed", "7:context:0", "supports", 0.8);
+    assert_current(&db, "replacement context");
+    let path =
+        std::env::temp_dir().join(format!("vectors-rag-id-index-{}.vdb", std::process::id()));
+    db.save(&path).unwrap();
+    let reopened = Database::open(&path).unwrap();
+    assert_current(&reopened, "replacement context");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn rag_id_lookups_reject_dangling_edges_even_without_expansion() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let db = database();
+    ingest(&db, doc("seed", &[("needle", [1.0, 0.0, 0.0])]));
+    ingest(&db, doc("context", &[("context", [0.0, 1.0, 0.0])]));
+    relationship(&db, "4:seed:0", "7:context:0", "supports", 0.8);
+    let mut query = request();
+    query.query_text = "needle".into();
+    query.vector_weight = 0.0;
+    assert_eq!(
+        db.graph_rag_candidates(query.clone())
+            .unwrap()
+            .candidates
+            .len(),
+        1
+    );
+    // Raw SQL may leave references behind; an index miss must still reject
+    // them during induced-edge checks as well as during graph traversal.
+    db.execute("DELETE FROM graph_rag_chunks WHERE document_id = 'context'")
+        .unwrap();
+    for hops in [0, 1] {
+        query.max_hops = hops;
+        assert!(matches!(db.graph_rag_candidates(query.clone()),
+            Err(Error::InvalidQuery(message)) if message == "graph edge references a missing chunk"));
+        let filtered = db
+            .graph_rag_candidates_with_traversal(
+                query.clone(),
+                vectors::GraphRagTraversal {
+                    kind: Some("other".into()),
+                    ..vectors::GraphRagTraversal::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(filtered.candidates.len(), 1);
+        assert!(filtered.edges.is_empty());
+    }
+    assert!(matches!(db.graph_browse(browse()),
+        Err(Error::InvalidQuery(message)) if message == "graph edge references a missing chunk"));
+}
+
+#[test]
 fn lexical_cache_invalidates_after_sql_graph_writes_and_snapshot_restore() {
     let _guard = TEST_LOCK.lock().unwrap();
     let db = database();

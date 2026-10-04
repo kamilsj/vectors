@@ -9,7 +9,16 @@ const assets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/assets/app.js", ["app.js", "text/javascript; charset=utf-8"]],
   ["/assets/app.css", ["app.css", "text/css; charset=utf-8"]],
+  ["/assets/pdf-import.js", ["pdf-import.js", "text/javascript; charset=utf-8"]],
+  ["/assets/rag-evaluation.mjs", ["rag-evaluation.mjs", "text/javascript; charset=utf-8"]],
 ]);
+
+async function addPdfAssets(directory, prefix = "vendor/pdfjs") {
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) await addPdfAssets(path.join(directory, entry.name), `${prefix}/${entry.name}`);
+    else if (entry.isFile()) assets.set(`/assets/${prefix}/${entry.name}`, [`${prefix}/${entry.name}`, entry.name.endsWith(".mjs") ? "text/javascript; charset=utf-8" : "application/octet-stream"]);
+  }
+}
 
 const server = http.createServer(async (request, response) => {
   const asset = assets.get(new URL(request.url, "http://localhost").pathname);
@@ -19,14 +28,14 @@ const server = http.createServer(async (request, response) => {
   }
   try {
     const content = await fs.readFile(path.join(__dirname, "../web", asset[0]));
-    response.writeHead(200, { "content-type": asset[1], "cache-control": "no-store" });
+    response.writeHead(200, { "content-type": asset[1], "cache-control": "no-store", "content-security-policy": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" });
     response.end(content);
   } catch {
     response.writeHead(500).end("Unable to load console asset");
   }
 });
 
-server.listen(Number(process.env.PORT || 4173), "127.0.0.1");
+addPdfAssets(path.join(__dirname, "../web/vendor/pdfjs")).then(() => server.listen(Number(process.env.PORT || 4173), "127.0.0.1"));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => server.close(() => process.exit(0)));
 }

@@ -302,6 +302,11 @@ fn configure_routes(config: &mut web::ServiceConfig) {
                 .wrap(Compress::default())
                 .route(web::get().to(console_script)),
         )
+        .service(
+            web::resource("/assets/{path:.*}")
+                .wrap(Compress::default())
+                .route(web::get().to(pdf_asset)),
+        )
         .route("/healthz", web::get().to(health))
         .route("/readyz", web::get().to(readiness))
         .route("/metrics", web::get().to(metrics))
@@ -347,13 +352,17 @@ static CONSOLE_JS: ConsoleAsset = ConsoleAsset::new(
 );
 
 struct ConsoleAsset {
-    body: &'static str,
+    body: &'static [u8],
     content_type: &'static str,
     etag: OnceLock<EntityTag>,
 }
 
 impl ConsoleAsset {
     const fn new(body: &'static str, content_type: &'static str) -> Self {
+        Self::binary(body.as_bytes(), content_type)
+    }
+
+    const fn binary(body: &'static [u8], content_type: &'static str) -> Self {
         Self {
             body,
             content_type,
@@ -383,6 +392,17 @@ async fn console_styles(request: HttpRequest) -> HttpResponse {
 
 async fn console_script(request: HttpRequest) -> HttpResponse {
     console_asset(&request, &CONSOLE_JS)
+}
+
+// The build-time allowlist includes the PDF parser, worker, and fonts in every
+// standalone binary. Requests never read arbitrary files from the host.
+include!(concat!(env!("OUT_DIR"), "/pdf_assets.rs"));
+
+async fn pdf_asset(request: HttpRequest) -> HttpResponse {
+    match PDF_ASSETS.iter().find(|(path, _)| *path == request.path()) {
+        Some((_, asset)) => console_asset(&request, asset),
+        None => HttpResponse::NotFound().finish(),
+    }
 }
 
 fn console_asset(request: &HttpRequest, asset: &ConsoleAsset) -> HttpResponse {
@@ -1824,6 +1844,63 @@ mod tests {
         let updated = ConsoleAsset::new("new content", "text/plain");
         assert!(original.etag().weak_eq(identical.etag()));
         assert!(!original.etag().weak_eq(updated.etag()));
+    }
+
+    #[actix_web::test]
+    async fn pdf_assets_are_embedded_and_requests_cannot_read_host_files() {
+        let app = actix_web::test::init_service(App::new().configure(configure)).await;
+        for path in [
+            "/assets/pdf-import.js",
+            "/assets/rag-evaluation.mjs",
+            "/assets/vendor/pdfjs/pdf.mjs",
+            "/assets/vendor/pdfjs/pdf.worker.mjs",
+        ] {
+            let request = actix_web::test::TestRequest::get().uri(path).to_request();
+            let response = actix_web::test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers().get("content-type").unwrap(),
+                "text/javascript; charset=utf-8"
+            );
+            let tag = response.headers().get("etag").unwrap().clone();
+            assert!(!actix_web::test::read_body(response).await.is_empty());
+            let request = actix_web::test::TestRequest::get()
+                .uri(path)
+                .insert_header(("if-none-match", tag))
+                .to_request();
+            assert_eq!(
+                actix_web::test::call_service(&app, request).await.status(),
+                StatusCode::NOT_MODIFIED
+            );
+        }
+        let binary = PDF_ASSETS
+            .iter()
+            .find(|(path, _)| path.ends_with(".bcmap"))
+            .unwrap();
+        let response = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::get()
+                .uri(binary.0)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            actix_web::test::read_body(response).await.as_ref(),
+            binary.1.body
+        );
+        for path in [
+            "/assets/../../Cargo.toml",
+            "/assets/.env.local",
+            "/assets/vendor/pdfjs/missing.mjs",
+        ] {
+            let response = actix_web::test::call_service(
+                &app,
+                actix_web::test::TestRequest::get().uri(path).to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[test]

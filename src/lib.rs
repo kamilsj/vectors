@@ -26,7 +26,8 @@ pub use engine::{
     VectorQueryIntent, VectorSearch, VectorSearchFilter, VectorSearchMetric,
 };
 pub use engine::{
-    GraphBrowseRequest, GraphBrowseResult, GraphChunkInput, GraphChunkPreview, GraphCollection,
+    GraphBrowseRequest, GraphBrowseResult, GraphCapacityLimits, GraphCapacityUsage,
+    GraphChunkInput, GraphChunkPreview, GraphCollection, GraphCollectionCapacity,
     GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentColumn,
     GraphDocumentInput, GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit,
     GraphIngestRequest, GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode,

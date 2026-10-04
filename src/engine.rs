@@ -21,8 +21,10 @@ use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
 mod graph;
 mod join;
+mod table_map;
 pub use graph::{
-    GraphBrowseRequest, GraphBrowseResult, GraphChunkInput, GraphChunkPreview, GraphCollection,
+    GraphBrowseRequest, GraphBrowseResult, GraphCapacityLimits, GraphCapacityUsage,
+    GraphChunkInput, GraphChunkPreview, GraphCollection, GraphCollectionCapacity,
     GraphCollectionConfig, GraphDeleteResult, GraphDocument, GraphDocumentColumn,
     GraphDocumentInput, GraphDocumentPreview, GraphEdge, GraphEmbeddingProfile, GraphHit,
     GraphIngestRequest, GraphIngestResult, GraphNeighborhoodDirection, GraphNeighborhoodNode,
@@ -32,6 +34,7 @@ pub use graph::{
     GraphRelationshipDeleteResult, GraphRelationshipRequest, GraphRelationshipResult,
     GraphSearchRequest, GraphSearchResult, GraphTables,
 };
+pub(crate) use table_map::TableMap;
 
 /// Logical types supported by the in-memory storage engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -500,7 +503,7 @@ pub(crate) struct HashIndex {
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Catalog {
-    pub(crate) tables: HashMap<String, Table>,
+    pub(crate) tables: TableMap,
     pub(crate) revision: u64,
     pub(crate) durable_sequence: u64,
 }
@@ -867,6 +870,10 @@ impl Database {
             .read()
             .map_err(|_| Error::LockPoisoned)?
             .clone();
+        // Release the staging references before publishing, so another writer
+        // does not copy a table merely because this completed transaction still
+        // owns its private snapshot while checkpoint maintenance runs.
+        drop(staging);
         let changed = committed.revision != catalog.revision;
         let checkpoint_needed = if changed {
             if let Some(persistent) = &self.persistent {
@@ -1594,10 +1601,7 @@ impl Database {
         let names = names.iter().map(object_name).collect::<Vec<_>>();
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
         if !if_exists {
-            if let Some(missing) = names
-                .iter()
-                .find(|name| !catalog.tables.contains_key(*name))
-            {
+            if let Some(missing) = names.iter().find(|name| !catalog.tables.contains_key(name)) {
                 return Err(Error::TableNotFound(missing.clone()));
             }
         }
@@ -1688,11 +1692,18 @@ impl Database {
         }
         let mut rows_affected = 0;
         for name in names {
-            for table in catalog.tables.values_mut() {
-                if table.indexes.remove(&name).is_some() {
-                    rows_affected += 1;
-                    break;
-                }
+            // Find the owner without requesting mutable access to unrelated
+            // tables: a staged catalog shares those with the live catalog.
+            let owner = catalog.tables.iter().find_map(|(table_name, table)| {
+                table
+                    .indexes
+                    .contains_key(&name)
+                    .then(|| table_name.clone())
+            });
+            if let Some(owner) = owner {
+                let table = catalog.tables.get_mut(&owner).expect("index owner exists");
+                table.indexes.remove(&name);
+                rows_affected += 1;
             }
         }
         if rows_affected > 0 {

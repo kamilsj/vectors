@@ -40,8 +40,15 @@ broader CPU and GPU measurements remain necessary before changing device policy.
 
 ## Next: scale the working set
 
+- Use the [ten-million-document plan](docs/SCALING.md) to track chunk counts,
+  storage budgets, semantic-graph growth and acceptance tests. This is a target;
+  the current GraphRAG limit remains 10,000 chunks per collection.
+- Introduce disk-resident segments and bounded caches for text, vectors,
+  lexical postings and graph adjacency, with stable IDs and bounded recovery.
 - Add an approximate-nearest-neighbor index, beginning with HNSW, while keeping
-  exact search as the correctness oracle.
+  exact search as the correctness oracle. Compare disk/memory costs and
+  filtered recall with inverted-file alternatives before committing to the
+  large-corpus storage design.
 - Teach the planner to choose exact or ANN search from candidate count, filter
   selectivity, requested recall, and `LIMIT`.
 - Persist vector indexes with versioning and corruption validation.
@@ -51,7 +58,12 @@ broader CPU and GPU measurements remain necessary before changing device policy.
 - Add explicit host-memory accounting, configurable table/query budgets, and
   backpressure for very large ingestion requests.
 - Add streaming ingestion and partitioned index construction so input size does
-  not need to be represented as one request or one prospective catalog clone.
+  not need to be represented as one request or one memory-resident catalog.
+
+The current foundations share unchanged catalog tables, append new graph
+documents atomically, reuse validated profile generations, and avoid full
+chunk masks for selective retrieval. These reduce local work without changing
+the memory-resident storage model, exact search or collection limits.
 
 ANN support is complete only when index build cost, memory use, recall, filtered
 search behavior, persistence, and concurrent reads are measured and documented.

@@ -1,295 +1,1055 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Search, manage, and connect your vector data">
-  <title>vectors workspace</title>
-  <link rel="stylesheet" href="/assets/app.css">
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<meta content="Search, manage, and connect your vector data" name="description"/>
+<title>vectors workspace</title>
+<link href="/assets/app.css" rel="stylesheet"/>
 </head>
 <body>
-  <div class="app-shell">
-    <aside id="app-sidebar" class="sidebar">
-      <div class="brand"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div><div><strong>vectors</strong><small>Your data, within reach</small></div></div>
-      <nav class="primary-nav" aria-label="Workspace">
-        <button class="nav-item active" data-view="search" type="button"><span class="nav-icon" aria-hidden="true">⌕</span><span>Search</span></button>
-        <button class="nav-item" data-view="connections" type="button"><span class="nav-icon" aria-hidden="true">⌘</span><span>Connections</span></button>
-        <button class="nav-item" data-view="data" type="button"><span class="nav-icon" aria-hidden="true">▦</span><span>Data</span></button>
-        <button class="nav-item" data-view="console" type="button"><span class="nav-icon" aria-hidden="true">⌘</span><span>SQL</span></button>
-        <button class="nav-item" data-view="settings" type="button"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></button>
-      </nav>
-      <div class="sidebar-section"><div class="section-heading"><span>Tables</span><button id="refresh-tables" class="icon-button" type="button" title="Refresh tables" aria-label="Refresh tables">↻</button></div><div id="table-list" class="table-list" aria-live="polite"><div class="sidebar-empty">Connect to browse tables</div></div></div>
-      <div class="sidebar-footer"><button id="connection-button" class="connection" type="button"><span id="status-dot" class="status-dot"></span><span><strong id="status-label" role="status">Connecting</strong><small id="connection-host">localhost</small></span><span class="connection-arrow" aria-hidden="true">›</span></button><div class="version">vectors <span id="app-version">dev</span><span id="connection-latency"></span></div></div>
-    </aside>
-    <main class="workspace">
-      <header class="topbar"><button id="mobile-menu" class="mobile-menu" type="button" aria-label="Toggle navigation" aria-controls="app-sidebar" aria-expanded="false">☰</button><div><span class="eyebrow">WORKSPACE</span><h1 id="view-title">Search</h1></div><div class="topbar-actions"><button id="open-token" class="button ghost" type="button">Connection</button><button id="top-guide" class="button ghost" type="button">Help</button></div></header>
-      <div id="connection-notice" class="connection-notice" role="status" hidden><span id="connection-message"></span><button id="reconnect" class="button ghost compact" type="button">Reconnect</button></div>
+<div class="app-shell">
+<aside class="sidebar" id="app-sidebar">
+<div class="brand"><div aria-hidden="true" class="brand-mark"><span></span><span></span><span></span><span></span></div><div><strong>vectors</strong><small>Workspace</small></div></div>
+<nav aria-label="Workspace" class="primary-nav"><button class="nav-item active" data-view="connections" type="button"><span aria-hidden="true" class="nav-icon">⌘</span><span>Playground</span></button>
+<button class="nav-item" data-view="search" type="button"><span aria-hidden="true" class="nav-icon">⌕</span><span>Search</span></button>
 
-      <section id="view-search" class="view active">
-        <div class="workspace-heading"><div><h2>Find the meaning. Keep the context.</h2><p>Search your data with a question or a vector.</p></div><button class="button ghost" type="button" data-go="settings">Embedding settings <span aria-hidden="true">↗</span></button></div>
-        <div id="search-empty" class="empty-workspace panel" hidden><span class="empty-icon" aria-hidden="true">▦</span><h3>A place for your first documents</h3><p>Create a table, choose an embedding model, and add the text you want to search.</p><div class="inline-actions"><button class="button primary" data-go="data" type="button">Add your data</button><button class="button ghost" data-go="guide" type="button">Try an example</button></div></div>
-        <div class="search-layout">
-          <form id="search-form" class="panel search-form" novalidate>
-            <div class="form-section"><div class="form-section-body"><div class="form-row two"><label>Table<select id="search-table" required><option value="">Choose a table</option></select></label><label>Vector column<select id="search-vector-column" required><option value="">Choose a vector</option></select></label></div></div></div>
-            <div class="form-section"><div class="form-section-body">
-              <div class="segmented-control" role="group" aria-label="Search input"><button id="search-mode-text" type="button" aria-pressed="true">Text</button><button id="search-mode-vector" type="button" aria-pressed="false">Vector</button></div>
-              <div id="search-text-fields"><label>What are you looking for?<textarea id="search-text" rows="4" placeholder="e.g. How do I reset an account password?" required></textarea></label><p id="search-provider-note" class="provider-note">Loading embedding settings…</p><p class="privacy-note">Submitted text is sent to your selected embedding provider. Use the same model and dimensions as your documents; existing raw vectors do not carry model information.</p></div>
-              <div id="search-vector-fields" hidden><label>Comma-separated values<textarea id="search-vector" rows="4" placeholder="1.0, 0.0, 0.0"></textarea></label></div>
-              <div id="dimension-hint" class="field-hint">Select a vector column to see its dimensions.</div>
-              <div class="form-row two search-limit-row"><label>Results<input id="search-limit" type="number" min="1" max="1000" value="10" required></label><label>Metric<select id="search-metric"><option value="cosine">Cosine distance</option><option value="l2">Euclidean distance</option><option value="squared_l2">Squared L2</option><option value="dot_product">Dot product</option></select></label></div>
-            </div></div>
-            <details class="search-options"><summary>Filters and returned columns</summary><div class="form-row filter-row"><label>Column<select id="filter-column"><option value="">No filter</option></select></label><label>Operator<select id="filter-operator"><option value="eq">=</option><option value="ne">≠</option><option value="gt">&gt;</option><option value="gte">≥</option><option value="lt">&lt;</option><option value="lte">≤</option></select></label><label>Value<input id="filter-value" placeholder="e.g. support"></label></div><label>Return columns <small>blank for all scalar columns</small><input id="search-select" placeholder="id, title, content"></label></details>
-            <button id="search-submit" class="button primary search-submit" type="submit">Search <span aria-hidden="true">→</span></button>
-          </form>
-          <section class="panel search-results-panel"><div class="panel-header"><div><span class="panel-kicker">RESULTS</span><h2 id="search-results-title">Ready when you are</h2></div></div><div id="search-results" class="results-empty"><div class="search-empty-mark" aria-hidden="true">⌕</div><p>The closest matches will appear here, with their distance and source data.</p></div></section>
-        </div>
-      </section>
-
-      <section id="view-connections" class="view">
-        <div class="workspace-heading"><div><h2>See how your knowledge connects.</h2><p>Explore passages, follow relationships, and retrieve context across documents.</p></div><button id="graph-create-open" class="button primary" type="button">Create collection <span aria-hidden="true">+</span></button></div>
-        <div class="panel graph-workspace">
-          <div class="data-toolbar"><label>Collection<select id="graph-collection"><option value="">Choose a collection</option></select></label><div class="inline-actions"><button id="graph-refresh" type="button" class="button ghost">Refresh graph</button><button id="graph-add-open" type="button" class="button ghost">Add document</button><button id="graph-view-data" type="button" class="button ghost">View data</button><button id="graph-open-sql" type="button" class="button ghost">Open SQL</button></div></div>
-          <div class="graph-overview"><p id="graph-profile" class="provider-note">Collections keep a fixed embedding model for documents and questions.</p><p id="graph-status" class="inline-status" role="status">Open a collection to explore its connections.</p></div>
-          <div class="graph-mode-bar"><div><span id="graph-mode" class="panel-kicker">ALL PASSAGES</span><p id="graph-focus-title">Browse the collection, or explore a passage’s connections.</p></div><button id="graph-back-pages" type="button" class="button ghost compact" hidden>← Back to all passages</button></div>
-          <form id="graph-neighborhood-controls" class="graph-neighborhood-controls" hidden><div class="graph-neighborhood-fields"><label>Connection depth<select id="graph-neighborhood-hops"><option value="0">Root only</option><option value="1" selected>1 hop</option><option value="2">2 hops</option><option value="3">3 hops</option></select></label><label>Follow relationships<select id="graph-neighborhood-direction"><option value="both">Both directions</option><option value="outgoing">Outgoing</option><option value="incoming">Incoming</option></select></label><label>Minimum weight<input id="graph-neighborhood-min-weight" type="number" min="0" max="1" step="0.05" value="0" required></label><button id="graph-neighborhood-apply" type="submit" class="button ghost compact">Apply exploration filters</button></div><p class="field-hint">Explores this collection across page boundaries. Limited to 100 passages, 500 directed links, and 8 neighbors per passage. Type checkboxes below only hide drawn links. No provider requests.</p></form>
-          <div class="graph-explorer">
-            <div class="graph-stage">
-              <div class="graph-controls"><fieldset class="graph-filters"><legend class="sr-only">Visible relationships</legend><label><input type="checkbox" data-graph-kind="semantic" checked><span class="edge-swatch semantic"></span>Semantic</label><label><input type="checkbox" data-graph-kind="adjacent" checked><span class="edge-swatch adjacent"></span>Adjacent</label><label><input type="checkbox" data-graph-kind="custom" checked><span class="edge-swatch custom"></span>Custom</label></fieldset><div class="graph-zoom" role="group" aria-label="Graph zoom"><button id="graph-zoom-out" class="icon-button" type="button" aria-label="Zoom out graph">−</button><button id="graph-zoom-reset" class="icon-button" type="button" aria-label="Reset graph zoom">1×</button><button id="graph-zoom-in" class="icon-button" type="button" aria-label="Zoom in graph">+</button></div></div>
-              <div id="graph-visual" class="graph-visual"><svg id="graph-canvas" viewBox="0 0 800 460" role="group" aria-label="Document connections"></svg><div id="graph-empty" class="graph-empty"><span aria-hidden="true">⌘</span><h3>A map of your knowledge</h3><p>Create a collection, then add documents to reveal their connections.</p></div></div>
-              <div id="graph-legend" class="graph-legend" aria-label="Document colors"></div>
-              <div class="graph-page-controls"><span id="graph-range">0 passages</span><button id="graph-previous" type="button" class="button ghost compact" disabled>Previous graph page</button><button id="graph-next" type="button" class="button ghost compact" disabled>Next graph page</button></div>
-              <p id="graph-explanation" class="graph-explanation">Colors identify documents. Lines show cosine similarity, neighboring passages, or your own directed links. Proximity on this map is for readability; it does not measure relevance.</p>
-              <details class="graph-accessible-list"><summary>Browse passages as a list <span id="graph-list-count"></span></summary><div id="graph-node-list"></div></details>
-            </div>
-            <aside class="graph-detail-panel"><div id="graph-details"><span class="panel-kicker">PASSAGE DETAILS</span><h3>Follow a connection</h3><p>Select a point or a passage from the list to read its source and relationships.</p></div><form id="graph-relationship-form" hidden><h4>Add a directed relationship</h4><label>Link to passage<select id="graph-link-target" required></select></label><div class="form-row two"><label>Relationship name<input id="graph-link-kind" value="related_to" required pattern="[a-z][a-z0-9_]{0,63}" maxlength="64"></label><label>Weight<input id="graph-link-weight" type="number" min="0" max="1" step="0.01" value="1" required></label></div><p class="field-hint">Use a label such as supports or references. Custom links are your annotations, not inferred facts.</p><button id="graph-link-save" class="button ghost compact" type="submit">Add relationship</button></form></aside>
-          </div>
-        </div>
-        <details id="graph-document-panel" class="panel graph-document-panel"><summary><span>Add or replace a document</span><small>Preview chunks before embedding</small></summary><form id="graph-document-form" class="form-card" novalidate><div class="form-row three"><label>Document ID<input id="graph-document-id" required maxlength="256" placeholder="getting-started"></label><label>Title<input id="graph-document-title" placeholder="Getting started"></label><label>Source or URL<input id="graph-document-source" placeholder="https://… or a filename"></label></div><label>Document text<textarea id="graph-document-text" rows="7" required placeholder="Paste the text you want to connect and search."></textarea></label><section id="graph-document-fields-panel" class="document-fields-panel" hidden><h4>Document fields</h4><p class="field-hint">These values stay in structured columns for filtering and SQL. They are not included in embeddings.</p><div id="graph-document-fields" class="document-fields"></div></section><details class="form-advanced"><summary>Chunking options</summary><div class="form-row three"><label>Characters per chunk<input id="graph-chunk-size" type="number" min="1" max="8000" value="1200" required></label><label>Overlap characters<input id="graph-chunk-overlap" type="number" min="0" max="7999" value="150" required></label><label>Maximum chunks<input id="graph-chunk-count" type="number" min="1" max="256" value="256" required></label></div><p class="field-hint">Limits count Unicode characters. Citation ranges use UTF-8 bytes. Long documents may require smaller uploads.</p></details><p class="privacy-note">Preview does not contact an AI provider. Generate and save sends chunk text with title and heading context to the collection’s embedding provider. Reusing a document ID replaces that document; an unchanged upload with intact chunks uses its existing embeddings.</p><div class="inline-actions"><button id="graph-preview" type="button" class="button ghost">Preview chunks</button><button id="graph-document-save" type="submit" class="button primary">Generate and save document</button></div><p id="graph-document-status" class="inline-status" role="status"></p><div id="graph-chunk-preview" class="graph-chunk-preview"></div></form></details>
-        <section class="panel graph-retrieval"><form id="graph-search-form" class="form-card" novalidate><span class="panel-kicker">RETRIEVE CONNECTED CONTEXT</span><h3>Ask across your documents</h3><label>Question<textarea id="graph-question" rows="3" required placeholder="What connects these ideas?"></textarea></label><div class="form-row two"><label>Ranking<select id="graph-reranker"><option value="local">Balanced hybrid · local</option><option value="voyage">Hybrid + Voyage reranking</option></select></label><label>Maximum results<input id="graph-result-limit" type="number" min="1" max="100" value="10" required></label></div><p id="graph-search-privacy" class="privacy-note">Your question is sent to the embedding provider. Local ranking combines vector and lexical evidence on this server.</p><details id="graph-filters-panel" class="form-advanced graph-document-filter-panel"><summary>Filter documents<span id="graph-filters-count"></span></summary><p class="field-hint">Match every condition across document fields. These filters apply to vector matches, keyword matches, and connecting passages.</p><div id="graph-document-filters" class="graph-document-filters"></div><div class="inline-actions"><button id="graph-filter-add" class="button ghost compact" type="button">Add filter</button><button id="graph-filter-clear" class="button ghost compact" type="button" disabled>Clear filters</button></div></details><p id="graph-filter-summary" class="field-hint graph-filter-summary" aria-live="polite">All documents are eligible. Add filters to narrow the source context.</p><details class="form-advanced"><summary>Context and diversity</summary><div class="form-row three"><label>Diversity (0–1)<input id="graph-diversity" type="number" min="0" max="1" step="0.1" value="0.3" required></label><label>Context budget (bytes)<input id="graph-context-budget" type="number" min="1" max="1048576" step="1" value="24000" required></label><label>Results per document<input id="graph-per-document" type="number" min="1" max="100" value="3" required></label></div><div class="form-row two"><label>Candidate passages<input id="graph-candidates" type="number" min="1" max="100" value="40" required></label><label>Connection depth<input id="graph-hops" type="number" min="0" max="3" value="1" required></label></div><div class="form-row two"><label>Starting passages (seeds)<input id="graph-seeds" type="number" min="1" max="20" value="12" aria-describedby="graph-seed-hint" required></label><label>Starting passages per document <small>optional</small><input id="graph-seeds-per-document" type="number" min="1" max="20" step="1" placeholder="No cap" aria-describedby="graph-seeds-per-document-hint"></label></div><p id="graph-seeds-per-document-hint" class="field-hint">Limit starting passages from each document to help the graph search start across different documents. Leave blank for no cap. Results per document applies separately to the final context.</p><div class="graph-seed-guidance"><p id="graph-seed-hint" class="field-hint">Suggested seeds leave room for connected passages when the candidate budget is small.</p><button id="graph-seeds-auto" class="button ghost compact" type="button">Use suggested seeds</button></div><div class="form-row three"><label>Follow relationships<select id="graph-retrieval-direction"><option value="outgoing">Outgoing</option><option value="incoming">Incoming</option><option value="both">Both directions</option></select></label><label>Minimum weight<input id="graph-retrieval-min-weight" type="number" min="0" max="1" step="0.05" value="0" required></label><label>Neighbors per passage<input id="graph-neighbors" type="number" min="1" max="32" value="8" required></label></div><label>Relationship type <small>optional exact label</small><input id="graph-retrieval-kind" maxlength="64" pattern="[a-z][a-z0-9_]{0,63}" placeholder="All types, or e.g. supports"></label><p class="field-hint">Direction, type, and weight filter graph expansion. Direct vector and lexical matches still participate.</p><p class="field-hint">Higher diversity favors varied context. The budget bounds returned source text; this retrieves passages and does not generate an answer.</p></details><button id="graph-search-submit" class="button primary" type="submit">Retrieve context <span aria-hidden="true">→</span></button><p id="graph-search-status" class="inline-status" role="status"></p></form><div class="graph-retrieval-results"><div class="panel-header"><div><span class="panel-kicker">SOURCE CONTEXT</span><h3>Evidence you can inspect</h3></div></div><div id="graph-search-results" class="graph-context-results"><p class="empty-workspace">Retrieved passages and their source citations will appear here.</p></div></div></section>
-      </section>
-
-      <section id="view-data" class="view">
-        <div class="workspace-heading"><div><h2>Your data</h2><p>Browse records, add documents, and keep your tables in shape.</p></div><button id="admin-new-table" type="button" class="button primary">Create <span aria-hidden="true">+</span></button></div>
-        <div class="stats-grid" aria-label="Database overview">
-          <article class="stat-card accent-a">
-            <span class="stat-label">Tables</span>
-            <strong id="stat-tables">—</strong>
-            <small id="storage-mode-label">storage loading</small>
-          </article>
-          <article class="stat-card accent-b">
-            <span class="stat-label">Rows</span>
-            <strong id="stat-rows">—</strong>
-            <small>across all tables</small>
-          </article>
-          <article class="stat-card accent-c">
-            <span class="stat-label">Indexes</span>
-            <strong id="stat-indexes">—</strong>
-            <small>scalar hash indexes</small>
-          </article>
-          <article class="stat-card accent-d">
-            <span class="stat-label">Revision</span>
-            <strong id="stat-revision">—</strong>
-            <small>committed catalog</small>
-          </article>
-        </div>
-
-
-        <div class="panel data-browser"><div class="data-toolbar"><label>Table<select id="admin-table"><option value="">Choose a table</option></select></label><div class="inline-actions"><button id="admin-refresh" class="button ghost" type="button">Refresh rows</button><button id="admin-new-row" class="button ghost" type="button">Add row</button><button id="admin-drop-table" class="button danger ghost" type="button">Delete table</button></div></div>
-          <div id="admin-status" class="inline-status" role="status">Choose a table to browse its rows.</div>
-          <div id="admin-rows" class="admin-rows"><div class="empty-workspace"><p>Your tables will appear here.</p></div></div>
-          <nav class="admin-pagination" aria-label="Data pages"><span id="admin-range">0 rows</span><label>Rows per page<select id="admin-page-size"><option value="50">50</option><option value="100">100</option><option value="250">250</option></select></label><button id="admin-previous" class="button ghost compact" type="button" disabled>Previous page</button><button id="admin-next" class="button ghost compact" type="button" disabled>Next page</button></nav>
-        </div>
-        <section id="data-relationships" class="panel data-relationships"><div class="panel-header"><div><span class="panel-kicker">CONNECTED RECORDS</span><h3>Relationships</h3></div><div class="inline-actions"><button id="relationships-refresh" class="button ghost compact" type="button">Refresh links</button><button id="relationship-new" class="button ghost compact" type="button">Add relationship</button></div></div><p class="field-hint relationship-intro">Connect records with matching field values. Links do not enforce foreign-key constraints.</p><p id="relationships-status" class="inline-status" role="status"></p><div id="relationship-list" class="relationship-list"></div></section>
-        <div id="admin-tools" class="admin-tools" hidden>
-          <details class="panel schema-details"><summary>Table structure <span id="admin-schema-summary"></span></summary><div id="admin-schema"></div></details>
-          <div class="admin-edit-grid">
-            <section class="panel form-card"><div class="card-heading"><div><span class="panel-kicker">RECORD</span><h3 id="admin-editor-title">Add a row</h3></div><button id="admin-clear-selection" class="button ghost compact" type="button">New row</button></div><p id="admin-key-note" class="field-hint">Enter a JSON object with the table's column names.</p><label>Row JSON<textarea id="admin-row-json" class="code-input" rows="9" spellcheck="false">{}</textarea></label><div class="inline-actions"><button id="admin-add-row" type="button" class="button primary">Insert row</button><button id="admin-save-row" type="button" class="button primary" hidden>Save changes</button><button id="admin-delete-row" type="button" class="button danger ghost" hidden>Delete row</button></div><p id="admin-edit-status" class="inline-status" role="status"></p></section>
-            <section class="panel form-card"><span class="panel-kicker">TEXT TO VECTORS</span><h3>Add searchable documents</h3><p>Generate embeddings from a text column, then insert the completed rows together.</p><div class="form-row two"><label>Text source<select id="admin-text-column"><option value="">Choose a text column</option></select></label><label>Vector target<select id="admin-vector-column"><option value="">Choose a vector column</option></select></label></div><label>Documents JSON <small>an array of row objects</small><textarea id="admin-documents-json" class="code-input" rows="7" spellcheck="false" placeholder='[{"id": 1, "title": "First document", "content": "Text to search"}]'></textarea></label><p id="admin-provider-note" class="provider-note"></p><p class="privacy-note">Only the selected text column is sent to your embedding provider. Other values stay on this server.</p><div class="inline-actions"><button id="admin-embed-insert" class="button primary" type="button">Generate and insert</button><button id="admin-clear-documents" class="button ghost" type="button">Clear</button></div><p id="admin-ingest-status" class="inline-status" role="status"></p></section>
-          </div>
-        </div>
-      </section>
-
-      <section id="view-console" class="view"><div class="workspace-heading"><div><h2>SQL, when you need it</h2><p>Run a query or inspect its plan. <kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd> to run.</p></div></div>
-        <div class="console-grid">
-          <section class="panel editor-panel">
-            <div class="panel-header">
-              <div>
-                <span class="panel-kicker">QUERY</span>
-                <h2>Write SQL. Search vectors.</h2>
-              </div>
-              <div class="editor-actions">
-                <label class="select-label">
-                  <span class="sr-only">Load example</span>
-                  <select id="example-select">
-                    <option value="quickstart">Quickstart dataset</option>
-                    <option value="hybrid">Hybrid similarity search</option>
-                    <option value="upsert">Atomic vector upsert</option>
-                    <option value="aggregate">Aggregate by category</option>
-                  </select>
-                </label>
-                <button id="format-sql" class="button ghost compact" type="button">Clean up</button>
-                <button id="analyze-sql" class="button ghost compact" type="button">Understand query</button>
-                <button id="run-sql" class="button primary compact" type="button">
-                  <span>Run query</span><span aria-hidden="true">▶</span>
-                </button>
-              </div>
-            </div>
-            <div class="editor-wrap">
-              <div class="line-numbers" id="line-numbers" aria-hidden="true">1</div>
-              <textarea id="sql-editor" spellcheck="false" wrap="off" aria-label="SQL editor"></textarea>
-            </div>
-            <div class="editor-footer">
-              <span>SQL</span>
-              <span id="editor-status" role="status">Ready</span>
-            </div>
-          </section>
-
-          <aside id="table-inspector" class="panel inspector-panel">
-            <div class="empty-inspector">
-              <div class="empty-icon">⌗</div>
-              <h3>Select a table</h3>
-              <p>Inspect columns and indexes, then generate a query with one click.</p>
-            </div>
-          </aside>
-        </div>
-
-        <section class="panel results-panel">
-          <div class="panel-header results-header">
-            <div>
-              <span class="panel-kicker">RESULTS</span>
-              <h2 id="results-title">No query run yet</h2>
-            </div>
-            <div id="query-metrics" class="query-metrics"></div>
-          </div>
-          <div id="sql-results" class="results-empty">
-            <div class="result-placeholder">
-              <span>→</span>
-              <p>Run the quickstart to create a sample dataset and see relational + vector search in one statement.</p>
-            </div>
-          </div>
-        </section>
-
-      </section>
-
-      <section id="view-settings" class="view">
-        <div class="workspace-heading"><div><h2>Make it your workspace</h2><p>Connect an embedding provider and tune your browsing experience.</p></div><button id="settings-refresh" type="button" class="button ghost">Refresh settings</button></div>
-        <div class="settings-grid">
-          <form id="settings-embedding-form" class="panel form-card"><span class="panel-kicker">EMBEDDINGS</span><h3>Turn text into vectors</h3><p>Use the same provider and model for your documents and queries.</p><div class="form-row two"><label>Provider<select id="embedding-provider"><option value="openai">OpenAI</option><option value="voyage">Voyage AI</option></select></label><label>Model<select id="embedding-model"></select></label></div><label>Dimensions<input id="embedding-dimensions" type="number" min="1" value="1536" required></label><p id="embedding-dimension-note" class="field-hint"></p><label>Provider API key<input id="embedding-api-key" type="password" autocomplete="off" placeholder="Leave blank to keep the current key"></label><p id="embedding-key-status" class="provider-note">Loading provider settings…</p><label class="checkbox-label"><input id="embedding-clear-key" type="checkbox"> Clear this provider's active key</label><p class="privacy-note">Keys entered here stay in server memory and are never saved in this browser. Keys from the server environment or its private local file return after a restart.</p><details class="form-advanced"><summary>Request settings</summary><div class="form-row three"><label>Batch size<input id="embedding-batch-size" type="number" min="1" max="128" value="32" required></label><label>Timeout (seconds)<input id="embedding-timeout" type="number" min="1" max="120" value="60" required></label><label>Concurrent requests<input id="embedding-concurrency" type="number" min="1" max="16" value="4" required></label></div></details><div class="inline-actions"><button id="embedding-save" class="button primary" type="submit">Save embedding settings</button></div><p id="embedding-settings-status" class="inline-status" role="status"></p></form>
-          <form id="settings-rerank-form" class="panel form-card"><span class="panel-kicker">OPTIONAL RERANKING</span><h3>A second look at retrieved context</h3><p>Voyage evaluates a question against candidate passages after hybrid retrieval. Enable it per search in Connections.</p><label>Reranking model<select id="rerank-model"><option value="rerank-2.5">rerank-2.5</option><option value="rerank-2.5-lite">rerank-2.5-lite</option></select></label><label>Voyage reranking API key<input id="rerank-api-key" type="password" autocomplete="off" placeholder="Leave blank to keep the current key"></label><p id="rerank-key-status" class="provider-note">Open Settings to load reranking configuration.</p><label class="checkbox-label"><input id="rerank-clear-key" type="checkbox"> Clear the active reranking key</label><p class="privacy-note">A reranked search sends your question and candidate passage context to Voyage. A key entered here stays in server memory and is never saved in this browser. VOYAGE_API_KEY from the server environment or its private local file is loaded again after a restart.</p><div class="form-row two"><label>Reranking timeout (seconds)<input id="rerank-timeout" type="number" min="1" max="120" value="60" required></label><label>Concurrent reranking requests<input id="rerank-concurrency" type="number" min="1" max="16" value="4" required></label></div><button id="rerank-save" class="button primary" type="submit">Save reranking settings</button><p id="rerank-settings-status" class="inline-status" role="status"></p></form>
-          <div class="settings-stack"><form id="settings-browser-form" class="panel form-card"><span class="panel-kicker">THIS BROWSER</span><h3>A comfortable view</h3><label>Default result page size<select id="preference-page-size"><option value="50">50 rows</option><option value="100" selected>100 rows</option><option value="250">250 rows</option></select></label><label>Background refresh<select id="preference-refresh"><option value="0">Off</option><option value="15" selected>Every 15 seconds</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option></select></label><label class="checkbox-label"><input id="preference-compact" type="checkbox"> Compact table rows</label><button class="button ghost" type="submit">Save browser preferences</button><p id="preference-status" class="inline-status" role="status">Saved only in this browser.</p></form><section class="panel form-card"><span class="panel-kicker">SERVER</span><h3>Connection and runtime</h3><p>Runtime values are read only. Restart the server to change its environment settings.</p><div id="server-settings" class="runtime-settings"><p class="field-hint">Open Settings to load server details.</p></div><button id="settings-token" class="button ghost" type="button">Manage API token</button></section></div>
-        </div>
-      </section>
-
-      <section id="view-guide" class="view"><div class="workspace-heading"><div><h2>A little help, close at hand</h2><p>Start with sample SQL, or connect a provider and search your own text.</p></div></div><section id="quick-start" class="panel help-start" hidden><h3 id="quick-start-title">New to vectors?</h3><p>The sample creates three documents with small hand-written vectors. Use Vector mode to search it.</p><div class="inline-actions"><button class="button primary" data-load-example="quickstart" type="button">Focus sample SQL</button><button id="quick-start-guide" class="button ghost" type="button">Open tutorial</button><button id="dismiss-quick-start" class="button ghost" type="button">Dismiss quick start</button></div></section>
-        <section class="hands-on panel" aria-labelledby="tutorial-title">
-          <div class="hands-on-heading">
-            <div>
-              <span class="panel-kicker">GUIDED QUICKSTART</span>
-              <h2 id="tutorial-title" tabindex="-1">From empty database to ranked results</h2>
-            </div>
-            <p>Run two copy-ready examples. Every step uses the same SQL editor you already know.</p>
-          </div>
-          <ol class="tutorial-steps">
-            <li>
-              <span class="tutorial-number">01</span>
-              <h3>Model and seed</h3>
-              <p>Create <code>documents</code>, add a hash index for metadata, and insert three fixed-width embeddings.</p>
-              <button class="button ghost compact" data-load-example="quickstart" type="button">Load setup SQL <span aria-hidden="true">→</span></button>
-            </li>
-            <li>
-              <span class="tutorial-number">02</span>
-              <h3>Execute safely</h3>
-              <p>Review the SQL, then run it with <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. The batch commits together or not at all.</p>
-              <span class="tutorial-hint">Look for three completed statements</span>
-            </li>
-            <li>
-              <span class="tutorial-number">03</span>
-              <h3>Search with context</h3>
-              <p>Filter to <code>category = 'tech'</code>, calculate cosine distance, and return the nearest rows first.</p>
-              <button class="button ghost compact" data-load-example="hybrid" type="button">Load search SQL <span aria-hidden="true">→</span></button>
-            </li>
-          </ol>
-        </section>
-
-        <section class="command-reference panel" aria-labelledby="command-reference-title">
-          <div class="command-reference-heading">
-            <div>
-              <span class="panel-kicker">COMMAND REFERENCE</span>
-              <h2 id="command-reference-title" tabindex="-1">Everything close at hand</h2>
-            </div>
-            <p>Open a group when you need it. Press <kbd>?</kbd> anywhere outside an input to return here.</p>
-          </div>
-          <div class="command-groups">
-            <details class="command-group" open>
-              <summary><span>Web console</span><small>Actions and shortcuts</small></summary>
-              <div class="command-list">
-                <div><code>Ctrl / ⌘ + Enter</code><span>Run every SQL statement in the editor.</span></div>
-                <div><code>Understand query</code><span>Explain the query intent and optimized vector plan.</span></div>
-                <div><code>Clean up</code><span>Remove extra blank lines without changing the SQL.</span></div>
-                <div><code>Examples</code><span>Load setup, hybrid search, upsert, or aggregate SQL.</span></div>
-                <div><code>Tables</code><span>Inspect schemas and indexes or generate a SELECT.</span></div>
-                <div><code>Vector search</code><span>Build an exact search using guided form controls.</span></div>
-              </div>
-            </details>
-            <details class="command-group">
-              <summary><span>SQL vocabulary</span><small>Supported statements and functions</small></summary>
-              <div class="command-list">
-                <div><code>CREATE / DROP</code><span>Manage tables and scalar hash indexes.</span></div>
-                <div><code>INSERT / UPDATE / DELETE</code><span>Write rows and use <code>ON CONFLICT</code> upserts.</span></div>
-                <div><code>SELECT</code><span>Filter, group, aggregate, order, limit, and offset results.</span></div>
-                <div><code>EXPLAIN</code><span>Inspect index pruning and vector top-k planning.</span></div>
-                <div><code>cosine_distance · l2_distance · squared_l2_distance</code><span>Rank vectors by cosine or Euclidean distance.</span></div>
-                <div><code>dot_product · normalize · vector_norm · vector_dims</code><span>Transform and inspect embeddings.</span></div>
-                <div><code>&lt;=&gt; · &lt;-&gt; · &lt;#&gt;</code><span>Use operator shortcuts for cosine, L2, and negative dot product.</span></div>
-              </div>
-            </details>
-            <details class="command-group">
-              <summary><span>Terminal shell</span><small>Dot commands for <code>vectors&gt;</code></small></summary>
-              <div class="command-list shell-commands">
-                <div><code>.help</code><span>List every shell command.</span></div>
-                <div><code>.tutorial</code><span>Print the copy-ready SQL walkthrough.</span></div>
-                <div><code>.tables</code><span>List tables.</span></div>
-                <div><code>.schema TABLE</code><span>Show columns and constraints.</span></div>
-                <div><code>.indexes TABLE</code><span>Show scalar hash indexes.</span></div>
-                <div><code>.checkpoint</code><span>Compact the durable write-ahead log.</span></div>
-                <div><code>.save PATH</code><span>Write a portable snapshot.</span></div>
-                <div><code>.open PATH</code><span>Open a snapshot as an in-memory session.</span></div>
-                <div><code>.read PATH</code><span>Execute SQL from a file.</span></div>
-                <div><code>.timer on|off</code><span>Toggle execution timing.</span></div>
-                <div><code>.cancel</code><span>Discard pending multiline SQL.</span></div>
-                <div><code>.quit / .exit</code><span>Close the shell.</span></div>
-              </div>
-              <p class="command-note">Dot commands belong to the terminal shell; enter SQL in this browser console.</p>
-            </details>
-          </div>
-        </section>
-
-
-      </section>
-    </main>
+<button class="nav-item" data-view="data" type="button"><span aria-hidden="true" class="nav-icon">▦</span><span>Data</span></button>
+<button class="nav-item" data-view="console" type="button"><span aria-hidden="true" class="nav-icon">⌘</span><span>SQL</span></button>
+<button class="nav-item" data-view="settings" type="button"><span aria-hidden="true" class="nav-icon">⚙</span><span>Settings</span></button>
+</nav>
+<div class="sidebar-section"><div class="section-heading"><span>Tables</span><button aria-label="Refresh tables" class="icon-button" id="refresh-tables" title="Refresh tables" type="button">↻</button></div><div aria-live="polite" class="table-list" id="table-list"><div class="sidebar-empty">Connect to browse tables</div></div></div>
+<div class="sidebar-footer"><button class="connection" id="connection-button" type="button"><span class="status-dot" id="status-dot"></span><span><strong id="status-label" role="status">Connecting</strong><small id="connection-host">localhost</small></span><span aria-hidden="true" class="connection-arrow">›</span></button><div class="version">vectors <span id="app-version">dev</span><span id="connection-latency"></span></div></div>
+</aside>
+<main class="workspace">
+<header class="topbar"><button aria-controls="app-sidebar" aria-expanded="false" aria-label="Toggle navigation" class="mobile-menu" id="mobile-menu" type="button">☰</button><div><span class="eyebrow">WORKSPACE</span><h1 id="view-title">Playground</h1></div><div class="topbar-actions"><button class="button ghost" id="open-token" type="button">Connection</button><button class="button ghost" id="top-guide" type="button">Help</button></div></header>
+<div class="connection-notice" hidden="" id="connection-notice" role="status"><span id="connection-message"></span><button class="button ghost compact" id="reconnect" type="button">Reconnect</button></div>
+<section class="view" id="view-search">
+<div class="workspace-heading"><div><h2>Vector search</h2><p>Search a table by text or vector.</p></div><button class="button ghost" data-go="settings" type="button">Embedding settings <span aria-hidden="true">↗</span></button></div>
+<div class="empty-workspace panel" hidden="" id="search-empty"><span aria-hidden="true" class="empty-icon">▦</span><h3>No tables yet</h3><p>Create a table to start searching.</p><div class="inline-actions"><button class="button primary" data-go="data" type="button">Add your data</button><button class="button ghost" data-go="guide" type="button">Try an example</button></div></div>
+<div class="search-layout">
+<form class="panel search-form" id="search-form" novalidate="">
+<div class="form-section"><div class="form-section-body"><div class="form-row two"><label>Table<select id="search-table" required=""><option value="">Choose a table</option></select></label><label>Vector column<select id="search-vector-column" required=""><option value="">Choose a vector</option></select></label></div></div></div>
+<div class="form-section"><div class="form-section-body">
+<div aria-label="Search input" class="segmented-control" role="group"><button aria-pressed="true" id="search-mode-text" type="button">Text</button><button aria-pressed="false" id="search-mode-vector" type="button">Vector</button></div>
+<div id="search-text-fields"><label>What are you looking for?<textarea id="search-text" placeholder="e.g. How do I reset an account password?" required="" rows="4"></textarea></label><p class="provider-note" id="search-provider-note">Loading embedding settings…</p><p class="privacy-note">Text is sent to your embedding provider. Match your document model and dimensions.</p></div>
+<div hidden="" id="search-vector-fields"><label>Comma-separated values<textarea id="search-vector" placeholder="1.0, 0.0, 0.0" rows="4"></textarea></label></div>
+<div class="field-hint" id="dimension-hint">Select a vector column to see its dimensions.</div>
+<div class="form-row two search-limit-row"><label>Results<input id="search-limit" max="1000" min="1" required="" type="number" value="10"/></label><label>Metric<select id="search-metric"><option value="cosine">Cosine distance</option><option value="l2">Euclidean distance</option><option value="squared_l2">Squared L2</option><option value="dot_product">Dot product</option></select></label></div>
+</div></div>
+<details class="search-options"><summary>Filters and returned columns</summary><div class="form-row filter-row"><label>Column<select id="filter-column"><option value="">No filter</option></select></label><label>Operator<select id="filter-operator"><option value="eq">=</option><option value="ne">≠</option><option value="gt">&gt;</option><option value="gte">≥</option><option value="lt">&lt;</option><option value="lte">≤</option></select></label><label>Value<input id="filter-value" placeholder="e.g. support"/></label></div><label>Return columns <small>blank for all scalar columns</small><input id="search-select" placeholder="id, title, content"/></label></details>
+<button class="button primary search-submit" id="search-submit" type="submit">Search <span aria-hidden="true">→</span></button>
+</form>
+<section class="panel search-results-panel"><div class="panel-header"><div><span class="panel-kicker">RESULTS</span><h2 id="search-results-title">Search results</h2></div></div><div class="results-empty" id="search-results"><div aria-hidden="true" class="search-empty-mark">⌕</div><p>Run a search to see matching records.</p></div></section>
+</div>
+</section>
+<section class="view active" id="view-connections">
+ <div class="playground-collection-bar panel">
+  <div class="playground-collection-select">
+   <label>
+    Collection
+    <select id="graph-collection">
+     <option value="">
+      Choose a collection
+     </option>
+    </select>
+   </label>
   </div>
-
-  <dialog id="data-create-dialog"><div class="form-card"><button class="dialog-close" data-close-dialog="data-create-dialog" type="button" aria-label="Close create data">×</button><span class="panel-kicker">CREATE</span><h2>What would you like to store?</h2><div class="create-choices"><button id="data-create-collection" type="button" class="create-choice"><strong>RAG collection</strong><span>Documents with automatic chunking, embeddings, and connections. Add typed fields for filtering.</span></button><button id="data-create-table" type="button" class="create-choice"><strong>Structured table</strong><span>Ordinary rows with fields you define. Manage vectors and ingestion yourself.</span></button></div></div></dialog>
-  <dialog id="graph-create-dialog" class="wide-dialog"><form id="graph-create-form" class="form-card" novalidate><button class="dialog-close" data-close-dialog="graph-create-dialog" type="button" aria-label="Close create collection">×</button><span class="panel-kicker">RAG COLLECTION</span><h2>Start with a collection name</h2><p>Documents become searchable passages with automatic connections.</p><label>Collection name<input id="graph-create-name" required pattern="[a-z][a-z0-9_]{0,47}" maxlength="48" placeholder="knowledge"></label><details class="form-advanced"><summary>Document fields <small>optional</small></summary><p class="field-hint">Add fields such as category, year, or published. Values become real SQL columns and are not embedded.</p><div id="graph-create-fields" class="field-builder" aria-label="Collection document fields"></div></details><div class="collection-provider"><p id="graph-create-profile" class="provider-note"></p><button id="graph-create-settings" class="button ghost compact" type="button">Embedding settings ↗</button><p class="field-hint">The model and dimensions are fixed when you create the collection. You can add a provider key in Settings before saving documents.</p></div><details class="form-advanced"><summary>Automatic semantic links</summary><div class="form-row two"><label>Neighbors per chunk<input id="graph-create-neighbors" type="number" min="0" max="16" value="3" required></label><label>Minimum cosine similarity<input id="graph-create-threshold" type="number" min="0" max="1" step="0.01" value="0.8" required></label></div></details><p id="graph-create-status" class="inline-status" role="status"></p><div class="dialog-actions"><button class="button ghost" type="button" data-close-dialog="graph-create-dialog">Cancel</button><button id="graph-create-submit" class="button primary" type="submit">Create collection</button></div></form></dialog>
-  <dialog id="admin-create-dialog" class="wide-dialog"><form id="admin-create-form" class="form-card" novalidate><button class="dialog-close" data-close-dialog="admin-create-dialog" type="button" aria-label="Close create table">×</button><span class="panel-kicker">STRUCTURED TABLE</span><h2>Define your rows</h2><label>Table name<input id="admin-create-name" required placeholder="documents" maxlength="128"></label><p class="field-hint">Choose the fields each row stores. This table does not create chunks or relationships automatically.</p><div id="admin-create-fields" class="field-builder" aria-label="Table fields"></div><details class="form-advanced"><summary>Advanced schema JSON</summary><label>Columns JSON <small>optional override of the fields above</small><textarea id="admin-create-schema" class="code-input" rows="6" spellcheck="false" placeholder='[{"name":"id","data_type":"INTEGER","nullable":false,"unique":true}]'></textarea></label></details><p id="admin-create-status" class="inline-status" role="status"></p><div class="dialog-actions"><button type="button" class="button ghost" data-close-dialog="admin-create-dialog">Cancel</button><button id="admin-create-submit" type="submit" class="button primary">Create table</button></div></form></dialog>
-  <dialog id="relationship-dialog" class="wide-dialog"><form id="relationship-form" class="form-card" novalidate><button class="dialog-close" data-close-dialog="relationship-dialog" type="button" aria-label="Close create relationship">×</button><span class="panel-kicker">RELATIONSHIP</span><h2>Connect matching fields</h2><label>Relationship name<input id="relationship-name" required maxlength="48" placeholder="documents_by_category"></label><div class="relationship-endpoints"><fieldset><legend>From</legend><label>Source table<select id="relationship-source-table"><option value="">Choose a table</option></select></label><label>Source field<select id="relationship-source-column"><option value="">Choose a scalar field</option></select></label></fieldset><span class="relationship-arrow" aria-hidden="true">→</span><fieldset><legend>To</legend><label>Target table<select id="relationship-target-table"><option value="">Choose a table</option></select></label><label>Target field<select id="relationship-target-column"><option value="">Choose a matching field</option></select></label></fieldset></div><p class="field-hint">Choose fields of the same scalar type. Links match field values; they do not enforce foreign-key constraints. No embeddings are created.</p><p id="relationship-status" class="inline-status" role="status"></p><div class="dialog-actions"><button class="button ghost" type="button" data-close-dialog="relationship-dialog">Cancel</button><button id="relationship-dialog-refresh" class="button ghost" type="button">Refresh links</button><button id="relationship-save" class="button primary" type="submit">Save relationship</button></div></form></dialog>
-  <dialog id="admin-drop-dialog"><form id="admin-drop-form" class="form-card"><button class="dialog-close" data-close-dialog="admin-drop-dialog" type="button" aria-label="Close delete table">×</button><span class="panel-kicker">DELETE TABLE</span><h2 id="admin-drop-title">Delete this table?</h2><p>This permanently deletes the table and all its rows. Type its exact name to continue.</p><label>Table name confirmation<input id="admin-drop-confirm" autocomplete="off" required></label><p id="admin-drop-status" class="inline-status" role="status"></p><div class="dialog-actions"><button type="button" class="button ghost" data-close-dialog="admin-drop-dialog">Cancel</button><button id="admin-drop-submit" type="submit" class="button danger" disabled>Delete table permanently</button></div></form></dialog>
-  <dialog id="admin-delete-dialog"><form id="admin-delete-form" class="form-card"><span class="panel-kicker">DELETE ROW</span><h2>Delete this row?</h2><p id="admin-delete-description"></p><p id="admin-delete-status" class="inline-status" role="status"></p><div class="dialog-actions"><button type="button" class="button ghost" data-close-dialog="admin-delete-dialog">Cancel</button><button id="admin-delete-confirm" type="submit" class="button danger">Delete selected row</button></div></form></dialog>
-  <dialog id="token-dialog">
-    <form id="token-form" method="dialog" class="token-card">
-      <button class="dialog-close" value="cancel" type="button" aria-label="Close">×</button>
-      <span class="panel-kicker">AUTHENTICATION</span>
-      <h2>Connect to vectors</h2>
-      <p>If the server uses <code>VECTORS_API_TOKEN</code>, enter it here. It stays in this browser tab.</p>
-      <label>Bearer token<input id="token-input" type="password" autocomplete="off" placeholder="Paste API token"></label>
-      <div class="dialog-actions">
-        <button id="clear-token" class="button ghost" value="cancel" type="button">Clear token</button>
-        <button id="save-token" class="button primary" value="default" type="submit">Save and connect</button>
+  <div class="playground-collection-actions inline-actions">
+   <button class="button ghost" id="graph-create-open" type="button">
+    New collection
+   </button>
+   <button class="button primary" id="graph-upload-open" type="button">
+    Upload PDFs
+   </button>
+   <button class="button ghost" id="graph-chat-open" type="button">
+    Chat
+   </button>
+  </div>
+  <div class="playground-collection-meta">
+   <p class="provider-note" id="graph-profile">
+    Choose a collection.
+   </p>
+   <p class="inline-status" id="graph-status" role="status">
+   </p>
+  </div>
+ </div>
+ <div class="playground-tab-bar">
+  <div aria-label="Playground" class="playground-tabs" role="tablist">
+   <button aria-controls="playground-chat" aria-selected="true" data-playground-tab="chat" id="playground-tab-chat" role="tab" tabindex="0" type="button">
+    Chat
+   </button>
+   <button aria-controls="playground-documents" aria-selected="false" data-playground-tab="documents" id="playground-tab-documents" role="tab" tabindex="-1" type="button">
+    Documents
+   </button>
+   <button aria-controls="playground-graph" aria-selected="false" data-playground-tab="graph" id="playground-tab-graph" role="tab" tabindex="-1" type="button">
+    Graph
+   </button>
+  </div>
+  <button aria-controls="playground-settings" aria-expanded="true" class="button ghost compact" id="playground-settings-toggle" type="button">
+   Settings
+  </button>
+ </div>
+ <section aria-labelledby="playground-tab-chat" id="playground-chat" role="tabpanel">
+  <div class="playground-layout settings-open" id="playground-layout">
+   <div class="playground-main">
+    <section class="panel graph-chat-layout" id="graph-chat-panel">
+     <div class="panel-header playground-conversation-header">
+      <h2>
+       Conversation
+      </h2>
+      <div class="inline-actions">
+       <button aria-controls="playground-evaluation" aria-expanded="false" class="button ghost compact" id="playground-evaluate-open" type="button">
+        Evaluate
+       </button>
+       <button class="button ghost compact" disabled="" id="playground-run-again" type="button">
+        Run again
+       </button>
+       <button aria-controls="playground-comparison" aria-expanded="false" class="button ghost compact" disabled="" id="playground-compare" type="button">
+        Compare
+       </button>
       </div>
+     </div>
+     <div class="playground-comparison" hidden="" id="playground-comparison">
+     </div>
+     <div class="graph-chat-results">
+      <div aria-label="Conversation" class="graph-chat-turns" id="graph-chat-turns">
+       <p class="empty-workspace">
+        Ask a question to see answers and sources.
+       </p>
+      </div>
+     </div>
+     <form class="form-card playground-composer" id="graph-chat-form" novalidate="">
+      <label>
+       Question
+       <textarea id="graph-chat-question" placeholder="Ask a question about your documents…" required="" rows="3"></textarea>
+      </label>
+      <div class="playground-composer-actions">
+       <p class="field-hint" id="graph-chat-question-hint">
+        Name the subject in each question.
+       </p>
+       <div class="inline-actions">
+        <button class="button ghost compact" id="graph-chat-clear" type="button">
+         New chat
+        </button>
+        <button class="button ghost compact" id="graph-chat-settings" type="button">
+         Settings
+        </button>
+        <button class="button ghost" disabled="" id="graph-chat-stop" type="button">
+         Stop
+        </button>
+        <button class="button primary" id="graph-chat-submit" type="submit">
+         Send
+        </button>
+       </div>
+      </div>
+      <p class="inline-status" id="graph-chat-status" role="status">
+      </p>
+      <details class="playground-notes">
+       <summary>
+        How questions are processed
+       </summary>
+       <p class="privacy-note" id="graph-chat-privacy">
+        Answers send your question, recent conversation, and retrieved sources to OpenAI. Embedding and optional reranking use configured providers. Provider charges may apply.
+       </p>
+       <p class="field-hint">
+        Source labels identify retrieved passages; they do not verify every claim. Voice scripts are text, with no audio recording or playback. Chat context is limited to 64 KiB.
+       </p>
+      </details>
+     </form>
+    </section>
+    <div class="panel graph-retrieval-results" hidden="" id="playground-retrieval-results">
+     <div class="panel-header">
+      <div>
+       <h3>
+        Retrieval results
+       </h3>
+      </div>
+     </div>
+     <div class="graph-context-results" id="graph-search-results">
+      <p class="empty-workspace">
+       Run a retrieval test to inspect sources.
+      </p>
+     </div>
+    </div>
+    <details class="panel playground-evaluation" id="playground-evaluation">
+     <summary><span>Evaluate retrieval</span><small>Known-source tests</small></summary>
+     <div class="evaluation-body">
+      <p class="evaluation-intro">Tests source retrieval. No answers generated.</p>
+      <form id="evaluation-form" novalidate>
+       <div class="evaluation-inputs">
+        <div class="evaluation-file-actions">
+         <label class="button ghost evaluation-file-picker">Load questions<input accept=".json,application/json" class="sr-only" id="evaluation-file" type="file"></label>
+         <button class="button ghost compact" id="evaluation-template" type="button">Download example</button>
+        </div>
+        <label class="evaluation-limit">Questions per run<input id="evaluation-limit" max="100" min="1" required step="1" type="number" value="20"></label>
+       </div>
+       <p class="field-hint" id="evaluation-dataset" aria-live="polite">No questions loaded.</p>
+       <p class="evaluation-settings" id="evaluation-settings">Uses current retrieval settings.</p>
+       <div class="evaluation-actions inline-actions">
+        <button class="button primary" disabled id="evaluation-start" type="submit">Run evaluation</button>
+        <button class="button ghost" disabled id="evaluation-pause" title="Pause after the current request" type="button">Pause</button>
+        <button class="button ghost compact" disabled id="evaluation-clear" type="button">Clear</button>
+        <button class="button ghost compact" disabled id="evaluation-export" type="button">Export report</button>
+       </div>
+       <p class="privacy-note" id="evaluation-privacy">Provider requests may incur charges. Pausing finishes the current request; errors are not retried automatically.</p>
+      </form>
+      <details class="playground-notes evaluation-format">
+       <summary>Question format and limits</summary>
+       <p class="field-hint">Load a JSON array with up to 10,000 questions, within 5 MiB. Each run samples up to 100 questions. A match requires the expected source and any supplied text in the same passage.</p>
+       <pre aria-label="Question format example">[
+  {
+    "question": "What is the retention period?",
+    "expected_source": "policy.pdf#page=2",
+    "expected_text": "30 days"
+  }
+]</pre>
+       <p class="field-hint"><code>expected_source</code> is an exact source match; <code>expected_text</code> is optional. Generated PDF datasets can instead use <code>expected_file</code>, <code>expected_page</code>, and <code>expected_text</code>. File/page matching accepts folder prefixes; use an exact source to distinguish same-named files.</p>
+      </details>
+      <div class="evaluation-progress-wrap">
+       <progress aria-label="Evaluation progress" id="evaluation-progress" max="1" value="0"></progress>
+       <p class="inline-status" id="evaluation-status" role="status"></p>
+      </div>
+      <div aria-label="Evaluation metrics" class="evaluation-metrics" hidden id="evaluation-metrics"></div>
+      <div aria-label="Evaluation results" class="evaluation-results" id="evaluation-results"><p class="evaluation-empty">Load questions to test this collection.</p></div>
+      <div class="evaluation-pagination">
+       <span id="evaluation-range">0 questions</span>
+       <button class="button ghost compact" disabled id="evaluation-previous" type="button">Previous</button>
+       <button class="button ghost compact" disabled id="evaluation-next" type="button">Next</button>
+      </div>
+     </div>
+    </details>
+   </div>
+   <aside aria-label="Playground settings" class="panel playground-settings" id="playground-settings">
+    <div class="panel-header">
+     <h2>
+      Configuration
+     </h2>
+     <button aria-label="Close settings" class="icon-button" id="playground-settings-close" type="button">
+      ×
+     </button>
+    </div>
+    <div class="playground-settings-body">
+     <div class="playground-answer-settings">
+      <label>
+       Mode
+       <select form="graph-chat-form" id="graph-chat-mode">
+        <option value="answer">
+         Answer with sources
+        </option>
+        <option value="retrieve">
+         Retrieve sources
+        </option>
+       </select>
+      </label>
+      <label>
+       Language model
+       <select form="graph-chat-form" id="graph-chat-model">
+        <option value="gpt-4.1-mini">
+         GPT-4.1 mini
+        </option>
+        <option value="gpt-4.1">
+         GPT-4.1
+        </option>
+        <option value="gpt-4.1-nano">
+         GPT-4.1 nano
+        </option>
+       </select>
+      </label>
+      <label>
+       Search context
+       <select form="graph-chat-form" id="graph-chat-context">
+        <option value="question">Current question</option>
+        <option value="conversation">Recent conversation</option>
+       </select>
+      </label>
+      <p class="field-hint" id="graph-chat-context-hint">Search uses only this question.</p>
+      <div class="form-row two graph-chat-answer-options">
+       <label>
+        Answer style
+        <select form="graph-chat-form" id="graph-chat-delivery">
+         <option value="chat">Chat</option>
+         <option value="voice">Voice script</option>
+        </select>
+       </label>
+       <label>
+        Evidence
+        <select form="graph-chat-form" id="graph-chat-grounding">
+         <option value="strict">Source excerpts</option>
+         <option value="standard">Citations only</option>
+        </select>
+       </label>
+      </div>
+      <p class="field-hint" id="graph-chat-answer-hint">Answers require excerpts from retrieved sources.</p>
+     </div>
+     <label>
+      Retrieval strategy
+      <select id="playground-strategy">
+       <option value="graph">
+        Graph + hybrid
+       </option>
+       <option value="hybrid">
+        Hybrid
+       </option>
+       <option value="vector">
+        Vector
+       </option>
+       <option value="keyword">
+        Keyword
+       </option>
+      </select>
+     </label>
+     <p class="field-hint" id="playground-strategy-hint">
+      Combines semantic and keyword matches with connected passages.
+     </p>
+     <p class="playground-settings-summary" id="playground-settings-summary">
+      Graph + hybrid · 10 sources
+     </p>
+    </div>
+    <form class="form-card" id="graph-search-form" novalidate="">
+     <div class="form-row two">
+      <label>
+       Ranking
+       <select id="graph-reranker">
+        <option value="local">
+         Local ranking
+        </option>
+        <option value="voyage">
+         Voyage reranking
+        </option>
+       </select>
+      </label>
+      <label>
+       Maximum results
+       <input id="graph-result-limit" max="100" min="1" required="" type="number" value="10"/>
+      </label>
+     </div>
+     <p class="privacy-note" id="graph-search-privacy">
+      Embedding and optional reranking use your configured providers.
+     </p>
+     <details class="form-advanced graph-document-filter-panel" id="graph-filters-panel">
+      <summary>
+       Filter documents
+       <span id="graph-filters-count">
+       </span>
+      </summary>
+      <p class="field-hint">
+       Only documents matching every condition are eligible.
+      </p>
+      <div class="graph-document-filters" id="graph-document-filters">
+      </div>
+      <div class="inline-actions">
+       <button class="button ghost compact" id="graph-filter-add" type="button">
+        Add filter
+       </button>
+       <button class="button ghost compact" disabled="" id="graph-filter-clear" type="button">
+        Clear filters
+       </button>
+      </div>
+     </details>
+     <p aria-live="polite" class="field-hint graph-filter-summary" id="graph-filter-summary">
+      All documents
+     </p>
+     <details class="form-advanced">
+      <summary>
+       Context and diversity
+      </summary>
+      <div class="form-row three">
+       <label>
+        Diversity (0–1)
+        <input id="graph-diversity" max="1" min="0" required="" step="0.1" type="number" value="0.3"/>
+       </label>
+       <label>
+        Context budget (bytes)
+        <input id="graph-context-budget" max="1048576" min="1" required="" step="1" type="number" value="24000"/>
+       </label>
+       <label>
+        Results per document
+        <input id="graph-per-document" max="100" min="1" required="" type="number" value="3"/>
+       </label>
+      </div>
+      <div class="form-row two">
+       <label>
+        Candidate passages
+        <input id="graph-candidates" max="100" min="1" required="" type="number" value="40"/>
+       </label>
+       <label>
+        Connection depth
+        <input id="graph-hops" max="3" min="0" required="" type="number" value="1"/>
+       </label>
+      </div>
+      <div class="form-row two">
+       <label>
+        Starting passages (seeds)
+        <input aria-describedby="graph-seed-hint" id="graph-seeds" max="20" min="1" required="" type="number" value="12"/>
+       </label>
+       <label>
+        Starting passages per document
+        <small>
+         optional
+        </small>
+        <input aria-describedby="graph-seeds-per-document-hint" id="graph-seeds-per-document" max="20" min="1" placeholder="No cap" step="1" type="number"/>
+       </label>
+      </div>
+      <p class="field-hint" id="graph-seeds-per-document-hint">
+       Limits initial graph seeds per document. Blank means no cap.
+      </p>
+      <div class="graph-seed-guidance">
+       <p class="field-hint" id="graph-seed-hint">
+        Suggested seeds leave room for connected passages when the candidate budget is small.
+       </p>
+       <button class="button ghost compact" id="graph-seeds-auto" type="button">
+        Use suggested seeds
+       </button>
+      </div>
+      <div class="form-row three">
+       <label>
+        Follow relationships
+        <select id="graph-retrieval-direction">
+         <option value="outgoing">
+          Outgoing
+         </option>
+         <option value="incoming">
+          Incoming
+         </option>
+         <option value="both">
+          Both directions
+         </option>
+        </select>
+       </label>
+       <label>
+        Minimum weight
+        <input id="graph-retrieval-min-weight" max="1" min="0" required="" step="0.05" type="number" value="0"/>
+       </label>
+       <label>
+        Neighbors per passage
+        <input id="graph-neighbors" max="32" min="1" required="" type="number" value="8"/>
+       </label>
+      </div>
+      <label>
+       Relationship type
+       <small>
+        optional exact label
+       </small>
+       <input id="graph-retrieval-kind" maxlength="64" pattern="[a-z][a-z0-9_]{0,63}" placeholder="All types, or e.g. supports"/>
+      </label>
+      <p class="field-hint">
+       Filters graph expansion; direct matches remain eligible.
+      </p>
+      <p class="field-hint">
+       Higher diversity favors varied sources. Context budget limits returned text.
+      </p>
+     </details>
+     <details class="form-advanced playground-retrieval-test">
+      <summary>
+       Test retrieval
+      </summary>
+      <p class="field-hint">
+       Return sources without generating an answer.
+      </p>
+      <label>
+       Question
+       <textarea id="graph-question" placeholder="What connects these ideas?" required="" rows="3"></textarea>
+      </label>
+      <button class="button primary" id="graph-search-submit" type="submit">
+       Run retrieval
+      </button>
+      <p class="inline-status" id="graph-search-status" role="status">
+      </p>
+     </details>
     </form>
-  </dialog>
+   </aside>
+  </div>
+ </section>
+ <section aria-labelledby="playground-tab-documents" hidden="" id="playground-documents" role="tabpanel">
+  <div class="playground-panel-heading">
+   <h2>
+    Documents
+   </h2>
+   <div class="inline-actions">
+    <button class="button ghost" id="graph-add-open" type="button">
+     Add text
+    </button>
+   </div>
+  </div>
+  <details class="panel graph-document-panel graph-upload-panel" id="graph-upload-panel" open="">
+   <summary>
+    <span>
+     Import PDFs
+    </span>
+    <small>
+     Files or folders
+    </small>
+   </summary>
+   <div class="form-card">
+    <div class="graph-upload-intro">
+     <div>
+      <h3>
+       Add documents
+      </h3>
+      <p>
+       Choose PDFs or a folder. Sources retain the filename and page number.
+      </p>
+     </div>
+     <div class="graph-upload-pickers">
+      <label class="button ghost">
+       Choose PDFs
+       <input accept=".pdf,application/pdf" class="sr-only" id="graph-pdf-files" multiple="" type="file"/>
+      </label>
+      <label class="button ghost">
+       Choose folder
+       <input class="sr-only" id="graph-pdf-folder" multiple="" type="file" webkitdirectory=""/>
+      </label>
+     </div>
+    </div>
+    <div aria-live="polite" class="graph-capacity" id="graph-capacity">
+     Choose a collection to check capacity.
+    </div>
+    <p class="privacy-note">
+     Extracted text is sent to your embedding provider; charges may apply. Scanned PDFs need OCR.
+    </p>
+    <details class="playground-notes">
+     <summary>
+      Import limits and options
+     </summary>
+     <p class="field-hint">
+      PDFs stay in this browser. Up to 50 MiB per file and 10,000 queued files; the queue lasts for this tab. Each page or part becomes a document, without cross-page adjacency. Use zero automatic semantic neighbors for faster bulk imports. Required document fields use the values in Add text below. Collections hold up to 10,000 chunks; split larger libraries across collections.
+     </p>
+    </details>
+    <div class="graph-upload-progress">
+     <progress aria-label="PDF files processed" id="graph-upload-progress" max="1" value="0">
+     </progress>
+     <p id="graph-upload-summary" role="status">
+      No files queued.
+     </p>
+    </div>
+    <div class="inline-actions">
+     <button class="button primary" disabled="" id="graph-upload-start" type="button">
+      Start import
+     </button>
+     <button class="button ghost" disabled="" id="graph-upload-pause" title="Pause after the current request" type="button">
+      Pause
+     </button>
+     <button class="button ghost" disabled="" id="graph-upload-retry" type="button">
+      Retry failed
+     </button>
+     <button class="button ghost" disabled="" id="graph-upload-clear" type="button">
+      Clear queue
+     </button>
+     <button class="button ghost compact" id="graph-capacity-refresh" type="button">
+      Refresh capacity
+     </button>
+    </div>
+    <p class="inline-status" id="graph-upload-status" role="status">
+    </p>
+    <ol aria-label="PDF import queue" class="graph-upload-list" id="graph-upload-list">
+    </ol>
+    <div class="graph-page-controls">
+     <span id="graph-upload-range">
+      0 files
+     </span>
+     <button class="button ghost compact" disabled="" id="graph-upload-previous" type="button">
+      Previous files
+     </button>
+     <button class="button ghost compact" disabled="" id="graph-upload-next" type="button">
+      Next files
+     </button>
+    </div>
+   </div>
+  </details>
+  <details class="panel graph-document-panel" id="graph-document-panel">
+   <summary>
+    <span>
+     Add text
+    </span>
+    <small>
+     Create or replace a document
+    </small>
+   </summary>
+   <form class="form-card" id="graph-document-form" novalidate="">
+    <div class="form-row three">
+     <label>
+      Document ID
+      <input id="graph-document-id" maxlength="256" placeholder="getting-started" required=""/>
+     </label>
+     <label>
+      Title
+      <input id="graph-document-title" placeholder="Getting started"/>
+     </label>
+     <label>
+      Source or URL
+      <input id="graph-document-source" placeholder="https://… or a filename"/>
+     </label>
+    </div>
+    <label>
+     Document text
+     <textarea id="graph-document-text" placeholder="Paste the text you want to connect and search." required="" rows="7"></textarea>
+    </label>
+    <section class="document-fields-panel" hidden="" id="graph-document-fields-panel">
+     <h4>
+      Document fields
+     </h4>
+     <p class="field-hint">
+      These values stay in structured columns for filtering and SQL. They are not included in embeddings.
+     </p>
+     <div class="document-fields" id="graph-document-fields">
+     </div>
+    </section>
+    <details class="form-advanced">
+     <summary>
+      Chunking options
+     </summary>
+     <div class="form-row three">
+      <label>
+       Characters per chunk
+       <input id="graph-chunk-size" max="8000" min="1" required="" type="number" value="1200"/>
+      </label>
+      <label>
+       Overlap characters
+       <input id="graph-chunk-overlap" max="7999" min="0" required="" type="number" value="150"/>
+      </label>
+      <label>
+       Maximum chunks
+       <input id="graph-chunk-count" max="256" min="1" required="" type="number" value="256"/>
+      </label>
+     </div>
+     <p class="field-hint">
+      Limits count Unicode characters. Citation ranges use UTF-8 bytes. Long documents may require smaller uploads.
+     </p>
+    </details>
+    <p class="privacy-note">
+     Preview is local. Saving sends passage text to the embedding provider and may incur charges. Reusing an ID replaces its document; unchanged text reuses existing embeddings.
+    </p>
+    <div class="inline-actions">
+     <button class="button ghost" id="graph-preview" type="button">
+      Preview chunks
+     </button>
+     <button class="button primary" id="graph-document-save" type="submit">
+      Save document
+     </button>
+    </div>
+    <p class="inline-status" id="graph-document-status" role="status">
+    </p>
+    <div class="graph-chunk-preview" id="graph-chunk-preview">
+    </div>
+   </form>
+  </details>
+ </section>
+ <section aria-labelledby="playground-tab-graph" hidden="" id="playground-graph" role="tabpanel">
+  <div class="panel graph-workspace">
+   <div class="playground-graph-tools">
+    <h2>
+     Graph explorer
+    </h2>
+    <div class="inline-actions">
+     <button class="button ghost" id="graph-refresh" type="button">
+      Refresh
+     </button>
+     <button class="button ghost" id="graph-view-data" type="button">
+      Data
+     </button>
+     <button class="button ghost" id="graph-open-sql" type="button">
+      SQL
+     </button>
+    </div>
+   </div>
+   <div class="graph-mode-bar">
+    <div>
+     <span class="panel-kicker" id="graph-mode">
+      ALL PASSAGES
+     </span>
+     <p id="graph-focus-title">
+      Select a passage to inspect its connections.
+     </p>
+    </div>
+    <button class="button ghost compact" hidden="" id="graph-back-pages" type="button">
+     All passages
+    </button>
+   </div>
+   <form class="graph-neighborhood-controls" hidden="" id="graph-neighborhood-controls">
+    <div class="graph-neighborhood-fields">
+     <label>
+      Connection depth
+      <select id="graph-neighborhood-hops">
+       <option value="0">
+        Root only
+       </option>
+       <option selected="" value="1">
+        1 hop
+       </option>
+       <option value="2">
+        2 hops
+       </option>
+       <option value="3">
+        3 hops
+       </option>
+      </select>
+     </label>
+     <label>
+      Follow relationships
+      <select id="graph-neighborhood-direction">
+       <option value="both">
+        Both directions
+       </option>
+       <option value="outgoing">
+        Outgoing
+       </option>
+       <option value="incoming">
+        Incoming
+       </option>
+      </select>
+     </label>
+     <label>
+      Minimum weight
+      <input id="graph-neighborhood-min-weight" max="1" min="0" required="" step="0.05" type="number" value="0"/>
+     </label>
+     <button class="button ghost compact" id="graph-neighborhood-apply" type="submit">
+      Apply
+     </button>
+    </div>
+    <p class="field-hint">
+     Up to 100 passages, 500 links, and 8 neighbors per passage. No provider requests.
+    </p>
+   </form>
+   <div class="graph-explorer">
+    <div class="graph-stage">
+     <div class="graph-controls">
+      <fieldset class="graph-filters">
+       <legend class="sr-only">
+        Visible relationships
+       </legend>
+       <label>
+        <input checked="" data-graph-kind="semantic" type="checkbox"/>
+        <span class="edge-swatch semantic">
+        </span>
+        Semantic
+       </label>
+       <label>
+        <input checked="" data-graph-kind="adjacent" type="checkbox"/>
+        <span class="edge-swatch adjacent">
+        </span>
+        Adjacent
+       </label>
+       <label>
+        <input checked="" data-graph-kind="custom" type="checkbox"/>
+        <span class="edge-swatch custom">
+        </span>
+        Custom
+       </label>
+      </fieldset>
+      <div aria-label="Graph zoom" class="graph-zoom" role="group">
+       <button aria-label="Zoom out graph" class="icon-button" id="graph-zoom-out" type="button">
+        −
+       </button>
+       <button aria-label="Reset graph zoom" class="icon-button" id="graph-zoom-reset" type="button">
+        1×
+       </button>
+       <button aria-label="Zoom in graph" class="icon-button" id="graph-zoom-in" type="button">
+        +
+       </button>
+      </div>
+     </div>
+     <div class="graph-visual" id="graph-visual">
+      <svg aria-label="Document connections" id="graph-canvas" role="group" viewbox="0 0 800 460">
+      </svg>
+      <div class="graph-empty" id="graph-empty">
+       <span aria-hidden="true">
+        ⌘
+       </span>
+       <h3>
+        No passages yet
+       </h3>
+       <p>
+        Import documents to explore their connections.
+       </p>
+      </div>
+     </div>
+     <div aria-label="Document colors" class="graph-legend" id="graph-legend">
+     </div>
+     <div class="graph-page-controls">
+      <span id="graph-range">
+       0 passages
+      </span>
+      <button class="button ghost compact" disabled="" id="graph-previous" type="button">
+       Previous graph page
+      </button>
+      <button class="button ghost compact" disabled="" id="graph-next" type="button">
+       Next graph page
+      </button>
+     </div>
+     <details class="graph-map-help">
+      <summary>
+       About this graph
+      </summary>
+      <p class="graph-explanation" id="graph-explanation">
+       Colors identify documents. Lines show semantic, adjacent, or custom relationships. Position on the map does not measure relevance.
+      </p>
+     </details>
+     <details class="graph-accessible-list">
+      <summary>
+       Browse passages as a list
+       <span id="graph-list-count">
+       </span>
+      </summary>
+      <div id="graph-node-list">
+      </div>
+     </details>
+    </div>
+    <aside class="graph-detail-panel">
+     <div id="graph-details">
+      <span class="panel-kicker">
+       PASSAGE DETAILS
+      </span>
+      <h3>
+       Select a passage
+      </h3>
+      <p>
+       View source text and connected passages.
+      </p>
+     </div>
+     <form hidden="" id="graph-relationship-form">
+      <h4>
+       Add a directed relationship
+      </h4>
+      <label>
+       Link to passage
+       <select id="graph-link-target" required="">
+       </select>
+      </label>
+      <div class="form-row two">
+       <label>
+        Relationship name
+        <input id="graph-link-kind" maxlength="64" pattern="[a-z][a-z0-9_]{0,63}" required="" value="related_to"/>
+       </label>
+       <label>
+        Weight
+        <input id="graph-link-weight" max="1" min="0" required="" step="0.01" type="number" value="1"/>
+       </label>
+      </div>
+      <p class="field-hint">
+       Use a label such as supports or references. Custom links are your annotations, not inferred facts.
+      </p>
+      <button class="button ghost compact" id="graph-link-save" type="submit">
+       Add relationship
+      </button>
+     </form>
+    </aside>
+   </div>
+  </div>
+ </section>
+</section>
 
-  <div id="toast-region" class="toast-region" aria-live="polite"></div>
-  <script src="/assets/app.js" defer></script>
+
+      <section class="view" id="view-data">
+<div class="workspace-heading"><div><h2>Data</h2><p>Browse and manage records.</p></div><button class="button primary" id="admin-new-table" type="button">Create <span aria-hidden="true">+</span></button></div>
+<div aria-label="Database overview" class="stats-grid">
+<article class="stat-card accent-a">
+<span class="stat-label">Tables</span>
+<strong id="stat-tables">—</strong>
+<small id="storage-mode-label">storage loading</small>
+</article>
+<article class="stat-card accent-b">
+<span class="stat-label">Rows</span>
+<strong id="stat-rows">—</strong>
+<small>across all tables</small>
+</article>
+<article class="stat-card accent-c">
+<span class="stat-label">Indexes</span>
+<strong id="stat-indexes">—</strong>
+<small>scalar hash indexes</small>
+</article>
+<article class="stat-card accent-d">
+<span class="stat-label">Revision</span>
+<strong id="stat-revision">—</strong>
+<small>committed catalog</small>
+</article>
+</div>
+<div class="panel data-browser"><div class="data-toolbar"><label>Table<select id="admin-table"><option value="">Choose a table</option></select></label><div class="inline-actions"><button class="button ghost" id="admin-refresh" type="button">Refresh rows</button><button class="button ghost" id="admin-new-row" type="button">Add row</button><button class="button danger ghost" id="admin-drop-table" type="button">Delete table</button></div></div>
+<div class="inline-status" id="admin-status" role="status">Choose a table to browse its rows.</div>
+<div class="admin-rows" id="admin-rows"><div class="empty-workspace"><p>Your tables will appear here.</p></div></div>
+<nav aria-label="Data pages" class="admin-pagination"><span id="admin-range">0 rows</span><label>Rows per page<select id="admin-page-size"><option value="50">50</option><option value="100">100</option><option value="250">250</option></select></label><button class="button ghost compact" disabled="" id="admin-previous" type="button">Previous page</button><button class="button ghost compact" disabled="" id="admin-next" type="button">Next page</button></nav>
+</div>
+<section class="panel data-relationships" id="data-relationships"><div class="panel-header"><div><span class="panel-kicker">CONNECTED RECORDS</span><h3>Relationships</h3></div><div class="inline-actions"><button class="button ghost compact" id="relationships-refresh" type="button">Refresh links</button><button class="button ghost compact" id="relationship-new" type="button">Add relationship</button></div></div><p class="field-hint relationship-intro">Connect records with matching field values. Links do not enforce foreign-key constraints.</p><p class="inline-status" id="relationships-status" role="status"></p><div class="relationship-list" id="relationship-list"></div></section>
+<div class="admin-tools" hidden="" id="admin-tools">
+<details class="panel schema-details"><summary>Table structure <span id="admin-schema-summary"></span></summary><div id="admin-schema"></div></details>
+<div class="admin-edit-grid">
+<section class="panel form-card"><div class="card-heading"><div><span class="panel-kicker">RECORD</span><h3 id="admin-editor-title">Add a row</h3></div><button class="button ghost compact" id="admin-clear-selection" type="button">New row</button></div><p class="field-hint" id="admin-key-note">Enter a JSON object with the table's column names.</p><label>Row JSON<textarea class="code-input" id="admin-row-json" rows="9" spellcheck="false">{}</textarea></label><div class="inline-actions"><button class="button primary" id="admin-add-row" type="button">Insert row</button><button class="button primary" hidden="" id="admin-save-row" type="button">Save changes</button><button class="button danger ghost" hidden="" id="admin-delete-row" type="button">Delete row</button></div><p class="inline-status" id="admin-edit-status" role="status"></p></section>
+<section class="panel form-card"><span class="panel-kicker">TEXT TO VECTORS</span><h3>Embed documents</h3><p>Generate embeddings from a text column, then insert the completed rows together.</p><div class="form-row two"><label>Text source<select id="admin-text-column"><option value="">Choose a text column</option></select></label><label>Vector target<select id="admin-vector-column"><option value="">Choose a vector column</option></select></label></div><label>Documents JSON <small>an array of row objects</small><textarea class="code-input" id="admin-documents-json" placeholder='[{"id": 1, "title": "First document", "content": "Text to search"}]' rows="7" spellcheck="false"></textarea></label><p class="provider-note" id="admin-provider-note"></p><p class="privacy-note">Only the selected text column is sent to your embedding provider. Other values stay on this server.</p><div class="inline-actions"><button class="button primary" id="admin-embed-insert" type="button">Generate and insert</button><button class="button ghost" id="admin-clear-documents" type="button">Clear</button></div><p class="inline-status" id="admin-ingest-status" role="status"></p></section>
+</div>
+</div>
+</section>
+<section class="view" id="view-console"><div class="workspace-heading"><div><h2>SQL editor</h2><p>Run a query or inspect its plan. <kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd> to run.</p></div></div>
+<div class="console-grid">
+<section class="panel editor-panel">
+<div class="panel-header">
+<div>
+<span class="panel-kicker">QUERY</span>
+<h2>Query</h2>
+</div>
+<div class="editor-actions">
+<label class="select-label">
+<span class="sr-only">Load example</span>
+<select id="example-select">
+<option value="quickstart">Quickstart dataset</option>
+<option value="hybrid">Hybrid similarity search</option>
+<option value="upsert">Atomic vector upsert</option>
+<option value="aggregate">Aggregate by category</option>
+</select>
+</label>
+<button class="button ghost compact" id="format-sql" type="button">Format</button>
+<button class="button ghost compact" id="analyze-sql" type="button">Explain</button>
+<button class="button primary compact" id="run-sql" type="button">
+<span>Run query</span><span aria-hidden="true">▶</span>
+</button>
+</div>
+</div>
+<div class="editor-wrap">
+<div aria-hidden="true" class="line-numbers" id="line-numbers">1</div>
+<textarea aria-label="SQL editor" id="sql-editor" spellcheck="false" wrap="off"></textarea>
+</div>
+<div class="editor-footer">
+<span>SQL</span>
+<span id="editor-status" role="status">Ready</span>
+</div>
+</section>
+<aside class="panel inspector-panel" id="table-inspector">
+<div class="empty-inspector">
+<div class="empty-icon">⌗</div>
+<h3>Select a table</h3>
+<p>View columns and indexes.</p>
+</div>
+</aside>
+</div>
+<section class="panel results-panel">
+<div class="panel-header results-header">
+<div>
+<span class="panel-kicker">RESULTS</span>
+<h2 id="results-title">No query run yet</h2>
+</div>
+<div class="query-metrics" id="query-metrics"></div>
+</div>
+<div class="results-empty" id="sql-results">
+<div class="result-placeholder">
+<span>→</span>
+<p>Run a query to see results.</p>
+</div>
+</div>
+</section>
+</section>
+<section class="view" id="view-settings">
+<div class="workspace-heading"><div><h2>Settings</h2><p>Manage providers and workspace preferences.</p></div><button class="button ghost" id="settings-refresh" type="button">Refresh settings</button></div>
+<div class="settings-grid">
+<form class="panel form-card" id="settings-embedding-form"><span class="panel-kicker">EMBEDDINGS</span><h3>Embedding provider</h3><p>Use the same provider and model for your documents and queries.</p><div class="form-row two"><label>Provider<select id="embedding-provider"><option value="openai">OpenAI</option><option value="voyage">Voyage AI</option></select></label><label>Model<select id="embedding-model"></select></label></div><label>Dimensions<input id="embedding-dimensions" min="1" required="" type="number" value="1536"/></label><p class="field-hint" id="embedding-dimension-note"></p><label>Provider API key<input autocomplete="off" id="embedding-api-key" placeholder="Leave blank to keep the current key" type="password"/></label><p class="provider-note" id="embedding-key-status">Loading provider settings…</p><label class="checkbox-label"><input id="embedding-clear-key" type="checkbox"/> Clear this provider's active key</label><p class="privacy-note">Keys entered here stay in server memory and are never saved in this browser. Keys from the server environment or its private local file return after a restart.</p><details class="form-advanced"><summary>Request settings</summary><div class="form-row three"><label>Batch size<input id="embedding-batch-size" max="128" min="1" required="" type="number" value="32"/></label><label>Timeout (seconds)<input id="embedding-timeout" max="120" min="1" required="" type="number" value="60"/></label><label>Concurrent requests<input id="embedding-concurrency" max="16" min="1" required="" type="number" value="4"/></label></div></details><div class="inline-actions"><button class="button primary" id="embedding-save" type="submit">Save embedding settings</button></div><p class="inline-status" id="embedding-settings-status" role="status"></p></form>
+<form class="panel form-card" id="settings-rerank-form"><span class="panel-kicker">OPTIONAL RERANKING</span><h3>Reranking</h3><p>Reorder retrieved passages with Voyage. Enable per search in Playground.</p><label>Reranking model<select id="rerank-model"><option value="rerank-2.5">rerank-2.5</option><option value="rerank-2.5-lite">rerank-2.5-lite</option></select></label><label>Voyage reranking API key<input autocomplete="off" id="rerank-api-key" placeholder="Leave blank to keep the current key" type="password"/></label><p class="provider-note" id="rerank-key-status">Open Settings to load reranking configuration.</p><label class="checkbox-label"><input id="rerank-clear-key" type="checkbox"/> Clear the active reranking key</label><p class="privacy-note">A reranked search sends your question and candidate passage context to Voyage. A key entered here stays in server memory and is never saved in this browser. VOYAGE_API_KEY from the server environment or its private local file is loaded again after a restart.</p><div class="form-row two"><label>Reranking timeout (seconds)<input id="rerank-timeout" max="120" min="1" required="" type="number" value="60"/></label><label>Concurrent reranking requests<input id="rerank-concurrency" max="16" min="1" required="" type="number" value="4"/></label></div><button class="button primary" id="rerank-save" type="submit">Save reranking settings</button><p class="inline-status" id="rerank-settings-status" role="status"></p></form>
+<div class="settings-stack"><form class="panel form-card" id="settings-browser-form"><span class="panel-kicker">THIS BROWSER</span><h3>Browser preferences</h3><label>Default result page size<select id="preference-page-size"><option value="50">50 rows</option><option selected="" value="100">100 rows</option><option value="250">250 rows</option></select></label><label>Background refresh<select id="preference-refresh"><option value="0">Off</option><option selected="" value="15">Every 15 seconds</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option></select></label><label class="checkbox-label"><input id="preference-compact" type="checkbox"/> Compact table rows</label><button class="button ghost" type="submit">Save browser preferences</button><p class="inline-status" id="preference-status" role="status">Saved only in this browser.</p></form><section class="panel form-card"><span class="panel-kicker">SERVER</span><h3>Connection and runtime</h3><p>Runtime values are read only. Restart the server to change its environment settings.</p><div class="runtime-settings" id="server-settings"><p class="field-hint">Open Settings to load server details.</p></div><button class="button ghost" id="settings-token" type="button">Manage API token</button></section></div>
+</div>
+</section>
+<section class="view" id="view-guide"><div class="workspace-heading"><div><h2>Help</h2><p>Examples and reference.</p></div></div><section class="panel help-start" hidden="" id="quick-start"><h3 id="quick-start-title">Sample dataset</h3><p>The sample creates three documents with small hand-written vectors. Use Vector mode to search it.</p><div class="inline-actions"><button class="button primary" data-load-example="quickstart" type="button">Focus sample SQL</button><button class="button ghost" id="quick-start-guide" type="button">Open tutorial</button><button class="button ghost" id="dismiss-quick-start" type="button">Dismiss quick start</button></div></section>
+<section aria-labelledby="tutorial-title" class="hands-on panel">
+<div class="hands-on-heading">
+<div>
+<span class="panel-kicker">GUIDED QUICKSTART</span>
+<h2 id="tutorial-title" tabindex="-1">Quickstart</h2>
+</div>
+<p>Run these examples in the SQL editor.</p>
+</div>
+<ol class="tutorial-steps">
+<li>
+<span class="tutorial-number">01</span>
+<h3>Model and seed</h3>
+<p>Create <code>documents</code>, add a hash index for metadata, and insert three fixed-width embeddings.</p>
+<button class="button ghost compact" data-load-example="quickstart" type="button">Load setup SQL <span aria-hidden="true">→</span></button>
+</li>
+<li>
+<span class="tutorial-number">02</span>
+<h3>Execute safely</h3>
+<p>Review the SQL, then run it with <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. The batch commits together or not at all.</p>
+<span class="tutorial-hint">Look for three completed statements</span>
+</li>
+<li>
+<span class="tutorial-number">03</span>
+<h3>Search with context</h3>
+<p>Filter to <code>category = 'tech'</code>, calculate cosine distance, and return the nearest rows first.</p>
+<button class="button ghost compact" data-load-example="hybrid" type="button">Load search SQL <span aria-hidden="true">→</span></button>
+</li>
+</ol>
+</section>
+<section aria-labelledby="command-reference-title" class="command-reference panel">
+<div class="command-reference-heading">
+<div>
+<span class="panel-kicker">COMMAND REFERENCE</span>
+<h2 id="command-reference-title" tabindex="-1">Everything close at hand</h2>
+</div>
+<p>Open a group when you need it. Press <kbd>?</kbd> anywhere outside an input to return here.</p>
+</div>
+<div class="command-groups">
+<details class="command-group" open="">
+<summary><span>Web console</span><small>Actions and shortcuts</small></summary>
+<div class="command-list">
+<div><code>Ctrl / ⌘ + Enter</code><span>Run every SQL statement in the editor.</span></div>
+<div><code>Understand query</code><span>Explain the query intent and optimized vector plan.</span></div>
+<div><code>Clean up</code><span>Remove extra blank lines without changing the SQL.</span></div>
+<div><code>Examples</code><span>Load setup, hybrid search, upsert, or aggregate SQL.</span></div>
+<div><code>Tables</code><span>Inspect schemas and indexes or generate a SELECT.</span></div>
+<div><code>Vector search</code><span>Build an exact search using guided form controls.</span></div>
+</div>
+</details>
+<details class="command-group">
+<summary><span>SQL vocabulary</span><small>Supported statements and functions</small></summary>
+<div class="command-list">
+<div><code>CREATE / DROP</code><span>Manage tables and scalar hash indexes.</span></div>
+<div><code>INSERT / UPDATE / DELETE</code><span>Write rows and use <code>ON CONFLICT</code> upserts.</span></div>
+<div><code>SELECT</code><span>Filter, group, aggregate, order, limit, and offset results.</span></div>
+<div><code>EXPLAIN</code><span>Inspect index pruning and vector top-k planning.</span></div>
+<div><code>cosine_distance · l2_distance · squared_l2_distance</code><span>Rank vectors by cosine or Euclidean distance.</span></div>
+<div><code>dot_product · normalize · vector_norm · vector_dims</code><span>Transform and inspect embeddings.</span></div>
+<div><code>&lt;=&gt; · &lt;-&gt; · &lt;#&gt;</code><span>Use operator shortcuts for cosine, L2, and negative dot product.</span></div>
+</div>
+</details>
+<details class="command-group">
+<summary><span>Terminal shell</span><small>Dot commands for <code>vectors&gt;</code></small></summary>
+<div class="command-list shell-commands">
+<div><code>.help</code><span>List every shell command.</span></div>
+<div><code>.tutorial</code><span>Print the copy-ready SQL walkthrough.</span></div>
+<div><code>.tables</code><span>List tables.</span></div>
+<div><code>.schema TABLE</code><span>Show columns and constraints.</span></div>
+<div><code>.indexes TABLE</code><span>Show scalar hash indexes.</span></div>
+<div><code>.checkpoint</code><span>Compact the durable write-ahead log.</span></div>
+<div><code>.save PATH</code><span>Write a portable snapshot.</span></div>
+<div><code>.open PATH</code><span>Open a snapshot as an in-memory session.</span></div>
+<div><code>.read PATH</code><span>Execute SQL from a file.</span></div>
+<div><code>.timer on|off</code><span>Toggle execution timing.</span></div>
+<div><code>.cancel</code><span>Discard pending multiline SQL.</span></div>
+<div><code>.quit / .exit</code><span>Close the shell.</span></div>
+</div>
+<p class="command-note">Dot commands belong to the terminal shell; enter SQL in this browser console.</p>
+</details>
+</div>
+</section>
+</section>
+</main>
+</div>
+<dialog id="data-create-dialog"><div class="form-card"><button aria-label="Close create data" class="dialog-close" data-close-dialog="data-create-dialog" type="button">×</button><span class="panel-kicker">CREATE</span><h2>Create data</h2><div class="create-choices"><button class="create-choice" id="data-create-collection" type="button"><strong>RAG collection</strong><span>Documents with automatic chunking, embeddings, and connections. Add typed fields for filtering.</span></button><button class="create-choice" id="data-create-table" type="button"><strong>Structured table</strong><span>Ordinary rows with fields you define. Manage vectors and ingestion yourself.</span></button></div></div></dialog>
+<dialog class="wide-dialog" id="graph-create-dialog"><form class="form-card" id="graph-create-form" novalidate=""><button aria-label="Close create collection" class="dialog-close" data-close-dialog="graph-create-dialog" type="button">×</button><span class="panel-kicker">RAG COLLECTION</span><h2>Create collection</h2><p>Choose a name and embedding configuration.</p><label>Collection name<input id="graph-create-name" maxlength="48" pattern="[a-z][a-z0-9_]{0,47}" placeholder="knowledge" required=""/></label><details class="form-advanced"><summary>Document fields <small>optional</small></summary><p class="field-hint">Add fields such as category, year, or published. Values become real SQL columns and are not embedded.</p><div aria-label="Collection document fields" class="field-builder" id="graph-create-fields"></div></details><div class="collection-provider"><p class="provider-note" id="graph-create-profile"></p><button class="button ghost compact" id="graph-create-settings" type="button">Embedding settings ↗</button><p class="field-hint">The model and dimensions are fixed when you create the collection. You can add a provider key in Settings before saving documents.</p></div><details class="form-advanced"><summary>Automatic semantic links</summary><div class="form-row two"><label>Neighbors per chunk<input id="graph-create-neighbors" max="16" min="0" required="" type="number" value="3"/></label><label>Minimum cosine similarity<input id="graph-create-threshold" max="1" min="0" required="" step="0.01" type="number" value="0.8"/></label></div></details><p class="inline-status" id="graph-create-status" role="status"></p><div class="dialog-actions"><button class="button ghost" data-close-dialog="graph-create-dialog" type="button">Cancel</button><button class="button primary" id="graph-create-submit" type="submit">Create collection</button></div></form></dialog>
+<dialog class="wide-dialog" id="admin-create-dialog"><form class="form-card" id="admin-create-form" novalidate=""><button aria-label="Close create table" class="dialog-close" data-close-dialog="admin-create-dialog" type="button">×</button><span class="panel-kicker">STRUCTURED TABLE</span><h2>Create table</h2><label>Table name<input id="admin-create-name" maxlength="128" placeholder="documents" required=""/></label><p class="field-hint">Choose the fields each row stores. This table does not create chunks or relationships automatically.</p><div aria-label="Table fields" class="field-builder" id="admin-create-fields"></div><details class="form-advanced"><summary>Advanced schema JSON</summary><label>Columns JSON <small>optional override of the fields above</small><textarea class="code-input" id="admin-create-schema" placeholder='[{"name":"id","data_type":"INTEGER","nullable":false,"unique":true}]' rows="6" spellcheck="false"></textarea></label></details><p class="inline-status" id="admin-create-status" role="status"></p><div class="dialog-actions"><button class="button ghost" data-close-dialog="admin-create-dialog" type="button">Cancel</button><button class="button primary" id="admin-create-submit" type="submit">Create table</button></div></form></dialog>
+<dialog class="wide-dialog" id="relationship-dialog"><form class="form-card" id="relationship-form" novalidate=""><button aria-label="Close create relationship" class="dialog-close" data-close-dialog="relationship-dialog" type="button">×</button><span class="panel-kicker">RELATIONSHIP</span><h2>Connect matching fields</h2><label>Relationship name<input id="relationship-name" maxlength="48" placeholder="documents_by_category" required=""/></label><div class="relationship-endpoints"><fieldset><legend>From</legend><label>Source table<select id="relationship-source-table"><option value="">Choose a table</option></select></label><label>Source field<select id="relationship-source-column"><option value="">Choose a scalar field</option></select></label></fieldset><span aria-hidden="true" class="relationship-arrow">→</span><fieldset><legend>To</legend><label>Target table<select id="relationship-target-table"><option value="">Choose a table</option></select></label><label>Target field<select id="relationship-target-column"><option value="">Choose a matching field</option></select></label></fieldset></div><p class="field-hint">Choose fields of the same scalar type. Links match field values; they do not enforce foreign-key constraints. No embeddings are created.</p><p class="inline-status" id="relationship-status" role="status"></p><div class="dialog-actions"><button class="button ghost" data-close-dialog="relationship-dialog" type="button">Cancel</button><button class="button ghost" id="relationship-dialog-refresh" type="button">Refresh links</button><button class="button primary" id="relationship-save" type="submit">Save relationship</button></div></form></dialog>
+<dialog id="admin-drop-dialog"><form class="form-card" id="admin-drop-form"><button aria-label="Close delete table" class="dialog-close" data-close-dialog="admin-drop-dialog" type="button">×</button><span class="panel-kicker">DELETE TABLE</span><h2 id="admin-drop-title">Delete this table?</h2><p>This permanently deletes the table and all its rows. Type its exact name to continue.</p><label>Table name confirmation<input autocomplete="off" id="admin-drop-confirm" required=""/></label><p class="inline-status" id="admin-drop-status" role="status"></p><div class="dialog-actions"><button class="button ghost" data-close-dialog="admin-drop-dialog" type="button">Cancel</button><button class="button danger" disabled="" id="admin-drop-submit" type="submit">Delete table permanently</button></div></form></dialog>
+<dialog id="admin-delete-dialog"><form class="form-card" id="admin-delete-form"><span class="panel-kicker">DELETE ROW</span><h2>Delete this row?</h2><p id="admin-delete-description"></p><p class="inline-status" id="admin-delete-status" role="status"></p><div class="dialog-actions"><button class="button ghost" data-close-dialog="admin-delete-dialog" type="button">Cancel</button><button class="button danger" id="admin-delete-confirm" type="submit">Delete selected row</button></div></form></dialog>
+<dialog id="token-dialog">
+<form class="token-card" id="token-form" method="dialog">
+<button aria-label="Close" class="dialog-close" type="button" value="cancel">×</button>
+<span class="panel-kicker">AUTHENTICATION</span>
+<h2>Connect to vectors</h2>
+<p>If the server uses <code>VECTORS_API_TOKEN</code>, enter it here. It stays in this browser tab.</p>
+<label>Bearer token<input autocomplete="off" id="token-input" placeholder="Paste API token" type="password"/></label>
+<div class="dialog-actions">
+<button class="button ghost" id="clear-token" type="button" value="cancel">Clear token</button>
+<button class="button primary" id="save-token" type="submit" value="default">Save and connect</button>
+</div>
+</form>
+</dialog>
+<div aria-live="polite" class="toast-region" id="toast-region"></div>
+<script defer="" src="/assets/app.js"></script>
 </body>
 </html>

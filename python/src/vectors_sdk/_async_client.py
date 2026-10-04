@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from ._chat import chat_body
 from ._common import base_url, batches, decode, encode, segment
 from ._version import __version__
 from .errors import APIError, BulkInsertError, ProtocolError, TransportError
@@ -433,8 +434,9 @@ class AsyncCollection:
         Filters combine with AND and use column/operator/value mappings. They
         constrain both vector candidates and graph expansion. Set
         max_seeds_per_document to 1..20 to cap each document's traversal seeds;
-        None keeps the original seed ranking. This operation requires the
-        collection's embedding provider and is never retried.
+        None keeps the original seed ranking. With vector_weight=0, keyword
+        retrieval skips query embeddings and returns similarity=None; otherwise
+        the collection's embedding provider is required. Never retried.
         """
         body: dict[str, Any] = {
             "text": text,
@@ -466,6 +468,46 @@ class AsyncCollection:
             self._path + "/retrieve",
             body=body,
         )
+
+    async def chat(
+        self,
+        text: str,
+        *,
+        history: Sequence[Mapping[str, Any]] | None = None,
+        model: str = "gpt-4.1-mini",
+        retrieval: Mapping[str, Any] | None = None,
+        mode: str = "answer",
+        context_mode: str = "question",
+        retrieval_query: str | None = None,
+        answer_style: str = "chat",
+        grounding: str = "standard",
+        generation_timeout_ms: int = 60000,
+        max_output_tokens: int = 2048,
+    ) -> dict[str, Any]:
+        """Answer with fresh retrieved sources, or use mode='retrieve' to skip answers.
+
+        The default searches text unchanged. Supply a standalone retrieval_query
+        or opt into a paid conversation rewrite with context_mode='conversation'.
+        These options are mutually exclusive. History is context, not evidence.
+        Strict grounding checks cited labels and exact source quotes; it does
+        not prove factual entailment. Voice returns speech_text, not audio.
+        Inspect answer_status and citation_status before presenting an answer.
+        Model-call deadlines are per call, not the entire pipeline. Never retried.
+        """
+        body = chat_body(
+            text,
+            history=history,
+            model=model,
+            retrieval=retrieval,
+            mode=mode,
+            context_mode=context_mode,
+            retrieval_query=retrieval_query,
+            answer_style=answer_style,
+            grounding=grounding,
+            generation_timeout_ms=generation_timeout_ms,
+            max_output_tokens=max_output_tokens,
+        )
+        return await self._client._request("POST", self._path + "/chat", body=body)
 
     async def browse(
         self,

@@ -288,7 +288,9 @@ class SDKTests(unittest.TestCase):
         def handler(request):
             self.assertEqual(request.url.path, "/v1/graph/collections/docs/retrieve")
             payloads.append(json.loads(request.content))
-            return httpx.Response(200, json={"hits": [{"retrieval_path": evidence}]})
+            return httpx.Response(
+                200, json={"hits": [{"retrieval_path": evidence, "similarity": None}]}
+            )
 
         with Client(transport=httpx.MockTransport(handler)) as client:
             graph = client.collection("docs")
@@ -328,6 +330,7 @@ class SDKTests(unittest.TestCase):
             },
         )
         self.assertEqual(result["hits"][0]["retrieval_path"], evidence)
+        self.assertIsNone(result["hits"][0]["similarity"])
 
     def test_retrieval_document_filters_preserve_types_and_explicit_empty_list(self):
         payloads = []

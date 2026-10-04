@@ -28,7 +28,7 @@ const state = {
   tables: [],
   schemas: new Map(),
   activeTable: null,
-  view: "search",
+  view: "connections",
   preferences: readBrowserPreferences(),
   refreshTimer: null,
   searchMode: "text",
@@ -102,6 +102,8 @@ function clear(element) {
   return element;
 }
 
+function counted(count, noun) { return `${count} ${noun}${count === 1 ? "" : "s"}`; }
+
 function setSidebarOpen(open) {
   document.body.classList.toggle("sidebar-open", open);
   $("#mobile-menu").setAttribute("aria-expanded", String(open));
@@ -142,14 +144,17 @@ function staleRequest() {
 
 async function request(path, options = {}) {
   const method = options.method || "GET";
-  const { timeout = method === "GET" ? 15000 : 60000, ...fetchOptions } = options;
+  const { timeout = method === "GET" ? 15000 : 60000, signal, ...fetchOptions } = options;
   const session = state.session;
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) controller.abort();
   const timer = window.setTimeout(() => controller.abort(), timeout);
   state.requests.add(controller);
   const headers = new Headers(options.headers || {});
   headers.set("accept", "application/json");
-  if (options.body) headers.set("content-type", "application/json");
+  if (typeof options.body === "string" && !headers.has("content-type")) headers.set("content-type", "application/json");
   if (state.token) headers.set("authorization", `Bearer ${state.token}`);
   try {
     const response = await fetch(path, { ...fetchOptions, headers, cache: "no-store", signal: controller.signal });
@@ -176,6 +181,7 @@ async function request(path, options = {}) {
     return payload;
   } catch (error) {
     if (session !== state.session) throw staleRequest();
+    if (signal?.aborted) throw Object.assign(new Error("Request stopped. Work already sent may still finish on the server."), { kind: "cancelled" });
     if (controller.signal.aborted) {
       const message = method === "GET"
         ? "The server took too long to respond. Try reconnecting."
@@ -191,6 +197,7 @@ async function request(path, options = {}) {
     throw error;
   } finally {
     window.clearTimeout(timer);
+    signal?.removeEventListener("abort", cancel);
     state.requests.delete(controller);
   }
 }
@@ -267,7 +274,7 @@ function loadTables({ quiet = false, force = false } = {}) {
       const data = await request("/v1/tables");
       if (generation !== state.tablesGeneration) return null;
       const changed = force || recovering || state.revision !== data.revision;
-      const tablesChanged = JSON.stringify(state.tables) !== JSON.stringify(data.tables);
+      const tablesChanged = state.revision === null || JSON.stringify(state.tables) !== JSON.stringify(data.tables);
       if (changed) invalidateSchemas();
       state.revision = data.revision;
       state.tables = data.tables;
@@ -418,7 +425,7 @@ function switchView(view) {
     if (active) element.setAttribute("aria-current", "page");
     else element.removeAttribute("aria-current");
   });
-  const titles = { connections: "Connections", console: "SQL", search: "Search", data: "Data", settings: "Settings", guide: "Help" };
+  const titles = { connections: "Playground", console: "SQL", search: "Search", data: "Data", settings: "Settings", guide: "Help" };
   $("#view-title").textContent = titles[view];
   setSidebarOpen(false);
   if (view === "settings") loadSettingsView();
@@ -1892,13 +1899,78 @@ async function embedAndInsertDocuments() {
 
 function newGraphState() {
   return { collections: [], collection: "", catalogGeneration: 0, generation: 0, previewGeneration: 0,
+    playgroundTab: "chat", compareOpen: false,
     searchGeneration: 0, seedExplicit: false, busy: false, searchBusy: false, loading: false, notice: "",
+    uploadQueues: new Map(), capacity: null, capacityGeneration: 0,
+    chat: { turns: [], busy: false, generation: 0, controller: null, timer: null },
+    evaluation: { questions: [], datasetName: "", generation: 0, loadGeneration: 0, loading: false, run: null, controller: null, offset: 0, message: "" },
     filterDrafts: new Map(), filterSchema: "",
     mode: "pages", rootChunk: null, rootLabel: "", pageSelection: null, neighborhoodTruncated: false, offset: 0, limit: 100, total: 0,
     revision: null, nodes: [], edges: [], selected: null, zoom: 1, pan: { x: 0, y: 0 }, dragged: false };
 }
 
-const GRAPH_COLORS = ["#65d9e8", "#c8f560", "#b8a5ff", "#ff9e64", "#f6a6cf", "#8dafff", "#75d7b4"];
+function setPlaygroundSettings(open, { focus = false } = {}) {
+  $("#playground-layout").classList.toggle("settings-open", open);
+  $("#playground-settings").hidden = !open;
+  $("#playground-settings-toggle").setAttribute("aria-expanded", String(open));
+  $("#graph-chat-settings").setAttribute("aria-expanded", String(open));
+  if (focus) $(open ? "#playground-strategy" : "#playground-settings-toggle").focus();
+}
+
+function switchPlaygroundTab(tab, { focus = false } = {}) {
+  if (!["chat", "documents", "graph"].includes(tab)) return;
+  state.graph.playgroundTab = tab;
+  for (const button of $$("[data-playground-tab]")) {
+    const selected = button.dataset.playgroundTab === tab;
+    button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1;
+    $("#playground-" + button.dataset.playgroundTab).hidden = !selected;
+    if (focus && selected) button.focus();
+  }
+  $("#playground-settings-toggle").hidden = tab !== "chat";
+  if (tab === "graph") window.requestAnimationFrame(() => renderGraph());
+}
+
+function playgroundStrategy(options = null) {
+  if (!options) return $("#playground-strategy").value;
+  if (options.vector_weight === 0) return "keyword";
+  if (options.lexical_weight === 0) return "vector";
+  return options.max_hops > 0 ? "graph" : "hybrid";
+}
+
+function strategyLabel(strategy) {
+  return { graph: "Graph RAG", hybrid: "Hybrid", vector: "Semantic", keyword: "Keyword" }[strategy] || "Custom";
+}
+
+function updatePlaygroundConfiguration({ changed = false } = {}) {
+  const strategy = playgroundStrategy();
+  $("#graph-hops").disabled = strategy !== "graph" || state.graph.busy || state.graph.searchBusy;
+  const descriptions = { graph: "Semantic and keyword search with connected passages.", hybrid: "Semantic and keyword search.", vector: "Search by meaning.", keyword: "Keyword search. No query embedding required." };
+  $("#playground-strategy-hint").textContent = descriptions[strategy] || "";
+  $("#playground-settings-summary").textContent = `${strategyLabel(strategy)} · ${$("#graph-result-limit").value || "—"} sources`;
+  $("#playground-strategy").disabled = state.graph.busy || state.graph.searchBusy;
+  $("#graph-search-privacy").textContent = $("#graph-reranker").value === "voyage"
+    ? "Voyage receives the question and candidate passages. Provider charges apply."
+    : strategy === "keyword" ? "Keyword retrieval runs locally." : "Search uses the configured embedding provider.";
+  if (changed) {
+    state.graph.compareOpen = false;
+    renderPlaygroundComparison();
+  }
+  updateGraphChatControls();
+  renderEvaluationControls();
+}
+
+async function graphQueryConfiguration(options) {
+  if (!graphCollection()) throw new Error("Choose a collection first.");
+  if (options.vector_weight !== 0) return requireGraphProfile();
+  // Keyword retrieval is local even when the active embedding provider differs
+  // from the collection profile. Generation and optional reranking stay separate.
+  return state.embeddings || await loadEmbeddingSettings().catch((error) => {
+    if (error.stale) throw error;
+    return { timeout_seconds: 60, generation_configured: false };
+  });
+}
+
+const GRAPH_COLORS = ["#3d82c4", "#329779", "#8774b8", "#c18444", "#bb709b", "#6679bc", "#55a6a9"];
 function graphColor(id) {
   let hash = 0;
   for (const character of String(id)) hash = ((hash * 31) + character.codePointAt(0)) >>> 0;
@@ -1914,8 +1986,8 @@ function graphLabel(item) {
 function graphProfileNote() {
   const collection = graphCollection();
   $("#graph-profile").textContent = collection
-    ? `${embeddingDescription(collection.config.profile)} · fixed collection profile`
-    : "Collections keep a fixed embedding model for documents and questions.";
+    ? embeddingDescription(collection.config.profile)
+    : "Choose or create a collection.";
   for (const id of ["graph-view-data", "graph-open-sql", "graph-add-open"]) $("#" + id).disabled = !collection || state.graph.busy;
 }
 
@@ -1977,11 +2049,15 @@ function describeGraphFilters(filters) {
   }).join(" AND ");
 }
 function graphFiltersChanged() {
+  cancelEvaluation("Document filters changed. Start a new evaluation to use them.");
+  if (state.graph.chat.busy) stopGraphChat({ message: "Document filters changed. The pending answer was discarded." });
   state.graph.searchGeneration += 1;
   state.graph.searchBusy = false;
   $("#graph-search-results").setAttribute("aria-busy", "false");
   clear($("#graph-search-results")).append(node("p", "empty-workspace", "Document filters changed. Retrieve context to see matching passages."));
   $("#graph-search-status").textContent = "";
+  state.graph.compareOpen = false;
+  renderPlaygroundComparison();
   updateGraphFilterSummary(); updateGraphPaging();
 }
 function updateGraphFilterSummary() {
@@ -1990,8 +2066,8 @@ function updateGraphFilterSummary() {
   try {
     const filters = readGraphFilters();
     $("#graph-filter-summary").textContent = filters.length
-      ? `Match all: ${describeGraphFilters(filters)}. Only matching documents can supply passages or connecting context.`
-      : "All documents are eligible. Add filters to narrow the source context.";
+      ? `Match all: ${describeGraphFilters(filters)}`
+      : "All documents";
   } catch (error) { $("#graph-filter-summary").textContent = error.message; }
 }
 function syncGraphFilters() {
@@ -2095,11 +2171,12 @@ function syncGraphDocumentFields() {
   }
 }
 
-function readGraphDocumentFields() {
+function readGraphDocumentFields(overrides = {}) {
   const target = $("#graph-document-fields");
   const columns = graphDocumentColumns();
   if (target.dataset.owner !== JSON.stringify([state.graph.collection, columns])) throw new Error("Reload this collection before editing its document fields.");
   return Object.fromEntries(columns.map((column) => {
+    if (Object.hasOwn(overrides, column.name)) return [column.name, overrides[column.name]];
     const input = $$('[data-document-field]', target).find((element) => element.dataset.documentField === column.name);
     const nullControl = $$('[data-document-null]', target).find((element) => element.dataset.documentNull === column.name);
     if (!input) throw new Error("Reload this collection to load its document fields.");
@@ -2181,6 +2258,10 @@ function updateGraphPaging() {
   $$("#graph-neighborhood-controls input, #graph-neighborhood-controls select, #graph-neighborhood-controls button, [data-explore-connections]").forEach((element) => { element.disabled = graph.busy; });
   $$("#graph-relationship-form input, #graph-relationship-form select, #graph-relationship-form button, [data-remove-relationship]").forEach((element) => { element.disabled = graph.busy || graph.loading; });
   $$("#graph-search-form input, #graph-search-form textarea, #graph-search-form select, #graph-search-form button").forEach((element) => { element.disabled = graph.busy || graph.searchBusy; });
+  const importing = graphImportRunning();
+  $$("#graph-document-form input, #graph-document-form select, #graph-document-form textarea, #graph-document-form button, #graph-relationship-form input, #graph-relationship-form select, #graph-relationship-form button, [data-remove-relationship]").forEach((element) => { element.disabled = graph.busy || importing; });
+  for (const id of ["graph-create-open", "graph-add-open"]) $("#" + id).disabled = graph.busy || importing;
+  updatePlaygroundConfiguration(); renderPdfQueue();
   syncGraphFilters();
 }
 
@@ -2205,14 +2286,18 @@ async function loadGraphCollections(preferred = null) {
     }
   } catch (error) { if (generation === state.graph.catalogGeneration) graphError(error); }
 }
-async function selectGraphCollection(name) {
-  if (state.graph.busy) return;
+async function selectGraphCollection(name, { allowBusy = false } = {}) {
+  if (state.graph.busy && !allowBusy) return;
   const graph = state.graph;
+  stopPdfQueue(graphUploadQueue(), "Paused because the collection changed. Return to this collection to review and resume the queue.");
+  stopGraphChat({ clearHistory: true, message: "" });
+  cancelEvaluation("", { clearResults: true });
   graph.catalogGeneration += 1;
   graph.collection = name;
   graph.generation += 1;
   graph.searchGeneration += 1;
   graph.previewGeneration += 1;
+  graph.capacity = null; graph.capacityGeneration += 1;
   graph.searchBusy = false; graph.loading = false;
   graph.mode = "pages"; graph.rootChunk = null; graph.rootLabel = ""; graph.pageSelection = null;
   $("#graph-neighborhood-controls").reset();
@@ -2222,9 +2307,11 @@ async function selectGraphCollection(name) {
   $("#graph-document-status").textContent = "";
   clear($("#graph-chunk-preview"));
   clear($("#graph-search-results")).append(node("p", "empty-workspace", "Retrieved passages and their source citations will appear here."));
-  graphProfileNote(); renderGraphDocumentFields({ reset: true }); renderGraphFilters(); renderGraph(); renderGraphDetails(); updateGraphPaging();
+  $("#playground-retrieval-results").hidden = true;
+  graphProfileNote(); renderGraphDocumentFields({ reset: true }); renderGraphFilters(); renderGraph(); renderGraphDetails(); renderGraphChat(); updateGraphPaging();
   $("#graph-search-results").setAttribute("aria-busy", "false");
-  if (name) await loadGraph();
+  renderGraphCapacity(); renderPdfQueue();
+  if (name) { void loadGraphCapacity(); await loadGraph(); }
 }
 async function loadGraph() {
   const graph = state.graph;
@@ -2277,6 +2364,7 @@ function renderGraphMode() {
 async function exploreGraphConnections(item) {
   const graph = state.graph;
   if (graph.busy || !item || !graph.collection) return;
+  switchPlaygroundTab("graph");
   if (graph.mode === "pages") graph.pageSelection = graph.selected;
   graph.catalogGeneration += 1;
   graph.mode = "neighborhood"; graph.rootChunk = item.chunk_id; graph.rootLabel = graphLabel(item);
@@ -2412,7 +2500,7 @@ function renderGraph() {
   const svg = clear($("#graph-canvas"));
   const defs = svgNode("defs");
   const marker = svgNode("marker", { id: "graph-arrow", viewBox: "0 0 10 10", refX: 20, refY: 5, markerWidth: 5, markerHeight: 5, orient: "auto-start-reverse" });
-  marker.append(svgNode("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#ff9e64" })); defs.append(marker); svg.append(defs);
+  marker.append(svgNode("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#a45b14" })); defs.append(marker); svg.append(defs);
   const layer = svgNode("g", { id: "graph-drawing" }); svg.append(layer);
   const positions = graphPositions(graph.nodes);
   if (graph.mode === "neighborhood" && graph.nodes.length) {
@@ -2504,6 +2592,7 @@ function renderGraphDetails() {
   $("#graph-relationship-form").hidden = !selected;
   if (!selected) { target.append(node("h3", "", "Follow a connection"), node("p", "", "Select a point or a passage from the list to read its source and relationships.")); return; }
   target.append(node("h3", "", selected.title || selected.document_id), graphCitation(selected), node("p", "graph-passage", selected.text), node("code", "graph-chunk-id", selected.chunk_id));
+  if (Number.isSafeInteger(selected.retrievalRevision) && selected.retrievalRevision !== state.graph.revision) target.append(node("p", "field-hint", `Source from retrieval revision ${selected.retrievalRevision}. Connections use the loaded graph at revision ${state.graph.revision ?? "unknown"}.`));
   if (state.graph.mode === "neighborhood" && Number.isInteger(selected.depth)) target.append(node("p", "graph-depth-description", graphDepthLabel(selected)));
   const explore = node("button", "button ghost compact graph-explore-button", "Explore connections"); explore.type = "button"; explore.dataset.exploreConnections = "";
   explore.disabled = state.graph.busy;
@@ -2536,7 +2625,7 @@ function renderGraphDetails() {
   fillOptions($("#graph-link-target"), state.graph.nodes.filter((item) => item.chunk_id !== selected.chunk_id).map((item) => ({ id: item.chunk_id, label: graphLabel(item) })), null, "Choose a target passage");
 }
 async function graphMutation(action, statusId = "graph-status") {
-  if (state.graph.busy) return;
+  if (state.graph.busy || graphImportRunning()) return;
   const session = state.session;
   setGraphBusy(true);
   try { await action(); }
@@ -2569,19 +2658,18 @@ async function createGraphCollection(event) {
     if (!$("#graph-create-neighbors").value.trim() || !$("#graph-create-threshold").value.trim() || !Number.isInteger(semantic_neighbors) || semantic_neighbors < 0 || semantic_neighbors > 16 || !Number.isFinite(semantic_threshold) || semantic_threshold < 0 || semantic_threshold > 1) throw new Error("Automatic links need 0–16 neighbors and a cosine threshold between 0 and 1.");
     const session = state.session;
     const result = await request("/v1/graph/collections", { method: "POST", body: JSON.stringify({ name, semantic_neighbors, semantic_threshold, document_columns }) });
+    if (session !== state.session) throw staleRequest();
     $("#graph-create-dialog").close();
     state.graph.collections = [...state.graph.collections.filter((item) => item.config.name !== result.config.name), result];
-    state.graph.collection = result.config.name;
-    state.graph.revision = result.revision;
-    state.graph.mode = "pages"; state.graph.rootChunk = null; state.graph.rootLabel = ""; state.graph.pageSelection = null;
-    state.graph.nodes = []; state.graph.edges = []; state.graph.selected = null; state.graph.offset = 0;
-    renderGraphDocumentFields({ reset: true });
+    await selectGraphCollection(result.config.name, { allowBusy: true });
+    if (session !== state.session) throw staleRequest();
     switchView("connections");
+    switchPlaygroundTab("documents");
     await loadGraphCollections(result.config.name);
     if (session !== state.session) throw staleRequest();
     await loadTables({ quiet: true, force: true });
     if (session !== state.session) throw staleRequest();
-    $("#graph-status").textContent = "Collection created. Add your first document to connect its passages.";
+    $("#graph-status").textContent = "Collection created. Upload PDFs or add text.";
     $("#graph-document-panel").open = true;
     $("#graph-document-id").focus();
   }, "graph-create-status");
@@ -2665,6 +2753,11 @@ function graphRetrievalOptions() {
     direction: $("#graph-retrieval-direction").value, min_weight: numeric("#graph-retrieval-min-weight"),
     vector_weight: 1, lexical_weight: 1,
   };
+  const strategy = playgroundStrategy();
+  if (!["graph", "hybrid", "vector", "keyword"].includes(strategy)) throw new Error("Choose a search method.");
+  if (strategy !== "graph") payload.max_hops = 0;
+  if (strategy === "keyword") payload.vector_weight = 0;
+  if (strategy === "vector") payload.lexical_weight = 0;
   for (const [key, label, min, max] of [["candidate_limit", "Candidate passages", 1, 100], ["seed_limit", "Starting passages", 1, 20], ["max_results", "Maximum results", 1, 100], ["max_hops", "Connection depth", 0, 3], ["neighbor_limit", "Neighbors per passage", 1, 32], ["max_context_bytes", "Context budget", 1, 1048576], ["max_per_document", "Results per document", 1, 100]]) {
     if (!Number.isInteger(payload[key]) || payload[key] < min || payload[key] > max) throw new Error(`${label} must be a whole number between ${min} and ${max}.`);
   }
@@ -2703,7 +2796,7 @@ function validatedRetrievalPath(hit) {
   }
   return current === hit.chunk_id ? { seed: path.seed_chunk_id, steps } : null;
 }
-function renderGraphRetrievalPath(hit, returnedPassages) {
+function renderGraphRetrievalPath(hit, returnedPassages, collection = state.graph.collection) {
   if (hit.retrieval_path === undefined || hit.retrieval_path === null) return null;
   const details = node("details", "graph-retrieval-path");
   details.append(node("summary", "", "How this passage was found"));
@@ -2736,7 +2829,7 @@ function renderGraphRetrievalPath(hit, returnedPassages) {
         const button = node("button", "button ghost compact", id === path.seed ? "Explore starting seed" : "Explore bridge connection");
         button.type = "button"; button.dataset.exploreConnections = ""; button.disabled = state.graph.busy;
         button.setAttribute("aria-label", `Explore connections for ${id}`);
-        button.addEventListener("click", () => void exploreGraphConnections({ chunk_id: id })); actions.append(button);
+        button.addEventListener("click", () => { if (collection === state.graph.collection) void exploreGraphConnections({ chunk_id: id }); }); actions.append(button);
       }
       details.append(actions);
     }
@@ -2757,13 +2850,13 @@ async function retrieveGraphContext(event) {
   try {
     const text = $("#graph-question").value.trim();
     if (!text) throw new Error("Enter a question first.");
-    const maxBytes = $("#graph-reranker").value === "voyage" ? 7872 : 8191;
+    const reranker = $("#graph-reranker").value;
+    const maxBytes = reranker === "voyage" ? 7872 : 8191;
     if (text.includes("\0") || new TextEncoder().encode(text).length > maxBytes) throw new Error(`Questions must not contain NUL characters and must fit within ${maxBytes} UTF-8 bytes.`);
     const options = graphRetrievalOptions();
     const documentFilters = readGraphFilters();
-    const config = await requireGraphProfile();
+    const config = await graphQueryConfiguration(options);
     if (!current()) throw staleRequest();
-    const reranker = $("#graph-reranker").value;
     if (reranker === "voyage") {
       const settings = state.reranking || await loadRerankingSettings();
       if (!settings?.configured) throw new Error("Add a Voyage reranking key in Settings first.");
@@ -2771,35 +2864,731 @@ async function retrieveGraphContext(event) {
     if (!current()) throw staleRequest();
     const payload = { text, ...options, reranker };
     if (documentFilters.length) payload.document_filters = documentFilters;
-    $("#graph-search-status").textContent = reranker === "voyage" ? "Retrieving candidates, then asking Voyage to rerank their context…" : "Combining vector matches, lexical evidence, and connected passages…";
+    $("#graph-search-status").textContent = reranker === "voyage" ? "Retrieving and reranking…" : "Retrieving…";
     const result = await request(graphPath("/retrieve"), { method: "POST", timeout: (config.timeout_seconds + (reranker === "voyage" ? state.reranking.timeout_seconds : 0) + 15) * 1000, body: JSON.stringify(payload) });
     if (!current()) throw staleRequest();
+    switchPlaygroundTab("chat");
+    $("#playground-retrieval-results").hidden = false;
     renderGraphContext(result, documentFilters);
-    $("#graph-search-status").textContent = `${result.hits.length} passage${result.hits.length === 1 ? "" : "s"} retrieved. Scores rank candidates; they are not confidence or factual certainty.`;
+    $("#graph-search-status").textContent = `${counted(result.hits.length, "passage")} retrieved.`;
   } catch (error) { if (current()) graphError(error, "graph-search-status"); }
   finally { if (current()) { graph.searchBusy = false; updateGraphPaging(); $("#graph-search-results").setAttribute("aria-busy", "false"); } }
 }
-function renderGraphContext(result, documentFilters = []) {
-  const target = clear($("#graph-search-results"));
-  const method = result.reranking.method === "voyage" ? `Voyage ${result.reranking.model}` : "Local hybrid ranking";
+function renderGraphContext(result, documentFilters = [], container = $("#graph-search-results"), collection = state.graph.collection) {
+  const target = clear(container);
+  const method = result.reranking.method === "voyage" ? `Voyage ${result.reranking.model}` : "Local ranking";
   target.append(node("p", "graph-context-summary", `${method} · ${result.candidate_count} candidates · ${result.context_bytes.toLocaleString()} context bytes${result.truncated ? " · bounded results" : ""}`));
   if (documentFilters.length) target.append(node("p", "graph-context-summary graph-applied-filters", `Document scope · ${describeGraphFilters(documentFilters)}. Unmatched documents are excluded from this context.`));
   if (!result.hits.length) { target.append(node("p", "empty-workspace", documentFilters.length ? "No passages fit these document filters, question, and context budget. Review the filters or widen the scope." : "No passages fit this query and context budget.")); return; }
   const returnedPassages = new Map(result.hits.slice(0, 100).map((hit) => [hit.chunk_id, hit]));
   for (const [index, hit] of result.hits.slice(0, 100).entries()) {
-    const card = node("article", "graph-hit"); card.append(node("h4", "", `${index + 1}. ${hit.title || hit.document_id}`), graphCitation(hit), node("p", "graph-passage", hit.text));
+    const card = node("article", "graph-hit"); card.dataset.chunkId = hit.chunk_id; card.tabIndex = -1; card.append(node("h4", "", `${index + 1}. ${hit.title || hit.document_id}`), graphCitation(hit), node("p", "graph-passage", hit.text));
     const scores = node("div", "graph-scores");
     for (const [label, score] of [["Cosine", hit.similarity], ["Lexical", hit.lexical_score], ["Fusion", hit.fusion_score], ["Rerank", hit.rerank_score], ["Selection", hit.selection_score]]) if (score !== null && score !== undefined) scores.append(node("span", "", `${label} ${formatGraphScore(score)}`));
-    card.append(scores, node("p", "field-hint", `${hit.seed ? "Seed passage" : `Connected passage · ${hit.depth} hop${hit.depth === 1 ? "" : "s"}`}`));
-    const explanation = renderGraphRetrievalPath(hit, returnedPassages);
+    const start = Array.isArray(result.traversal_seed_ids) ? result.traversal_seed_ids.includes(hit.chunk_id) : hit.seed;
+    card.append(scores, node("p", "field-hint", start ? "Graph starting passage" : hit.seed ? "Direct match · not a graph starting passage" : `Connected passage · ${hit.depth} hop${hit.depth === 1 ? "" : "s"}`));
+    const explanation = renderGraphRetrievalPath(hit, returnedPassages, collection);
     if (explanation) card.append(explanation);
     const inspect = node("button", "button ghost compact", "Inspect passage"); inspect.type = "button";
-    inspect.addEventListener("click", () => { selectGraphNode(state.graph.nodes.find((item) => item.chunk_id === hit.chunk_id) || hit); $("#graph-details").scrollIntoView({ behavior: "smooth", block: "nearest" }); });
+    inspect.addEventListener("click", () => { if (collection !== state.graph.collection) return; switchPlaygroundTab("graph"); selectGraphNode({ ...hit, retrievalRevision: result.revision }); $("#graph-details").scrollIntoView({ behavior: "smooth", block: "nearest" }); });
     const explore = node("button", "button ghost compact", "Explore connections"); explore.type = "button"; explore.dataset.exploreConnections = ""; explore.disabled = state.graph.busy;
-    explore.addEventListener("click", () => void exploreGraphConnections(hit));
+    explore.addEventListener("click", () => { if (collection === state.graph.collection) void exploreGraphConnections(hit); });
     const actions = node("div", "inline-actions"); actions.append(inspect, explore); card.append(actions); target.append(card);
   }
 }
+function graphUploadQueue() {
+  const graph = state.graph;
+  if (!graph.uploadQueues.has(graph.collection)) graph.uploadQueues.set(graph.collection, { items: [], offset: 0, running: false, paused: false, generation: 0, controller: null, active: null, message: "" });
+  return graph.uploadQueues.get(graph.collection);
+}
+function graphImportRunning() { return graphUploadQueue().running; }
+function pdfAutomaticMetadata(path, page, part, columns = graphDocumentColumns()) {
+  const metadata = {};
+  for (const [name, value, types] of [["filename", path, ["TEXT"]], ["page", page, ["INTEGER", "DOUBLE"]], ["part", part, ["INTEGER", "DOUBLE"]]]) {
+    const column = columns.find((entry) => entry.name === name);
+    if (!column || types.includes(column.data_type)) metadata[name] = value;
+  }
+  return metadata;
+}
+async function loadGraphCapacity() {
+  const graph = state.graph; const collection = graph.collection; const generation = ++graph.capacityGeneration;
+  if (!collection) return;
+  try {
+    const capacity = await request(`${graphPath()}/capacity`);
+    if (graph !== state.graph || collection !== graph.collection || generation !== graph.capacityGeneration) return;
+    if (Number.isSafeInteger(graph.capacity?.revision) && capacity.revision < graph.capacity.revision) return;
+    graph.capacity = capacity; renderGraphCapacity();
+  } catch (error) {
+    if (graph !== state.graph || collection !== graph.collection || generation !== graph.capacityGeneration || error.stale) return;
+    $("#graph-capacity").textContent = `Capacity unavailable: ${error.message} Current collection limits include 10,000 chunks; split larger libraries across collections.`;
+  }
+}
+function renderGraphCapacity() {
+  const capacity = state.graph.capacity; const target = clear($("#graph-capacity"));
+  if (!capacity?.usage || !capacity?.limits) { target.textContent = "Check capacity before a large import. Current limits include 10,000 chunks per collection; split larger libraries across collections."; return; }
+  const units = [["chunks", "chunks"], ["vector_elements", "vector values"], ["text_bytes", "stored text bytes"], ["edges", "connections"]];
+  for (const [key, label] of units) {
+    const used = capacity.usage[key]; const limit = capacity.limits[key];
+    if (!Number.isFinite(used) || !Number.isFinite(limit) || limit <= 0) continue;
+    const item = node("div", "graph-capacity-item"); item.append(node("strong", "", `${used.toLocaleString()} / ${limit.toLocaleString()}`), node("span", "", label));
+    const meter = node("meter"); meter.min = 0; meter.max = limit; meter.value = used; meter.setAttribute("aria-label", `${label} capacity`); item.append(meter); target.append(item);
+  }
+  target.append(node("p", "field-hint", "Capacity includes stored chunks, embedding context and metadata, not PDF file size. Split larger libraries across collections. The server checks exact limits before embedding."));
+}
+function renderPdfQueue() {
+  const queue = graphUploadQueue(); const done = queue.items.filter((item) => item.status === "complete").length;
+  const failed = queue.items.filter((item) => ["failed", "uncertain", "ocr"].includes(item.status)).length;
+  const retryable = queue.items.some((item) => ["failed", "uncertain"].includes(item.status) && item.file);
+  const emptyPages = queue.items.reduce((sum, item) => sum + item.emptyPages, 0);
+  const queued = queue.items.filter((item) => item.status === "queued").length;
+  $("#graph-upload-summary").textContent = queue.items.length ? `${done} complete · ${failed} need attention · ${queued} queued · ${queue.items.length} files${emptyPages ? ` · ${emptyPages} pages need OCR` : ""}` : "No files queued.";
+  $("#graph-upload-progress").max = Math.max(1, queue.items.length); $("#graph-upload-progress").value = done + failed;
+  $("#graph-upload-status").textContent = queue.message;
+  queue.offset = Math.min(queue.offset, Math.max(0, Math.floor((queue.items.length - 1) / 50) * 50));
+  const list = clear($("#graph-upload-list")); list.start = queue.offset + 1;
+  for (const item of queue.items.slice(queue.offset, queue.offset + 50)) {
+    const row = node("li", `graph-upload-item ${item.status}`); const description = node("div");
+    description.append(node("strong", "", item.path), node("span", "", item.detail || `${(item.size / 1048576).toFixed(1)} MiB · ${item.status}`));
+    if (item.completed.size) description.append(node("small", "", `${item.completed.size} page parts saved${item.emptyPages ? ` · ${item.emptyPages} pages without text (OCR needed)` : ""}`));
+    row.append(description, node("span", "graph-upload-badge", item.status)); list.append(row);
+  }
+  $("#graph-upload-range").textContent = queue.items.length ? `${queue.offset + 1}–${Math.min(queue.items.length, queue.offset + 50)} of ${queue.items.length} files` : "0 files";
+  $("#graph-upload-previous").disabled = queue.offset === 0; $("#graph-upload-next").disabled = queue.offset + 50 >= queue.items.length;
+  $("#graph-upload-start").disabled = queue.running || state.graph.busy || !graphCollection() || !queued;
+  $("#graph-upload-start").textContent = queue.paused ? "Resume import" : "Start import";
+  $("#graph-upload-pause").disabled = !queue.running || queue.paused;
+  $("#graph-upload-pause").textContent = queue.running && queue.paused ? "Pausing…" : "Pause after current request";
+  $("#graph-upload-retry").disabled = queue.running || state.graph.busy || !retryable;
+  $("#graph-upload-clear").disabled = queue.running || !queue.items.length;
+  $("#graph-pdf-files").disabled = queue.running || !graphCollection(); $("#graph-pdf-folder").disabled = queue.running || !graphCollection();
+}
+async function queuePdfFiles(fileList) {
+  const graph = state.graph; const collection = graph.collection; const queue = graphUploadQueue();
+  if (queue.running || !graphCollection()) return;
+  const extractor = await import("/assets/pdf-import.js");
+  if (graph !== state.graph || collection !== graph.collection) return;
+  const count = [...graph.uploadQueues.values()].reduce((sum, entry) => sum + entry.items.length, 0);
+  let remaining = extractor.PDF_IMPORT_LIMITS.queueFiles - count; let ignored = 0; let added = 0;
+  for (const file of fileList) {
+    if (!/\.pdf$/i.test(file.name)) { ignored += 1; continue; }
+    if (remaining <= 0) { ignored += 1; continue; }
+    const item = { file, path: extractor.pdfRelativePath(file), size: file.size, status: "queued", detail: "Ready to extract locally", completed: new Set(), emptyPages: 0, pages: null, inFlight: false, metadata: null, columns: null };
+    try { extractor.validatePdfFile(file); } catch (error) { item.status = "failed"; item.detail = error.message; }
+    queue.items.push(item); remaining -= 1; added += 1;
+  }
+  queue.message = `${added} PDF${added === 1 ? "" : "s"} added.${ignored ? ` ${ignored} non-PDF or over-limit files were not queued.` : ""} Import starts only when you choose Start import.`;
+  renderPdfQueue(); void loadGraphCapacity();
+}
+function pausePdfImport() {
+  const queue = graphUploadQueue(); if (!queue.running) return;
+  queue.paused = true; queue.message = "Pausing after the current request. Saved page parts stay saved; resume skips them."; renderPdfQueue();
+}
+function stopPdfQueue(queue, message) {
+  if (!queue.running) return;
+  queue.generation += 1; queue.paused = true; queue.running = false;
+  if (queue.active) {
+    queue.active.status = queue.active.inFlight ? "uncertain" : "queued";
+    queue.active.detail = queue.active.inFlight ? "Connection changed during a save. It may still finish; inspect the collection before retrying." : "Paused. Resume to continue.";
+  }
+  queue.controller?.abort(); queue.controller = null; queue.message = message;
+}
+async function runPdfImport({ retry = false } = {}) {
+  const graph = state.graph; const collection = graph.collection; const session = state.session; const queue = graphUploadQueue();
+  if (queue.running || graph.busy || !graphCollection()) return;
+  if (retry) for (const item of queue.items) if (["failed", "uncertain"].includes(item.status) && item.file) { item.status = "queued"; item.detail = "Explicit retry; already saved page parts will be skipped."; }
+  if (!queue.items.some((item) => item.status === "queued")) return;
+  const generation = ++queue.generation; const controller = new AbortController(); queue.controller = controller; queue.running = true; queue.paused = false;
+  const current = () => session === state.session && graph === state.graph && collection === graph.collection && generation === queue.generation;
+  const check = () => { if (!current() || controller.signal.aborted) throw staleRequest(); if (queue.paused) throw { paused: true }; };
+  queue.message = "Checking collection and embedding settings…"; updateGraphPaging(); renderPdfQueue();
+  try {
+    const config = await requireGraphProfile(); check();
+    const extractor = await import("/assets/pdf-import.js"); check();
+    const columns = graphDocumentColumns();
+    // Required typed fields fail before extraction or paid provider work.
+    const baseMetadata = readGraphDocumentFields(pdfAutomaticMetadata("PDF", 1, 1, columns));
+    for (const item of queue.items) {
+      check(); if (item.status !== "queued") continue;
+      queue.active = item; item.status = "processing"; item.inFlight = false; item.detail = "Reading this PDF locally…"; item.emptyPages = 0;
+      item.metadata ||= baseMetadata; item.columns ||= columns; renderPdfQueue();
+      let saving = false;
+      try {
+        for await (const page of extractor.extractPdfPages(item.file, { signal: controller.signal, onLoad: ({ pages }) => { if (current()) { item.pages = pages; item.detail = `${pages} pages · extracting text locally`; renderPdfQueue(); } } })) {
+          check(); if (!page.parts.length) { item.emptyPages += 1; continue; }
+          for (let part = 0; part < page.parts.length; part += 1) {
+            check(); const key = `${page.page}:${part + 1}`; if (item.completed.has(key)) continue;
+            const text = page.parts[part];
+            const title = `${extractor.truncatePdfLabel(item.path)} · page ${page.page}${page.parts.length > 1 ? ` · part ${part + 1}` : ""}`;
+            const chunking = { max_characters: 800, overlap_characters: 100, max_chunks: 256 };
+            item.detail = `Page ${page.page}/${page.pages} · previewing part ${part + 1}/${page.parts.length}`; renderPdfQueue();
+            const preview = await request("/v1/graph/chunk", { method: "POST", signal: controller.signal, body: JSON.stringify({ text, title, chunking }) }); check();
+            if (!Array.isArray(preview.chunks) || !preview.chunks.length || preview.chunks.length > 256) throw new Error("The server returned an invalid chunk preview. This page was not sent for embedding.");
+            const id = await extractor.pdfDocumentId(page.fingerprint, page.page, part + 1); check();
+            const capacity = await request(`/v1/graph/collections/${encodeURIComponent(collection)}/capacity`, { signal: controller.signal }); check();
+            if (!Number.isSafeInteger(capacity.revision)) throw new Error("The collection revision is unavailable. Refresh before importing.");
+            graph.capacity = capacity; graph.revision = capacity.revision; renderGraphCapacity();
+            const payload = { id, text, title, source: `${item.path}#page=${page.page}`, chunking,
+              metadata: { ...item.metadata, ...pdfAutomaticMetadata(item.path, page.page, part + 1, item.columns) }, expected_revision: capacity.revision };
+            item.detail = `Page ${page.page}/${page.pages} · saving ${preview.chunks.length} chunks from part ${part + 1}/${page.parts.length}`;
+            item.inFlight = true; saving = true; renderPdfQueue();
+            const result = await request(`/v1/graph/collections/${encodeURIComponent(collection)}/documents`, { method: "POST", signal: controller.signal, timeout: (config.timeout_seconds + 20) * 1000, body: JSON.stringify(payload) });
+            if (!current()) throw staleRequest();
+            item.inFlight = false; saving = false; item.completed.add(key); graph.revision = result.revision;
+            queue.message = `${item.path}: page ${page.page} saved${result.unchanged ? " using existing embeddings" : ""}.`; renderPdfQueue(); check();
+          }
+        }
+        check(); item.status = item.completed.size ? "complete" : "ocr"; item.file = null;
+        item.detail = item.completed.size ? `${item.pages} pages processed${item.emptyPages ? `; ${item.emptyPages} pages have no extractable text and need OCR` : ""}.` : "No extractable text. This may be a scanned PDF; run OCR and select the searchable copy.";
+      } catch (error) {
+        if (!current()) throw staleRequest();
+        if (error.paused) { item.status = "queued"; item.detail = "Paused. Saved page parts will be skipped on resume."; throw error; }
+        item.inFlight = false;
+        item.status = saving && ["network", "timeout", "cancelled"].includes(error.kind) ? "uncertain" : "failed";
+        item.detail = error.message || "PDF extraction failed.";
+        if (saving || error.status === 401 || error.status === 403 || error.kind === "network" || error.kind === "timeout") {
+          queue.paused = true; queue.message = "Import paused after a failed request. No automatic retry was sent. Inspect the file status before Retry failed files.";
+          if (error.status === 401 || error.status === 403) showError(error);
+          break;
+        }
+      }
+      queue.active = null; renderPdfQueue();
+    }
+    if (!queue.paused) queue.message = "Queue processed. Review any failed files or pages that need OCR. Saved documents are ready for chat and retrieval.";
+  } catch (error) {
+    if (current()) queue.message = error.paused ? "Import paused. Resume continues with unsaved page parts." : error.message;
+  } finally {
+    if (current()) {
+      queue.running = false; queue.controller = null; queue.active = null; updateGraphPaging(); renderPdfQueue();
+      void loadGraphCapacity(); void loadGraphCollections(collection); void loadTables({ quiet: true });
+    }
+  }
+}
+function updateGraphChatControls() {
+  const chat = state.graph.chat;
+  const mode = $("#graph-chat-mode").value;
+  const contextual = $("#graph-chat-context").value === "conversation";
+  for (const id of ["graph-chat-question", "graph-chat-mode", "graph-chat-model", "graph-chat-context", "graph-chat-delivery", "graph-chat-grounding", "graph-chat-submit"]) $("#" + id).disabled = chat.busy || state.graph.busy;
+  $("#graph-chat-model").disabled ||= mode === "retrieve" && !contextual;
+  $("#graph-chat-delivery").disabled ||= mode === "retrieve";
+  $("#graph-chat-grounding").disabled ||= mode === "retrieve";
+  $("#graph-chat-stop").disabled = !chat.busy;
+  $("#graph-chat-submit").textContent = mode === "retrieve" ? "Find sources" : "Send";
+  const local = playgroundStrategy() === "keyword" && $("#graph-reranker").value === "local";
+  $("#graph-chat-privacy").textContent = mode === "retrieve"
+    ? contextual ? "With recent history, OpenAI rewrites the search question. Provider charges apply; no answer is generated. Retrieval uses the selected providers."
+      : local ? "Runs locally. No provider calls." : "Search uses your configured providers. No answer is generated."
+    : "Questions, history and selected passages are sent to OpenAI. Provider charges apply.";
+  $("#graph-chat-context-hint").textContent = contextual ? "OpenAI rewrites follow-ups using recent history. Provider charges apply." : "Search uses only this question.";
+  $("#graph-chat-question-hint").textContent = contextual ? "Follow-up questions can use recent conversation." : "Name the subject in each question.";
+  $("#graph-chat-answer-hint").textContent = mode === "retrieve" ? "No answer or voice script is generated."
+    : `${$("#graph-chat-grounding").value === "strict" ? "Answers require source excerpts." : "Citations identify sources; claims are not verified."}${$("#graph-chat-delivery").value === "voice" ? " Voice scripts are text, with no audio playback." : ""}`;
+  $("#playground-run-again").disabled = chat.busy || state.graph.busy || !chat.turns.length;
+  $("#playground-compare").disabled = chat.busy || !playgroundComparisonPair();
+}
+function stopGraphChat({ clearHistory = false, message = "Stopped waiting. A provider request already sent may still finish and incur usage." } = {}) {
+  const chat = state.graph.chat; chat.generation += 1; chat.controller?.abort(); chat.controller = null; chat.busy = false;
+  window.clearInterval(chat.timer); chat.timer = null;
+  if (clearHistory) { chat.turns = []; state.graph.compareOpen = false; $("#graph-chat-question").value = ""; }
+  $("#graph-chat-status").textContent = message; renderGraphChat(); updateGraphChatControls();
+}
+function graphChatHistory(turns) {
+  let bytes = 0; let trimmed = false; const messages = []; const encoder = new TextEncoder();
+  for (const turn of [...turns].reverse()) {
+    const questionBytes = encoder.encode(turn.question).length;
+    if (questionBytes > 8192 || bytes + questionBytes > 32768 || messages.length === 20) { trimmed = true; break; }
+    const pair = [{ role: "user", content: turn.question }]; bytes += questionBytes;
+    const status = turn.result?.answer_status;
+    const answer = !status || ["answered", "clarification_needed"].includes(status) ? turn.result?.answer : null;
+    if (typeof answer === "string" && answer.trim()) {
+      const answerBytes = encoder.encode(answer).length;
+      if (answerBytes <= 8192 && bytes + answerBytes <= 32768 && messages.length + 2 <= 20) {
+        pair.push({ role: "assistant", content: answer }); bytes += answerBytes;
+      } else trimmed = true; // Preserve the complete question; never truncate an answer into a new meaning.
+    }
+    messages.unshift(...pair);
+  }
+  return { messages, trimmed };
+}
+
+const GRAPH_ANSWER_STATUSES = {
+  answered: "Answer", insufficient_evidence: "Not enough evidence", clarification_needed: "More detail needed",
+  refused: "Answer unavailable", incomplete: "Answer incomplete", invalid_grounding: "Answer withheld",
+  no_sources: "No matching sources", retrieval_only: "Sources retrieved",
+};
+function graphChatSettings(turn) {
+  return { context_mode: turn.context_mode || "question", answer_style: turn.answer_style || "chat", grounding: turn.grounding || "standard", model: turn.model || turn.result?.generation?.model || "gpt-4.1-mini" };
+}
+function graphChatSettingsLabel(turn) {
+  const settings = graphChatSettings(turn);
+  return `${settings.context_mode === "conversation" ? "Recent conversation" : "Current question"} · ${settings.answer_style === "voice" ? "Voice script" : "Chat"} · ${settings.grounding === "strict" ? "Source excerpts" : "Citations only"}`;
+}
+function normalizeGraphChatResult(result, mode, grounding) {
+  const invalid = () => { throw new Error("The server returned an invalid chat response. No conversation history was added."); };
+  if (!result || !result.retrieval || !Array.isArray(result.retrieval.hits) || result.retrieval.hits.length > 100
+    || !result.retrieval.reranking || !Number.isFinite(result.retrieval.context_bytes)
+    || (result.answer !== null && typeof result.answer !== "string")) invalid();
+  const suppliedStatus = Object.hasOwn(result, "answer_status");
+  if (mode === "answer" && grounding === "strict" && ["answer_status", "citation_status", "cited_labels", "evidence"].some((field) => !Object.hasOwn(result, field))) invalid();
+  if (suppliedStatus && !Object.hasOwn(GRAPH_ANSWER_STATUSES, result.answer_status)) invalid();
+  if (Object.hasOwn(result, "citation_status") && !["valid_labels", "missing", "invalid", "not_applicable"].includes(result.citation_status)) invalid();
+  if (Object.hasOwn(result, "speech_text") && result.speech_text !== null && typeof result.speech_text !== "string") invalid();
+  if (Object.hasOwn(result, "retrieval_query") && typeof result.retrieval_query !== "string") invalid();
+  if (Object.hasOwn(result, "query_context") && (!result.query_context || !["question", "conversation", "provided"].includes(result.query_context.mode)
+    || typeof result.query_context.rewritten !== "boolean" || !Number.isFinite(result.query_context.duration_ms))) invalid();
+  if (Object.hasOwn(result, "cited_labels") && (!Array.isArray(result.cited_labels) || result.cited_labels.length > 100 || result.cited_labels.some((label) => typeof label !== "string"))) invalid();
+  if (Object.hasOwn(result, "evidence") && (!Array.isArray(result.evidence) || result.evidence.length > 100 || result.evidence.some((entry) => !entry || typeof entry.label !== "string" || typeof entry.quote !== "string"))) invalid();
+  const hits = new Map(result.retrieval.hits.map((hit) => [hit.chunk_id, hit]));
+  const citations = (Array.isArray(result.citations) ? result.citations : []).filter((citation) => citation && /^S[1-9]\d*$/.test(citation.label) && hits.has(citation.chunk_id)).slice(0, 100);
+  const known = new Map(citations.map((citation) => [citation.label, citation]));
+  const mentioned = new Set(); let unknownLabel = false;
+  for (const suffix of String(result.answer || "").split("[S").slice(1)) {
+    const number = suffix.split("]")[0]; const label = `S${number}`;
+    if (!suffix.includes("]") || !/^\d+$/.test(number) || !known.has(label)) unknownLabel = true;
+    else mentioned.add(label);
+  }
+  const cited_labels = [...mentioned];
+  let answer_status = result.answer_status || (mode === "retrieve" ? "retrieval_only" : result.answer === null ? "no_sources" : "answered");
+  const citation_status = unknownLabel ? "invalid" : result.citation_status || (result.answer === null ? "not_applicable" : cited_labels.length ? "valid_labels" : "missing");
+  const evidence = (result.evidence || []).filter((entry) => {
+    const source = hits.get(known.get(entry.label)?.chunk_id)?.text;
+    return typeof source === "string" && source.trim() && entry.quote && source.includes(entry.quote)
+      && Array.from(entry.quote.trim()).length >= Math.min(16, Array.from(source.trim()).length);
+  });
+  const sameLabels = (labels) => new Set(labels).size === mentioned.size && labels.every((label) => mentioned.has(label));
+  if (suppliedStatus && answer_status === "answered" && grounding === "strict"
+    && (citation_status !== "valid_labels" || !cited_labels.length || !evidence.length || evidence.length !== result.evidence.length
+      || !sameLabels(result.cited_labels) || !sameLabels(evidence.map((entry) => entry.label)))) answer_status = "invalid_grounding";
+  const accepted = ["answered", "clarification_needed"].includes(answer_status);
+  const warnings = Array.isArray(result.warnings) ? result.warnings.slice(0, 20).map(String) : [];
+  let speech_text = answer_status === "answered" && citation_status === "valid_labels" && cited_labels.length ? result.speech_text ?? null : null;
+  if (speech_text !== null) {
+    // Match the server's deterministic speech conversion: source markers and
+    // Unicode whitespace may change; facts, qualifications and punctuation may not.
+    const expected = cited_labels.reduce((text, label) => text.replaceAll(`[${label}]`, ""), result.answer)
+      .split(/\p{White_Space}+/u).filter(Boolean).join(" ");
+    if (speech_text !== expected) {
+      speech_text = null;
+      warnings.splice(19);
+      warnings.push("The voice script did not match the accepted answer. The written answer is shown.");
+    }
+  }
+  return { ...result, answer_status, citation_status, citations, cited_labels: accepted ? cited_labels : [], evidence,
+    answer: accepted ? result.answer : null, speech_text, warnings };
+}
+function appendChatAnswer(target, answer, citations, inspect) {
+  const known = new Set(citations.map((citation) => citation.label));
+  const fragments = String(answer).split(/(\[S\d+\])/g);
+  for (const fragment of fragments) {
+    const label = /^\[(S\d+)\]$/.exec(fragment)?.[1];
+    if (!label || !known.has(label)) { target.append(document.createTextNode(fragment)); continue; }
+    const button = node("button", "graph-citation-button", fragment); button.type = "button"; button.setAttribute("aria-label", `Inspect source ${label}`); button.addEventListener("click", () => inspect(label)); target.append(button);
+  }
+}
+
+function filterIdentity(filters) {
+  return JSON.stringify(filters.map((filter) => JSON.stringify([filter.column, filter.operator, filter.value])).sort());
+}
+
+function playgroundComparisonPair() {
+  const turns = state.graph.chat.turns; const latest = turns.at(-1);
+  if (!latest) return null;
+  const previous = turns.slice(0, -1).reverse().find((turn) => turn.question === latest.question
+    && turn.collection === latest.collection && turn.mode === latest.mode && filterIdentity(turn.filters) === filterIdentity(latest.filters));
+  return previous ? [previous, latest] : null;
+}
+
+function renderPlaygroundComparison() {
+  const target = clear($("#playground-comparison")); const pair = playgroundComparisonPair();
+  target.hidden = !state.graph.compareOpen || !pair;
+  $("#playground-compare").setAttribute("aria-expanded", String(!target.hidden));
+  if (target.hidden) return;
+  const [previous, latest] = pair;
+  target.append(node("h3", "", "Compare runs"), node("p", "", latest.question));
+  const before = new Set(previous.result.retrieval.hits.map((hit) => hit.chunk_id));
+  const after = new Set(latest.result.retrieval.hits.map((hit) => hit.chunk_id));
+  const common = [...before].filter((id) => after.has(id)).length;
+  target.append(node("p", "playground-comparison-overlap", `${common} shared · ${after.size - common} added · ${before.size - common} removed passages`));
+  const revision = previous.result.retrieval.revision;
+  if (revision !== latest.result.retrieval.revision) target.append(node("p", "playground-comparison-warning", "Database revision changed between runs. This may affect comparability."));
+  if (JSON.stringify(previous.history || []) !== JSON.stringify(latest.history || [])) target.append(node("p", "playground-comparison-warning", "Conversation history differs between these runs."));
+  if (latest.filters.length) target.append(node("p", "field-hint", describeGraphFilters(latest.filters)));
+  const grid = node("div", "playground-comparison-grid");
+  for (const [index, turn] of pair.entries()) {
+    const result = turn.result.retrieval; const column = node("section");
+    column.append(node("h4", "", `${index ? "Latest" : "Previous"} · ${strategyLabel(playgroundStrategy(turn.options))}`));
+    const retrievalTime = result.timings?.total_ms;
+    column.append(node("p", "field-hint", `${counted(result.hits.length, "source")} · ${counted(result.candidate_count, "candidate")} · revision ${result.revision}`));
+    if (Number.isFinite(retrievalTime)) column.append(node("p", "field-hint", `Retrieval ${retrievalTime.toFixed(1)} ms`));
+    column.append(node("p", "field-hint", `${turn.options.reranker === "voyage" ? "Voyage reranking" : "Local ranking"} · ${turn.options.max_hops} hops · ${turn.options.max_context_bytes.toLocaleString()} context bytes`));
+    column.append(node("p", "field-hint", graphChatSettingsLabel(turn)), node("p", "field-hint", `Search: ${turn.result.retrieval_query || turn.question}`));
+    const settings = node("details", "playground-run-config"); settings.append(node("summary", "", "Run configuration"), node("pre", "", JSON.stringify({ retrieval: turn.options, ...graphChatSettings(turn), history_messages: (turn.history || []).length }, null, 2))); column.append(settings);
+    const list = node("ol");
+    for (const hit of result.hits.slice(0, 100)) {
+      const item = node("li", "", hit.title || hit.source || hit.document_id);
+      const shared = index ? before.has(hit.chunk_id) : after.has(hit.chunk_id);
+      if (!shared) item.append(node("span", "playground-source-change", index ? "Added" : "Removed"));
+      list.append(item);
+    }
+    column.append(list); grid.append(column);
+  }
+  target.append(grid);
+}
+
+function renderGraphChat() {
+  const target = clear($("#graph-chat-turns")); const turns = state.graph.chat.turns;
+  renderPlaygroundComparison();
+  if (!turns.length) {
+    const empty = node("div", "playground-chat-empty");
+    empty.append(node("h3", "", "Ask your documents"), node("p", "", graphCollection() ? "Answers with sources from your collection." : "Select a collection to start."));
+    const upload = node("button", "button ghost compact", "Upload PDFs"); upload.type = "button";
+    upload.addEventListener("click", () => switchPlaygroundTab("documents")); empty.append(upload); target.append(empty); return;
+  }
+  for (const [index, turn] of turns.entries()) {
+    const card = node("article", "graph-chat-turn"); card.append(node("span", "panel-kicker", `RUN ${index + 1} · ${strategyLabel(playgroundStrategy(turn.options))}`), node("h4", "", turn.question));
+    const result = turn.result; const response = node("div", "graph-chat-answer");
+    const evidence = node("details", "graph-chat-evidence"); evidence.append(node("summary", "", `Inspect retrieval · ${counted(result.retrieval.hits.length, "passage")}`));
+    const sources = node("div", "graph-chat-sources");
+    const citations = result.citations;
+    const accepted = result.answer_status === "answered";
+    const status = node("p", "graph-answer-status", `${GRAPH_ANSWER_STATUSES[result.answer_status]}${accepted && result.cited_labels.length ? ` · ${counted(result.cited_labels.length, "cited source")}` : ""}`);
+    status.dataset.status = result.answer_status; card.append(status);
+    const inspect = (label) => {
+      evidence.open = true;
+      const id = citations.find((citation) => citation.label === label)?.chunk_id;
+      const hit = [...sources.querySelectorAll("[data-chunk-id]")].find((element) => element.dataset.chunkId === id);
+      (hit || sources).scrollIntoView({ behavior: "smooth", block: "nearest" }); hit?.focus({ preventScroll: true });
+    };
+    const speech = accepted && turn.answer_style === "voice" && typeof result.speech_text === "string" && result.speech_text.trim() ? result.speech_text : null;
+    if (speech) {
+      const heading = node("div", "graph-chat-speech-heading"); heading.append(node("strong", "", "Voice script"));
+      const copy = node("button", "button ghost compact", "Copy script"); copy.type = "button";
+      const copied = node("span", "graph-chat-copy-status"); copied.setAttribute("role", "status");
+      copy.addEventListener("click", async () => {
+        if (!card.isConnected || !state.graph.chat.turns.includes(turn) || turn.collection !== state.graph.collection) return;
+        try { await navigator.clipboard.writeText(speech); if (card.isConnected) copied.textContent = "Copied"; }
+        catch { if (card.isConnected) copied.textContent = "Copy unavailable. Select the script to copy it."; }
+      });
+      heading.append(copy, copied); card.append(heading); response.textContent = speech;
+    } else if (["answered", "clarification_needed"].includes(result.answer_status) && typeof result.answer === "string") appendChatAnswer(response, result.answer, citations, inspect);
+    else response.textContent = {
+      retrieval_only: `${counted(result.retrieval.hits.length, "source")} found. No answer model was called.`,
+      no_sources: "No matching passages found. Try a more specific question or review the document filters.",
+      insufficient_evidence: "These sources do not contain enough evidence to answer the question.",
+      clarification_needed: "Add a little more detail so the search can find the right sources.",
+      refused: "The provider declined to answer this question.",
+      incomplete: "Generation did not finish. The incomplete answer has been withheld.",
+      invalid_grounding: "The answer did not meet the source-evidence requirements and has been withheld.",
+    }[result.answer_status] || "No answer was returned.";
+    card.append(response);
+    const sourceLinks = node("div", "playground-source-chips");
+    for (const citation of citations.filter((citation) => result.cited_labels.includes(citation.label)).slice(0, 5)) {
+      const label = `${citation.label} · ${citation.title || citation.source || "Source"}`;
+      const chip = node("button", "playground-source-chip", label.length > 90 ? label.slice(0, 87) + "…" : label); chip.type = "button";
+      chip.title = citation.source || citation.title || citation.label;
+      chip.addEventListener("click", () => inspect(citation.label)); sourceLinks.append(chip);
+    }
+    card.append(sourceLinks);
+    const summary = node("div", "playground-run-summary");
+    summary.append(node("span", "", `${counted(result.retrieval.hits.length, "retrieved source")} · ${(turn.elapsed / 1000).toFixed(2)} s`));
+    const reuse = node("button", "button ghost compact", "Reuse question"); reuse.type = "button";
+    reuse.addEventListener("click", () => { if (state.graph.chat.busy) return; $("#graph-chat-question").value = turn.question; $("#graph-chat-question").focus(); }); summary.append(reuse); card.append(summary);
+    for (const warning of (result.warnings || []).slice(0, 20)) card.append(node("p", "field-hint graph-chat-warning", String(warning)));
+    const timing = node("div", "graph-chat-timings");
+    for (const [key, label] of [["embedding_ms", "Embedding"], ["search_ms", "Search"], ["reranking_ms", "Reranking"], ["selection_ms", "Selection"], ["generation_ms", "Answer"], ["total_ms", "Server total"]]) {
+      const value = result.timings?.[key]; if (typeof value === "number" && Number.isFinite(value)) timing.append(node("span", "", `${label}: ${value.toFixed(1)} ms`));
+    }
+    const queryTrace = node("div", "graph-chat-query-trace");
+    queryTrace.append(node("h5", "", "Search query"), node("p", "", result.retrieval_query || turn.question), node("p", "field-hint", graphChatSettingsLabel(turn)));
+    const queryContext = result.query_context;
+    queryTrace.append(node("p", "field-hint", `${(turn.history || []).length} history messages${turn.history_trimmed ? " · oversized or older content omitted" : ""}${queryContext ? ` · ${queryContext.rewritten ? "Search rewritten" : "Question used directly"} · ${queryContext.duration_ms.toFixed(1)} ms` : ""}`));
+    if (queryContext?.generation?.provider) queryTrace.append(node("p", "field-hint", `Search rewrite: ${queryContext.generation.model || queryContext.generation.provider} · ${queryContext.generation.input_tokens ?? 0} tokens in / ${queryContext.generation.output_tokens ?? 0} out`));
+    evidence.append(queryTrace);
+    if (result.evidence.length) {
+      const excerpts = node("div", "graph-chat-evidence-quotes"); excerpts.append(node("h5", "", "Source excerpts"));
+      for (const entry of result.evidence) {
+        const label = node("button", "graph-citation-button", `[${entry.label}]`); label.type = "button"; label.addEventListener("click", () => inspect(entry.label));
+        excerpts.append(label, node("blockquote", "", entry.quote));
+      }
+      evidence.append(excerpts);
+    }
+    if (speech && result.answer !== speech) {
+      const written = node("details", "graph-chat-written-answer"); const prose = node("div", "graph-chat-answer");
+      written.append(node("summary", "", "Written answer")); appendChatAnswer(prose, result.answer || "", citations, inspect); written.append(prose); evidence.append(written);
+    }
+    evidence.append(node("p", "field-hint graph-citation-status", `Citations: ${({ valid_labels: "labels match retrieved sources", missing: "no source labels", invalid: "unmatched source labels", not_applicable: "not applicable" })[result.citation_status]}. Labels and excerpts do not verify every claim.`));
+    evidence.append(timing, node("p", "field-hint", `Browser elapsed: ${(turn.elapsed / 1000).toFixed(2)} s · database revision ${result.retrieval.revision ?? "unavailable"} · model ${result.generation?.model || "none"} · answer tokens ${result.generation?.input_tokens ?? 0} in / ${result.generation?.output_tokens ?? 0} out`));
+    if (Array.isArray(result.retrieval.traversal_seed_ids) && result.retrieval.traversal_seed_ids.length) evidence.append(node("p", "field-hint graph-chat-seeds", `Starting passages: ${result.retrieval.traversal_seed_ids.join(", ")}`));
+    renderGraphContext(result.retrieval, turn.filters, sources, turn.collection); evidence.append(sources);
+    const download = node("button", "button ghost compact", "Download diagnostics"); download.type = "button";
+    download.addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify({ collection: turn.collection, question: turn.question, retrieval_options: turn.options, mode: turn.mode, ...graphChatSettings(turn), history: turn.history || [], history_trimmed: !!turn.history_trimmed, browser_elapsed_ms: turn.elapsed, ...result }, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob); const link = node("a"); link.href = url; link.download = `vectors-rag-turn-${index + 1}.json`; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }); evidence.append(download); card.append(evidence); target.append(card);
+  }
+}
+async function submitGraphChat(event, { rerun = false } = {}) {
+  event?.preventDefault(); const graph = state.graph; const chat = graph.chat;
+  if (chat.busy || graph.busy) return;
+  const collection = graph.collection; const session = state.session; const generation = ++chat.generation;
+  const current = () => graph === state.graph && collection === graph.collection && session === state.session && generation === chat.generation;
+  const controller = new AbortController(); chat.controller = controller; chat.busy = true; updateGraphChatControls();
+  const started = performance.now();
+  chat.timer = window.setInterval(() => { if (current()) $("#graph-chat-status").textContent = `Running… ${((performance.now() - started) / 1000).toFixed(1)} s`; }, 500);
+  try {
+    const text = rerun ? chat.turns.at(-1)?.question : $("#graph-chat-question").value.trim(); const mode = $("#graph-chat-mode").value; const model = $("#graph-chat-model").value;
+    const context_mode = $("#graph-chat-context").value; const answer_style = $("#graph-chat-delivery").value; const grounding = $("#graph-chat-grounding").value;
+    if (!text || text.includes("\0") || new TextEncoder().encode(text).length > 7872) throw new Error("Enter a question of at most 7,872 UTF-8 bytes without NUL characters.");
+    const options = { ...graphRetrievalOptions(), reranker: $("#graph-reranker").value }; const filters = readGraphFilters();
+    const previous = chat.turns.at(-1);
+    const sameScope = previous?.collection === collection && filterIdentity(previous.filters) === filterIdentity(filters);
+    const historyInfo = rerun
+      ? { messages: sameScope ? (previous.history || []).map((message) => ({ ...message })) : [], trimmed: sameScope && !!previous.history_trimmed }
+      : graphChatHistory(chat.turns.filter((turn) => turn.collection === collection && filterIdentity(turn.filters) === filterIdentity(filters)));
+    if (options.max_context_bytes > 65536) throw new Error("Chat context must be 65,536 bytes or less. Lower the context budget in retrieval settings.");
+    if (filters.length) options.document_filters = filters;
+    const config = await graphQueryConfiguration(options); if (!current()) throw staleRequest();
+    if (mode === "answer" && !config.generation_configured) throw new Error("Answer mode needs an OpenAI API key on the server. Add it in Settings or choose Retrieve sources.");
+    if (context_mode === "conversation" && historyInfo.messages.length && !config.generation_configured) throw new Error("Conversation search needs an OpenAI API key to rewrite follow-ups. Add it in Settings or choose Current question.");
+    if (options.reranker === "voyage") { const settings = state.reranking || await loadRerankingSettings(); if (!current()) throw staleRequest(); if (!settings?.configured) throw new Error("Add a Voyage reranking key in Settings first."); }
+    const response = await request(`/v1/graph/collections/${encodeURIComponent(collection)}/chat`, { method: "POST", signal: controller.signal,
+      timeout: (config.timeout_seconds + (options.reranker === "voyage" ? state.reranking.timeout_seconds : 0) + 150) * 1000,
+      body: JSON.stringify({ text, history: historyInfo.messages, model, mode, context_mode, answer_style, grounding, retrieval: options }) });
+    if (!current()) throw staleRequest();
+    const result = normalizeGraphChatResult(response, mode, grounding);
+    chat.turns.push({ question: text, collection, options, filters, mode, model, context_mode, answer_style, grounding,
+      history: historyInfo.messages, history_trimmed: historyInfo.trimmed, result, elapsed: performance.now() - started });
+    if (chat.turns.length > 10) chat.turns.shift();
+    graph.compareOpen = rerun && !!playgroundComparisonPair();
+    renderGraphChat(); if (!rerun) $("#graph-chat-question").value = "";
+    $("#graph-chat-status").textContent = `${GRAPH_ANSWER_STATUSES[result.answer_status]} · ${counted(result.retrieval.hits.length, "source")} · ${(performance.now() - started).toFixed(0)} ms`;
+    $("#graph-chat-turns").lastElementChild?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (error) { if (current()) graphError(error, "graph-chat-status"); }
+  finally { if (current()) { window.clearInterval(chat.timer); chat.timer = null; chat.busy = false; chat.controller = null; updateGraphChatControls(); } }
+}
+
+let evaluationTools = null;
+const evaluationRowElements = new WeakMap();
+async function evaluationModule() {
+  evaluationTools ||= await import("/assets/rag-evaluation.mjs");
+  return evaluationTools;
+}
+
+function cancelEvaluation(message, { clearResults = false, clearQuestions = false } = {}) {
+  const evaluation = state.graph.evaluation;
+  evaluation.generation += 1; evaluation.loadGeneration += 1;
+  evaluation.controller?.abort(); evaluation.controller = null; evaluation.loading = false;
+  if (["running", "paused"].includes(evaluation.run?.status)) evaluation.run.status = "cancelled";
+  if (clearResults || clearQuestions) { evaluation.run = null; evaluation.offset = 0; }
+  if (clearQuestions) { evaluation.questions = []; evaluation.datasetName = ""; $("#evaluation-file").value = ""; }
+  evaluation.message = evaluation.run || clearResults || clearQuestions ? message : "";
+  renderEvaluation();
+}
+
+function renderEvaluationControls() {
+  const evaluation = state.graph.evaluation; const run = evaluation.run;
+  const running = run?.status === "running"; const paused = run?.status === "paused";
+  $("#evaluation-file").disabled = evaluation.loading || running || paused;
+  $("#evaluation-limit").disabled = evaluation.loading || running || paused;
+  $("#evaluation-start").disabled = evaluation.loading || running || state.graph.busy || !graphCollection() || !evaluation.questions.length;
+  $("#evaluation-start").textContent = paused ? "Resume" : "Run evaluation";
+  $("#evaluation-pause").disabled = !running || run.pauseRequested;
+  $("#evaluation-pause").textContent = running && run.pauseRequested ? "Pausing…" : "Pause";
+  $("#evaluation-clear").disabled = running || (!evaluation.questions.length && !run && !evaluation.loading);
+  $("#evaluation-export").disabled = !run;
+  $("#evaluation-dataset").textContent = evaluation.loading ? "Reading questions…" : evaluation.questions.length ? `${counted(evaluation.questions.length, "question")} · ${evaluation.datasetName}` : "No question set loaded.";
+  const activeRun = running || paused ? run : null;
+  const strategy = activeRun ? playgroundStrategy(activeRun.options) : playgroundStrategy();
+  const limit = activeRun ? activeRun.options.max_results : $("#graph-result-limit").value;
+  const ranking = (activeRun ? activeRun.options.reranker : $("#graph-reranker").value) === "voyage" ? "Voyage reranking" : "Local ranking";
+  let filters = activeRun?.options.document_filters || [];
+  if (!activeRun) { try { filters = readGraphFilters(); } catch { /* The run validates unfinished filter drafts before requests. */ } }
+  $("#evaluation-settings").textContent = `${activeRun ? "Run settings" : "Next run"} · ${activeRun?.collection || state.graph.collection || "No collection"} · ${strategyLabel(strategy)} · top ${limit} · ${ranking}${filters.length ? ` · ${describeGraphFilters(filters)}` : ""}`;
+  $("#evaluation-privacy").textContent = strategy === "keyword" && ranking === "Local ranking" ? "Runs locally. No provider calls. Pause finishes the current request." : "Questions and optional reranking passages go to configured providers; charges may apply. Pause finishes the current request.";
+}
+
+function renderEvaluation() {
+  const evaluation = state.graph.evaluation; const run = evaluation.run;
+  renderEvaluationControls();
+  $("#evaluation-status").textContent = evaluation.message;
+  const completed = run?.summary.completed || 0;
+  $("#evaluation-progress").max = run?.planned || 1;
+  $("#evaluation-progress").value = run?.results.length || 0;
+  const metrics = clear($("#evaluation-metrics")); metrics.hidden = !run;
+  if (run) {
+    const summary = run.summary; const percent = (value) => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
+    const milliseconds = (value) => value === null ? "—" : `${value.toFixed(1)} ms`;
+    const scope = run.options.document_filters || [];
+    metrics.append(node("p", "field-hint evaluation-report-settings", `Report · ${run.collection} · ${strategyLabel(playgroundStrategy(run.options))} · top ${run.options.max_results} · ${run.options.reranker === "voyage" ? "Voyage reranking" : "Local ranking"}${scope.length ? ` · ${describeGraphFilters(scope)}` : ""}`));
+    for (const [label, value] of [[`Match rate@${run.options.max_results}`, percent(summary.match_rate)], [`MRR@${run.options.max_results}`, summary.mean_reciprocal_rank === null ? "—" : summary.mean_reciprocal_rank.toFixed(3)], ["Median", milliseconds(summary.latency_ms.median)], ["p95", milliseconds(summary.latency_ms.p95)]]) {
+      const item = node("div", "evaluation-metric"); item.append(node("span", "", label), node("strong", "", value)); metrics.append(item);
+    }
+    metrics.append(node("p", "field-hint", `${completed} of ${run.planned} evaluated · ${summary.failed} failed. Metrics cover completed retrievals; a match requires the expected source and any supplied text.`));
+    if (completed && summary.revision_status !== "stable") metrics.append(node("p", "evaluation-warning", summary.revision_status === "changed" ? "Database revision changed during this run. Results may not be comparable." : "Database revision is unavailable. A stable snapshot cannot be confirmed."));
+    if (completed && summary.reranking_status !== "stable") metrics.append(node("p", "evaluation-warning", summary.reranking_status === "changed" ? "Reranking method or model changed during this run. Results may not be comparable." : "Reranking identity is unavailable for one or more results."));
+  }
+  const target = $("#evaluation-results");
+  const existing = new Map([...target.children].map((item) => [evaluationRowElements.get(item), item]));
+  const visible = [];
+  const rows = run?.results || [];
+  evaluation.offset = Math.min(evaluation.offset, Math.max(0, Math.floor((rows.length - 1) / 20) * 20));
+  for (const row of rows.slice(evaluation.offset, evaluation.offset + 20)) {
+    // Completed rows are immutable. Reuse their nodes so live updates preserve
+    // expanded evidence, text selection and keyboard focus.
+    if (existing.has(row)) { visible.push(existing.get(row)); continue; }
+    const item = node("article", "evaluation-row"); item.dataset.evaluationRow = String(row.index);
+    evaluationRowElements.set(item, row);
+    const heading = node("div", "evaluation-row-heading");
+    heading.append(node("h4", "", `${row.index + 1}. ${row.question}`), node("span", `evaluation-outcome ${row.status === "error" ? "failed" : row.matched_rank ? "matched" : "missed"}`, row.status === "error" ? "Failed" : row.matched_rank ? `Match · #${row.matched_rank}` : "No match"));
+    item.append(heading, node("p", "evaluation-row-meta", `${row.expected_source}${row.elapsed_ms !== null ? ` · ${row.elapsed_ms.toFixed(1)} ms` : ""}`));
+    if (row.error) item.append(node("p", "evaluation-warning", row.error));
+    const evidence = node("details", "evaluation-evidence"); evidence.append(node("summary", "", "Inspect evidence"));
+    evidence.addEventListener("toggle", () => {
+      if (!evidence.open || evidence.childElementCount > 1) return;
+      if (row.reranking) evidence.append(node("p", "field-hint", `Ranking: ${row.reranking.method}${row.reranking.model ? ` · ${row.reranking.model}` : ""}`));
+      evidence.append(node("p", "field-hint", `Expected source: ${row.expected_source}${row.source_match === "file_page_suffix" ? " (file/page suffix)" : " (exact)"}`));
+      if (row.expected_text !== null) evidence.append(node("p", "graph-passage", `Expected text: ${row.expected_text}`));
+      for (const hit of row.evidence || []) {
+        const passage = node("article", "graph-hit");
+        passage.append(node("h4", "", `${hit.rank}. ${hit.title || hit.source}${hit.matched ? " · Match" : ""}`), node("p", "field-hint", hit.source), node("p", "graph-passage", hit.text));
+        if (hit.truncated) passage.append(node("p", "field-hint", "Excerpt shown. Matching used the full passage."));
+        evidence.append(passage);
+      }
+      if (row.status === "complete" && row.hit_count === 0) evidence.append(node("p", "field-hint", "No passages returned."));
+      else if (row.hit_count > (row.evidence?.length || 0)) evidence.append(node("p", "field-hint", `${row.hit_count} passages checked. Showing the first five and the first match.`));
+    });
+    item.append(evidence); visible.push(item);
+  }
+  if (!rows.length) visible.push(node("p", "evaluation-empty", run ? "Waiting for completed retrievals." : "Load questions to test this collection."));
+  visible.forEach((item, index) => { if (target.children[index] !== item) target.insertBefore(item, target.children[index] || null); });
+  while (target.children.length > visible.length) target.lastElementChild.remove();
+  $("#evaluation-range").textContent = rows.length ? `${evaluation.offset + 1}–${Math.min(rows.length, evaluation.offset + 20)} of ${rows.length} results` : "0 results";
+  $("#evaluation-previous").disabled = evaluation.offset === 0;
+  $("#evaluation-next").disabled = evaluation.offset + 20 >= rows.length;
+}
+
+async function importEvaluationFile(file) {
+  if (!file) return;
+  const graph = state.graph; const evaluation = graph.evaluation;
+  if (["running", "paused"].includes(evaluation.run?.status) || evaluation.loading) return;
+  cancelEvaluation("", { clearQuestions: true });
+  const generation = ++evaluation.loadGeneration;
+  const current = () => graph === state.graph && generation === evaluation.loadGeneration;
+  evaluation.loading = true; renderEvaluation();
+  try {
+    const helpers = await evaluationModule(); if (!current()) return;
+    if (file.size > helpers.EVALUATION_LIMITS.fileBytes) throw new Error("Question files must be 5 MiB or smaller.");
+    const contents = await file.text(); if (!current()) return;
+    evaluation.questions = helpers.parseEvaluationSet(contents);
+    evaluation.datasetName = file.name; evaluation.message = "Ready. Questions are sampled across the full set.";
+  } catch (error) { if (current()) evaluation.message = error.message; }
+  finally { if (current()) { evaluation.loading = false; renderEvaluation(); } }
+}
+
+function downloadEvaluationJson(value, filename) {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
+  const link = node("a"); link.href = url; link.download = filename; link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function runEvaluation(event) {
+  event?.preventDefault();
+  const graph = state.graph; const evaluation = graph.evaluation;
+  if (evaluation.loading || graph.busy || evaluation.run?.status === "running" || !evaluation.questions.length) return;
+  const generation = ++evaluation.generation; const session = state.session; const collection = graph.collection;
+  const current = () => graph === state.graph && generation === evaluation.generation && session === state.session && collection === state.graph.collection;
+  let run = evaluation.run?.status === "paused" ? evaluation.run : null;
+  let activeQuestion = null; let started = null;
+  evaluation.loading = true; renderEvaluationControls();
+  try {
+    // Snapshot every control before the first await. Later edits cannot silently
+    // change the plan of a queued or paused evaluation.
+    let selected;
+    let options;
+    if (run) { selected = run.selected; options = run.options; }
+    else {
+      options = { ...graphRetrievalOptions(), reranker: $("#graph-reranker").value };
+      const filters = readGraphFilters(); if (filters.length) options.document_filters = filters;
+      const limit = Number($("#evaluation-limit").value);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Test 1–100 questions per run.");
+      const helpers = await evaluationModule(); if (!current()) return;
+      selected = helpers.sampleEvaluationSet(evaluation.questions, limit);
+    }
+    const helpers = await evaluationModule(); if (!current()) return;
+    if (!run) {
+      run = { schema_version: 1, kind: "retrieval_evaluation", collection, dataset_name: evaluation.datasetName,
+        options, planned: selected.length, selected, status: "running", started_at: new Date().toISOString(),
+        results: [], summary: helpers.summarizeEvaluation([], selected.length), pauseRequested: false };
+      evaluation.run = run; evaluation.offset = 0;
+    }
+    run.status = "running"; run.pauseRequested = false;
+    evaluation.message = "Preparing evaluation…"; evaluation.loading = false; renderEvaluation();
+    const config = await graphQueryConfiguration(options); if (!current()) return;
+    let rerankTimeout = 0;
+    if (options.reranker === "voyage") {
+      const settings = state.reranking || await loadRerankingSettings(); if (!current()) return;
+      if (!settings?.configured) throw new Error("Add a Voyage reranking key in Settings first.");
+      rerankTimeout = settings.timeout_seconds;
+    }
+    evaluation.controller = new AbortController();
+    for (const question of selected.slice(run.results.length)) {
+      if (!current()) return;
+      if (run.pauseRequested) { run.status = "paused"; break; }
+      activeQuestion = question; started = performance.now();
+      evaluation.message = `Running ${run.results.length + 1} of ${run.planned}…`; renderEvaluation();
+      const response = await request(`/v1/graph/collections/${encodeURIComponent(collection)}/retrieve`, {
+        method: "POST", signal: evaluation.controller.signal,
+        timeout: (config.timeout_seconds + rerankTimeout + 15) * 1000,
+        body: JSON.stringify({ text: question.question, ...options }),
+      });
+      if (!current()) return;
+      run.results.push(helpers.scoreEvaluationResult(question, response, performance.now() - started, options.max_results));
+      run.summary = helpers.summarizeEvaluation(run.results, run.planned);
+      activeQuestion = null; started = null; renderEvaluation();
+    }
+    if (run.results.length === run.planned) run.status = "complete";
+    evaluation.message = run.status === "complete" ? `Complete · ${run.planned} questions evaluated.` : `Paused · ${run.results.length} of ${run.planned} evaluated. Resume keeps these run settings.`;
+  } catch (error) {
+    if (!current()) return;
+    if (run) {
+      run.status = "failed";
+      if (activeQuestion) run.results.push({ ...activeQuestion, status: "error", error: error.message, matched_rank: null,
+        elapsed_ms: started === null ? null : performance.now() - started, revision: null, candidate_count: null, hit_count: 0,
+        embedding_usage: null, reranking: null, timings: null, evidence: [] });
+      run.summary = evaluationTools.summarizeEvaluation(run.results, run.planned);
+    }
+    evaluation.message = `${error.message} Stopped without automatic retries.`;
+    if (error.status === 401 || error.status === 403) showError(error);
+  } finally {
+    if (current()) { evaluation.loading = false; evaluation.controller = null; renderEvaluation(); }
+  }
+}
+
+function bindEvaluationEvents() {
+  $("#playground-evaluate-open").addEventListener("click", () => {
+    switchPlaygroundTab("chat"); $("#playground-evaluation").open = true;
+    $("#playground-evaluation").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("#evaluation-file").addEventListener("change", (event) => { const file = event.target.files?.[0]; event.target.value = ""; void importEvaluationFile(file); });
+  $("#evaluation-form").addEventListener("submit", runEvaluation);
+  $("#evaluation-pause").addEventListener("click", () => {
+    const evaluation = state.graph.evaluation;
+    if (evaluation.run?.status !== "running") return;
+    evaluation.run.pauseRequested = true; evaluation.message = "Pausing after the current request…"; renderEvaluation();
+  });
+  $("#evaluation-clear").addEventListener("click", () => cancelEvaluation("", { clearQuestions: true }));
+  $("#evaluation-template").addEventListener("click", () => downloadEvaluationJson([
+    { question: "What is the retention period?", expected_source: "policy.pdf#page=2", expected_text: "30 days" },
+  ], "vectors-test-questions.json"));
+  $("#evaluation-export").addEventListener("click", () => {
+    const run = state.graph.evaluation.run; if (!run) return;
+    const { selected, pauseRequested, ...report } = run;
+    downloadEvaluationJson({ ...report, sampled_questions: selected,
+      scope: "Source retrieval only. A match needs the expected source and any literal expected text in the same passage; this does not measure answer quality. Latency includes network/provider time. Evidence excerpts are bounded." }, "vectors-evaluation.json");
+  });
+  $("#evaluation-previous").addEventListener("click", () => { state.graph.evaluation.offset = Math.max(0, state.graph.evaluation.offset - 20); renderEvaluation(); });
+  $("#evaluation-next").addEventListener("click", () => { state.graph.evaluation.offset += 20; renderEvaluation(); });
+}
+
 async function loadRerankingSettings() {
   const generation = ++state.rerankingGeneration;
   try {
@@ -2839,6 +3628,46 @@ async function saveRerankingSettings(event) {
   finally { if (session === state.session) { state.rerankingBusy = false; $("#rerank-save").disabled = false; } }
 }
 function bindGraphEvents() {
+  bindEvaluationEvents();
+  for (const button of $$("[data-playground-tab]")) {
+    button.addEventListener("click", () => switchPlaygroundTab(button.dataset.playgroundTab));
+    button.addEventListener("keydown", (event) => {
+      const tabs = ["chat", "documents", "graph"]; const index = tabs.indexOf(button.dataset.playgroundTab);
+      const next = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+      if (next === undefined) return;
+      event.preventDefault(); switchPlaygroundTab(tabs[next], { focus: true });
+    });
+  }
+  $("#playground-settings-toggle").addEventListener("click", () => setPlaygroundSettings($("#playground-settings").hidden));
+  $("#playground-settings-close").addEventListener("click", () => setPlaygroundSettings(false, { focus: true }));
+  $("#playground-strategy").addEventListener("change", () => updatePlaygroundConfiguration({ changed: true }));
+  $("#graph-search-form").addEventListener("input", () => updatePlaygroundConfiguration({ changed: true }));
+  $("#playground-run-again").addEventListener("click", () => void submitGraphChat(null, { rerun: true }));
+  $("#playground-compare").addEventListener("click", () => {
+    state.graph.compareOpen = !state.graph.compareOpen; renderPlaygroundComparison();
+    if (state.graph.compareOpen) $("#playground-comparison").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+  $("#graph-upload-open").addEventListener("click", () => { switchPlaygroundTab("documents"); $("#graph-upload-panel").open = true; $("#graph-upload-panel").scrollIntoView({ behavior: "smooth", block: "start" }); });
+  $("#graph-chat-open").addEventListener("click", () => { switchPlaygroundTab("chat"); $("#graph-chat-panel").scrollIntoView({ behavior: "smooth", block: "start" }); $("#graph-chat-question").focus({ preventScroll: true }); });
+  for (const id of ["graph-pdf-files", "graph-pdf-folder"]) $("#" + id).addEventListener("change", (event) => {
+    const files = Array.from(event.target.files || []); event.target.value = "";
+    void queuePdfFiles(files).catch((error) => graphError(error, "graph-upload-status"));
+  });
+  $("#graph-upload-start").addEventListener("click", () => void runPdfImport());
+  $("#graph-upload-pause").addEventListener("click", pausePdfImport);
+  $("#graph-upload-retry").addEventListener("click", () => void runPdfImport({ retry: true }));
+  $("#graph-upload-clear").addEventListener("click", () => { const queue = graphUploadQueue(); if (queue.running) return; queue.items = []; queue.offset = 0; queue.message = "Queue cleared. Saved documents remain in the collection."; renderPdfQueue(); });
+  $("#graph-upload-previous").addEventListener("click", () => { const queue = graphUploadQueue(); queue.offset = Math.max(0, queue.offset - 50); renderPdfQueue(); });
+  $("#graph-upload-next").addEventListener("click", () => { graphUploadQueue().offset += 50; renderPdfQueue(); });
+  $("#graph-capacity-refresh").addEventListener("click", () => void loadGraphCapacity());
+  $("#graph-chat-form").addEventListener("submit", submitGraphChat);
+  $("#graph-chat-stop").addEventListener("click", () => stopGraphChat());
+  $("#graph-chat-clear").addEventListener("click", () => stopGraphChat({ clearHistory: true, message: "New conversation." }));
+  for (const id of ["graph-chat-mode", "graph-chat-context", "graph-chat-delivery", "graph-chat-grounding", "graph-chat-model"]) $("#" + id).addEventListener("change", () => {
+    state.graph.compareOpen = false; renderPlaygroundComparison(); updateGraphChatControls();
+  });
+  $("#graph-chat-settings").addEventListener("click", () => setPlaygroundSettings(true, { focus: true }));
+  $("#graph-chat-question").addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void submitGraphChat(); } });
   $("#graph-back-pages").addEventListener("click", () => void returnToGraphPages());
   $("#graph-neighborhood-controls").addEventListener("submit", (event) => { event.preventDefault(); if (!state.graph.busy) void loadGraphNeighborhood(); });
   $("#graph-neighborhood-controls").addEventListener("input", () => {
@@ -2854,7 +3683,7 @@ function bindGraphEvents() {
   $("#graph-view-data").addEventListener("click", () => void viewGraphData());
   $("#graph-open-sql").addEventListener("click", () => { try { openGraphSql(); } catch (error) { graphError(error); } });
   $("#graph-create-form").addEventListener("submit", createGraphCollection);
-  $("#graph-add-open").addEventListener("click", () => { $("#graph-document-panel").open = true; $("#graph-document-id").focus(); $("#graph-document-panel").scrollIntoView({ behavior: "smooth", block: "start" }); });
+  $("#graph-add-open").addEventListener("click", () => { switchPlaygroundTab("documents"); $("#graph-document-panel").open = true; $("#graph-document-id").focus(); $("#graph-document-panel").scrollIntoView({ behavior: "smooth", block: "start" }); });
   $("#graph-document-form").addEventListener("submit", saveGraphDocument);
   $("#graph-document-form").addEventListener("input", () => { state.graph.previewGeneration += 1; clear($("#graph-chunk-preview")); $("#graph-document-status").textContent = ""; });
   $("#graph-preview").addEventListener("click", previewGraphDocument);
@@ -2874,7 +3703,7 @@ function bindGraphEvents() {
   $("#graph-seeds").addEventListener("input", () => { state.graph.seedExplicit = true; updateGraphSeedBudget(); });
   $("#graph-seeds-auto").addEventListener("click", () => { state.graph.seedExplicit = false; updateGraphSeedBudget(); });
   updateGraphSeedBudget();
-  $("#graph-reranker").addEventListener("change", () => { $("#graph-search-privacy").textContent = $("#graph-reranker").value === "voyage" ? "Your question is sent to the embedding provider. Voyage reranking also receives your question and candidate passage context, and may incur additional provider charges." : "Your question is sent to the embedding provider. Local ranking combines vector and lexical evidence on this server."; });
+  $("#graph-reranker").addEventListener("change", () => updatePlaygroundConfiguration({ changed: true }));
   $("#graph-relationship-form").addEventListener("submit", (event) => { event.preventDefault(); void mutateGraphRelationship("POST"); });
   $("#graph-previous").addEventListener("click", () => { if (!state.graph.busy && state.graph.mode === "pages") { state.graph.offset = Math.max(0, state.graph.offset - state.graph.limit); void loadGraph(); } });
   $("#graph-next").addEventListener("click", () => { if (!state.graph.busy && state.graph.mode === "pages") { state.graph.offset += state.graph.limit; void loadGraph(); } });
@@ -2902,7 +3731,10 @@ function bindGraphEvents() {
   $("#settings-rerank-form").addEventListener("submit", saveRerankingSettings);
 }
 function resetGraphSession() {
-  const uncertain = state.graph.busy;
+  const uncertain = state.graph.busy || [...state.graph.uploadQueues.values()].some((queue) => queue.running && queue.active?.inFlight);
+  for (const queue of state.graph.uploadQueues.values()) stopPdfQueue(queue, "Connection changed.");
+  stopGraphChat({ clearHistory: true, message: "" });
+  cancelEvaluation("", { clearQuestions: true });
   const settingsUncertain = state.rerankingBusy;
   state.graph = newGraphState();
   if (uncertain) state.graph.notice = "The connection changed during a graph request. It may still finish on the server; refresh and check its result before repeating it.";
@@ -2911,6 +3743,12 @@ function resetGraphSession() {
   $("#rerank-key-status").textContent = "Reconnect to load reranking settings.";
   $("#rerank-settings-status").textContent = settingsUncertain ? "The connection changed while saving settings. The save may still finish; refresh to check the current configuration." : "";
   $("#graph-document-form").reset(); $("#graph-search-form").reset(); $("#graph-create-form").reset(); $("#graph-neighborhood-controls").reset();
+  $("#graph-chat-form").reset(); $("#graph-pdf-files").value = ""; $("#graph-pdf-folder").value = "";
+  $("#evaluation-form").reset(); renderEvaluation();
+  $("#playground-strategy").value = "graph";
+  $("#playground-retrieval-results").hidden = true;
+  switchPlaygroundTab("chat"); updatePlaygroundConfiguration();
+  renderGraphChat(); renderGraphCapacity(); renderPdfQueue(); updateGraphChatControls();
   updateGraphSeedBudget();
   $("#graph-create-dialog").close();
   $("#data-create-dialog").close(); $("#admin-create-dialog").close();
@@ -3110,7 +3948,11 @@ async function initialize() {
   $("#connection-host").textContent = window.location.host;
   $("#connection-host").title = window.location.origin;
   setEditor(examples.quickstart);
-  switchView("search");
+  const requestedView = new URL(window.location.href).searchParams.get("view");
+  switchView(["search", "connections", "console", "data", "settings", "guide"].includes(requestedView) ? requestedView : "connections");
+  switchPlaygroundTab("chat");
+  setPlaygroundSettings(window.matchMedia("(min-width: 1001px)").matches);
+  updatePlaygroundConfiguration();
   setSearchMode("text");
   revealQuickStart();
   applyBrowserPreferences();

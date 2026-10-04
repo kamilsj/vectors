@@ -182,6 +182,7 @@ fn diverse_seeds_recover_evidence_from_below_the_initial_direct_pool() {
     let db = fixture(false, false, "public");
     let original = retrieve(&db, request(), options(None));
     assert_eq!(original.candidate_count, 4);
+    assert_eq!(original.traversal_seed_ids, vec!["1:a:0", "1:a:1"]);
     assert!(!original
         .hits
         .iter()
@@ -191,6 +192,8 @@ fn diverse_seeds_recover_evidence_from_below_the_initial_direct_pool() {
     let diverse = retrieve(&db, request(), options(Some(1)));
     assert_eq!(diverse.candidate_count, 4);
     assert_eq!(diverse.hits.len(), 4);
+    assert_eq!(diverse.traversal_seed_ids, vec!["1:a:0", "1:b:0"]);
+    assert_eq!(diverse.hits.iter().filter(|hit| hit.hit.seed).count(), 3);
     let second_seed = diverse
         .hits
         .iter()
@@ -305,6 +308,9 @@ fn default_options_preserve_existing_retrieval_and_disabled_traversal_ignores_se
 
     let mut query = request();
     query.max_hops = 0;
+    assert!(retrieve(&db, query.clone(), options(Some(1)))
+        .traversal_seed_ids
+        .is_empty());
     assert_eq!(
         retrieve(&db, query.clone(), options(None)),
         retrieve(&db, query, options(Some(1)))
@@ -326,6 +332,7 @@ fn capped_seed_selection_is_deterministic_through_a_cycle_and_retains_owned_cita
         .graph_rag_candidates_with_options(query, options(Some(1)))
         .unwrap();
     let revision = snapshot.revision;
+    assert_eq!(snapshot.traversal_seed_ids, vec!["1:a:0", "1:b:0"]);
     assert!(!snapshot
         .candidates
         .iter()
@@ -358,6 +365,7 @@ fn capped_seed_selection_is_deterministic_through_a_cycle_and_retains_owned_cita
         .unwrap();
     assert_eq!(result.revision, revision);
     assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.traversal_seed_ids, vec!["1:a:0", "1:b:0"]);
     assert!(result.edges.is_empty());
     let answer = &result.hits[0];
     assert_eq!(answer.hit.document_id, "answer");
@@ -389,12 +397,23 @@ fn excluded_documents_cannot_be_promoted_to_seeds_or_used_as_graph_bridges() {
     }];
     let result = retrieve(&db, query, filtered);
     assert_eq!(result.candidate_count, 4);
+    assert_eq!(result.traversal_seed_ids, vec!["1:a:0", "1:d:0"]);
     assert!(result
         .hits
         .iter()
         .all(|hit| { hit.hit.document_id == "a" || hit.hit.document_id == "d" }));
     assert!(result.hits.iter().all(|hit| hit.retrieval_path.is_none()));
     assert!(result.edges.is_empty());
+
+    let mut absent = options(Some(1));
+    absent.document_filters = vec![VectorSearchFilter {
+        column: "tenant".into(),
+        operator: VectorFilterOperator::Eq,
+        value: Value::Text("absent".into()),
+    }];
+    let empty = retrieve(&db, request(), absent);
+    assert!(empty.hits.is_empty());
+    assert!(empty.traversal_seed_ids.is_empty());
 }
 
 #[test]

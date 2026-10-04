@@ -5,3 +5,11 @@
 *.jpg binary
 *.jpeg binary
 *.svg text eol=lf
+*.pdf binary
+*.bcmap binary
+*.pfb binary
+*.ttf binary
+
+# Keep upstream licenses and reproducibility patches byte-for-byte intact.
+web/vendor/pdfjs/** whitespace=-blank-at-eol
+docs/benchmarks/*.patch whitespace=-blank-at-eol

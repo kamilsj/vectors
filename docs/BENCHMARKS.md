@@ -7,6 +7,132 @@ with another database.
 
 ## Run the benchmark
 
+### Scaling foundations: filtered retrieval and catalog sharing
+
+```sh
+RAYON_NUM_THREADS=4 cargo run --release --example benchmark_rag_lookups -- 10000 128 50 /tmp/rag-results.json
+```
+
+Measured on 2026-10-04, Apple M4 Max, 48 GiB RAM, macOS 27.0, release CPU
+builds, four Rayon workers. The baseline already includes the maintained-ID
+lookup optimization below and the unreleased 0.10 Playground. The updated
+engine adds indexed chunk eligibility, adaptive sparse keyword scores, sparse
+path state, bounded cosine memoization, candidate-only citation maps, cached
+profile validation and table-level sharing during catalog capture.
+
+Each variant runs in three independent processes, alternating order, with five
+warm-ups and fifty queries per workload/process. Numbers below are the median
+of the three per-process medians and p95 values, rather than pooled percentiles.
+The fixture has ten chunks/document, 128-dimensional vectors, adjacency links,
+40 candidates, twelve seeds and ten final results. The filtered query selects
+one document containing ten chunks.
+
+| Chunks | Query | Before median / p95 (µs) | After median / p95 (µs) | Median speedup |
+| ---: | --- | ---: | ---: | ---: |
+| 1,000 | Keyword | 115.83 / 125.29 | 106.08 / 114.88 | 1.09× |
+| 1,000 | Filtered keyword + graph | 43.96 / 48.50 | 24.54 / 27.79 | 1.79× |
+| 1,000 | Hybrid + graph | 186.67 / 236.13 | 190.21 / 200.92 | 0.98× |
+| 10,000 | Keyword | 610.04 / 734.71 | 451.92 / 534.38 | 1.35× |
+| 10,000 | Filtered keyword + graph | 254.54 / 282.29 | 27.29 / 32.58 | 9.33× |
+| 10,000 | Hybrid + graph | 888.71 / 962.38 | 736.21 / 783.83 | 1.21× |
+
+[Raw samples, environment, source/binary hashes and output parity](benchmarks/rag-scale-foundations-2026-10-04.json).
+The [isolated engine patch](benchmarks/rag-scale-foundations-2026-10-04.patch)
+preserves the change against that unreleased baseline, including the final
+lint-only cleanup after measurement.
+All canonical result bytes matched across variants and repeated processes;
+only lexical-cache-hit telemetry was excluded. Query timers exclude corpus
+setup, providers, HTTP and serialization. The 1K hybrid median regressed
+slightly, so this is not a uniform latency improvement.
+
+Median peak process RSS at 10K chunks changed from 89,554,944 to 48,332,800
+bytes. This includes corpus construction and retained data; it does not measure
+isolated query scratch. A separate catalog-capture microbenchmark using sixteen
+tables and 32,000 text rows measured 1,342.80 µs for the former deep-copy map
+versus 0.32 µs for shared capture. That comparison excludes mutations, commits
+and snapshots written to disk, and must not be used as a transaction speedup.
+
+These results validate bounded local workloads. They do not validate ten
+million documents; see the [scaling plan and acceptance milestones](SCALING.md).
+
+### New-document graph ingestion
+
+```sh
+env -u RAYON_NUM_THREADS -u RAYON_RS_NUM_CPUS cargo run --release --example benchmark_graph_ingest -- 10000 128 20 32 2 /tmp/ingest-results.json
+```
+
+The arguments are final chunk count, dimensions, timed documents, unrelated
+text MiB, semantic neighbors and an optional canonical-output path. Each timed
+document adds five chunks. Setup populates the collection in batches of at most
+100 chunks with semantic linking disabled, then sets the measured fanout and
+adds the unrelated table. One new document warms the path before measurement.
+
+Measured on 2026-10-04, macOS 27.0 arm64, Rust 1.98.1, release CPU, in-memory
+storage. Rayon used its default global pool with both thread-count overrides
+unset. A subsequent probe in the same environment reported sixteen workers;
+the original timed processes did not log their worker count. Three alternating
+before/after process pairs per case each perform
+twenty timed appends. Values are the median of the three process medians and
+the median of their p95s. The baseline is the same saved working tree used by
+the retrieval measurements above; the combined change includes catalog
+sharing, prepared graph appends and profile-validation reuse.
+
+| Final chunks | Semantic neighbors | Unrelated text (MiB) | Before median / p95 (ms) | After median / p95 (ms) | Median speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 0 | 0 | 0.642 / 0.759 | 0.061 / 0.094 | 10.55× |
+| 1,000 | 2 | 0 | 0.824 / 0.901 | 0.245 / 0.275 | 3.36× |
+| 1,000 | 0 | 32 | 1.181 / 3.291 | 0.062 / 0.099 | 19.21× |
+| 1,000 | 2 | 32 | 1.378 / 3.523 | 0.242 / 0.257 | 5.69× |
+| 10,000 | 0 | 0 | 6.586 / 6.944 | 0.444 / 0.498 | 14.82× |
+| 10,000 | 2 | 0 | 7.281 / 7.764 | 1.188 / 1.329 | 6.13× |
+| 10,000 | 0 | 32 | 7.194 / 9.811 | 0.496 / 0.516 | 14.50× |
+| 10,000 | 2 | 32 | 8.097 / 11.282 | 1.098 / 1.297 | 7.37× |
+
+[Raw timings, executable/source hashes and canonical graph parity](benchmarks/graph-append-scale-2026-10-04.json).
+All document, chunk and edge rows and ingest results matched byte for byte
+between variants and repeated processes. Timings exclude setup, output
+serialization, providers, HTTP and WAL fsync. These are per-document latency
+measurements, not concurrent or durable ingestion throughput. Capacity checks,
+orphan detection and exact semantic-neighbor searches still grow with the
+target collection; the unchanged 10K chunk limit applies.
+
+### Repeated RAG retrieval with maintained chunk indexes
+
+```sh
+cargo run --release --example benchmark_rag_lookups -- 10000 128 50 /tmp/rag-results.json
+```
+
+RAG retrieval now borrows the maintained chunk-ID index instead of rebuilding
+full-corpus lookup maps for candidate traversal and returned-edge validation.
+SQL/typed writes and recovery already maintain this index. No ranking weights,
+filters, collection limits, or result budgets change.
+
+Measured on 2026-10-04 on Apple M4 Max, macOS 27.0, Rust 1.98.1, release CPU
+builds. Each variant ran in three processes with alternating before/after order,
+five warm-ups, and 50 measured queries per workload/process. The table aggregates
+150 samples per variant. The corpus uses 128-dimensional vectors, ten chunks per
+document, adjacency links, 40 candidates, 12 seeds, and ten results. The filtered
+query admits one document (ten chunks). Complete canonical results matched byte
+for byte; only cache-hit telemetry was excluded from comparison, and every
+measured query asserted a warm cache.
+
+| Chunks | Query | Before median / p95 (µs) | After median / p95 (µs) | Median speedup |
+| ---: | --- | ---: | ---: | ---: |
+| 1,000 | Keyword | 193.75 / 213.17 | 114.79 / 141.83 | 1.69× |
+| 1,000 | Filtered keyword + graph | 121.25 / 133.54 | 45.42 / 49.63 | 2.67× |
+| 1,000 | Hybrid + graph | 266.29 / 285.21 | 193.42 / 204.71 | 1.38× |
+| 10,000 | Keyword | 1,319.04 / 1,519.04 | 610.42 / 836.38 | 2.16× |
+| 10,000 | Filtered keyword + graph | 1,006.04 / 1,199.00 | 245.42 / 312.17 | 4.10× |
+| 10,000 | Hybrid + graph | 1,590.54 / 1,993.83 | 1,015.08 / 2,229.08 | 1.57× |
+
+[Raw samples, source hashes, isolated patch and parity evidence](benchmarks/rag-id-lookups-2026-10-04.json).
+The baseline is the working tree immediately before this optimization, including
+the earlier unreleased 0.10 changes. Timings include in-process retrieval and
+MMR, but exclude setup, serialization, HTTP and external providers. These are
+local synthetic measurements, not general throughput or answer-quality claims.
+The 10K hybrid p95 increased despite its lower median; tail latency is not
+uniformly improved. Collection profile validation still scans chunk profiles.
+
 ### Focused graph neighborhoods
 
 ```sh
@@ -711,3 +837,36 @@ have correctness coverage but were not timed here. The same setup, provider,
 HTTP, serialization, and persistence exclusions apply as above. The
 [raw report](benchmarks/sql-joins-2026-09-24.json) records every sample and the
 exact source/binary hashes for reproducing the comparison.
+
+## Durable PDF-like RAG workload
+
+`examples/benchmark_pdf_rag.rs` ingests one-chunk page-like documents into a
+persistent database, closes/reopens it, and verifies the first source and answer
+fact for 20 hybrid queries across the corpus. It uses deterministic normalized
+1,536-dimensional vectors and zero automatic semantic neighbors. No provider
+calls or PDF parsing occur inside this engine benchmark.
+
+```sh
+cargo run --release --example benchmark_pdf_rag -- 1000 1536
+cargo run --release --example benchmark_pdf_rag -- 10000 1536
+```
+
+Single local macOS arm64 runs of the 0.10.0 working tree on 2026-09-27:
+
+| Stored pages/chunks | Durable import | Reopen | Retrieval median / p95 |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 5.03 s | 2.07 s | 0.64 / 1.00 ms |
+| 10,000 | 97.04 s | 13.36 s | 4.21 / 17.53 ms |
+
+All 40 expected-first-source checks passed after restart. Retrieval samples
+include one cold and 19 warm queries; percentiles use nearest rank. Background
+verification work was active, and these are individual observations rather than
+an isolated performance comparison. The run at 10,000 chunks reaches the current
+collection chunk limit, not an unlimited corpus size.
+
+These measurements exclude browser extraction, provider/network latency,
+semantic linking and concurrent query contention. A PDF may produce many
+chunks. The [raw results](benchmarks/pdf-rag-durable-2026-09-27.json) retain timing,
+storage and correctness counts. Use the [PDF RAG lab](PDF_RAG_LAB.md) for actual
+folder import, known-answer PDFs, interactive chat inspection and end-to-end
+source-retrieval evaluation with your configured provider.

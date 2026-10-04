@@ -1,11 +1,16 @@
 //! Bounded graph exploration and hybrid RAG retrieval over coherent snapshots.
 
+use std::time::Instant;
+
 use super::*;
 use crate::{
     GraphBrowseRequest, GraphNeighborhoodDirection, GraphNeighborhoodRequest, GraphRagOptions,
     GraphRagRequest, GraphRagResult, GraphRagSelection, GraphRagTraversal,
     GraphRelationshipDeleteRequest, GraphRelationshipRequest, RerankingService,
 };
+
+#[path = "rag_chat.rs"]
+mod chat;
 
 pub(super) fn configure(config: &mut web::ServiceConfig) {
     config
@@ -18,6 +23,7 @@ pub(super) fn configure(config: &mut web::ServiceConfig) {
             "/collections/{collection}/retrieve",
             web::post().to(retrieve),
         )
+        .route("/collections/{collection}/chat", web::post().to(chat::chat))
         .service(
             web::resource("/collections/{collection}/relationships")
                 .route(web::post().to(upsert_relationship))
@@ -330,6 +336,22 @@ struct RetrieveResponse {
     result: GraphRagResult,
     reranking: RerankingSummary,
     embedding_usage: crate::embedding::Usage,
+    timings: RetrievalTimings,
+}
+
+/// Wall-clock server stages, including admission waits; no invented token speed.
+#[derive(Clone, Copy, Default, Serialize)]
+struct RetrievalTimings {
+    embedding_ms: f64,
+    search_ms: f64,
+    reranking_ms: f64,
+    selection_ms: f64,
+    generation_ms: f64,
+    total_ms: f64,
+}
+
+fn elapsed_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
 }
 
 // Services are independently optional for applications embedding the API.
@@ -346,8 +368,61 @@ async fn retrieve(
     input: web::Json<Retrieve>,
 ) -> Result<HttpResponse, ApiError> {
     authorize(&request, security.as_ref().map(|value| value.get_ref()))?;
-    let mut input = input.into_inner();
-    input.validate(&limits)?;
+    let result = retrieve_result(
+        limiter.as_ref(),
+        &limits,
+        database.get_ref().clone(),
+        embeddings,
+        reranking,
+        collection.into_inner(),
+        input.into_inner(),
+        false,
+    )
+    .await?;
+    Ok(json_body(encoded(&result)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retrieve_result(
+    limiter: Option<&web::Data<DatabaseTaskLimiter>>,
+    limits: &RequestLimits,
+    database: Database,
+    embeddings: Option<web::Data<EmbeddingService>>,
+    reranking: Option<web::Data<RerankingService>>,
+    collection: String,
+    mut input: Retrieve,
+    require_generation: bool,
+) -> Result<RetrieveResponse, ApiError> {
+    let preflight = retrieval_preflight(limiter, limits, &database, collection, &mut input).await?;
+    retrieve_prepared(
+        limiter,
+        limits,
+        database,
+        embeddings,
+        reranking,
+        input,
+        require_generation,
+        preflight,
+    )
+    .await
+}
+
+struct RetrievalPreflight {
+    state: crate::GraphCollection,
+    document_filters: Vec<VectorSearchFilter>,
+    traversal: GraphRagTraversal,
+    has_chunks: bool,
+    search_ms: f64,
+}
+
+async fn retrieval_preflight(
+    limiter: Option<&web::Data<DatabaseTaskLimiter>>,
+    limits: &RequestLimits,
+    database: &Database,
+    collection: String,
+    input: &mut Retrieve,
+) -> Result<RetrievalPreflight, ApiError> {
+    input.validate(limits)?;
     if input.document_filters.len() > 32 {
         return Err(ApiError::bad_request(
             "invalid_rag_request",
@@ -363,25 +438,78 @@ async fn retrieve(
     traversal
         .validate()
         .map_err(|error| ApiError::bad_request("invalid_rag_request", error.to_string()))?;
-    let max_edges = limits.max_response_rows;
-    let collection = collection.into_inner();
-    let database = database.get_ref().clone();
     let read_db = database.clone();
     let preflight_filters = document_filters.clone();
-    let state = run_database_task(limiter.as_ref(), move || {
+    let search_started = Instant::now();
+    let (state, has_chunks) = run_database_task(limiter, move || {
         read_db
-            .graph_validate_document_filters(&collection, &preflight_filters)
+            .graph_preflight_document_filters(&collection, &preflight_filters)
             .map_err(search_error)
     })
     .await?;
-    if state.chunk_count == 0 {
-        return Ok(json_body(encoded(&serde_json::json!({
-            "collection": state.config.name, "revision": state.revision,
-            "hits": [], "edges": [], "lexical_cache_hit": false, "truncated": false,
-            "context_bytes": 0, "candidate_count": 0,
-            "reranking": {"method": input.reranker, "model": null, "total_tokens": 0},
-            "embedding_usage": {"total_tokens": 0}
-        }))?));
+
+    Ok(RetrievalPreflight {
+        state,
+        document_filters,
+        traversal,
+        has_chunks,
+        search_ms: elapsed_ms(search_started),
+    })
+}
+
+fn empty_retrieval(state: &crate::GraphCollection, reranker: Reranker) -> RetrieveResponse {
+    RetrieveResponse {
+        result: GraphRagResult {
+            collection: state.config.name.clone(),
+            revision: state.revision,
+            hits: Vec::new(),
+            edges: Vec::new(),
+            traversal_seed_ids: Vec::new(),
+            lexical_cache_hit: false,
+            truncated: false,
+            context_bytes: 0,
+            candidate_count: 0,
+        },
+        reranking: RerankingSummary {
+            method: reranker,
+            model: None,
+            total_tokens: 0,
+        },
+        embedding_usage: crate::embedding::Usage::default(),
+        timings: RetrievalTimings::default(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retrieve_prepared(
+    limiter: Option<&web::Data<DatabaseTaskLimiter>>,
+    limits: &RequestLimits,
+    database: Database,
+    embeddings: Option<web::Data<EmbeddingService>>,
+    reranking: Option<web::Data<RerankingService>>,
+    input: Retrieve,
+    require_generation: bool,
+    preflight: RetrievalPreflight,
+) -> Result<RetrieveResponse, ApiError> {
+    let started = Instant::now();
+    input.validate(limits)?;
+    let RetrievalPreflight {
+        state,
+        document_filters,
+        traversal,
+        has_chunks,
+        search_ms,
+    } = preflight;
+    if !has_chunks {
+        return Ok(empty_retrieval(&state, input.reranker));
+    }
+    let mut timings = RetrievalTimings {
+        search_ms,
+        ..RetrievalTimings::default()
+    };
+    let max_edges = limits.max_response_rows;
+    if require_generation {
+        chat::ensure_configured(embeddings.as_ref())?;
     }
     let reranker = if matches!(input.reranker, Reranker::Voyage) {
         let service = crate::api::reranking::service(reranking)?;
@@ -390,31 +518,45 @@ async fn retrieve(
     } else {
         None
     };
-    let generated = embedding_service(embeddings)?
-        .generate(GenerateRequest::pinned(
-            vec![input.text.clone()],
-            InputType::Query,
-            expected_profile(&state.config.profile)?,
-        ))
-        .await?;
-    if graph_profile(generated.profile()) != state.config.profile
-        || !matches!(generated.input_type, InputType::Query)
-    {
-        return Err(ApiError::internal("query embedding profile changed"));
-    }
-    let query_text = input.text.clone();
-    let (snapshot, usage) = run_database_task(limiter.as_ref(), move || {
+    let (query, usage) = if input.vector_weight > 0.0 {
+        let embedding_started = Instant::now();
+        let generated = embedding_service(embeddings)?
+            .generate(GenerateRequest::pinned(
+                vec![input.text.clone()],
+                InputType::Query,
+                expected_profile(&state.config.profile)?,
+            ))
+            .await?;
+        timings.embedding_ms = elapsed_ms(embedding_started);
+        if graph_profile(generated.profile()) != state.config.profile
+            || !matches!(generated.input_type, InputType::Query)
+        {
+            return Err(ApiError::internal("query embedding profile changed"));
+        }
         let values = generated
             .embeddings
             .into_iter()
             .next()
             .ok_or_else(|| ApiError::internal("query embedding is missing"))?;
+        (normalized_embedding(values)?, generated.usage)
+    } else {
+        // The engine ignores the query vector entirely in lexical-only mode;
+        // matching dimensions still detect collection/profile changes. The
+        // zero norm also catches accidental query-cosine work in regressions.
+        (
+            Vector::new(vec![0.0; state.config.profile.dimensions])?,
+            crate::embedding::Usage::default(),
+        )
+    };
+    let query_text = input.text.clone();
+    let search_started = Instant::now();
+    let snapshot = run_database_task(limiter, move || {
         let snapshot = database
             .graph_rag_candidates_with_options(
                 GraphRagRequest {
                     collection: state.config.name,
                     expected_profile: state.config.profile,
-                    query: normalized_embedding(values)?,
+                    query,
                     query_text,
                     candidate_limit: input.candidate_limit,
                     seed_limit: input.seed_limit,
@@ -430,10 +572,13 @@ async fn retrieve(
                 },
             )
             .map_err(search_error)?;
-        Ok::<_, ApiError>((snapshot, generated.usage))
+        Ok::<_, ApiError>(snapshot)
     })
     .await?;
+    timings.search_ms += elapsed_ms(search_started);
     let candidate_count = snapshot.candidates.len();
+    let reranking_started = Instant::now();
+    let externally_reranked = reranker.is_some() && candidate_count > 0;
     let (scores, summary) = if let Some(service) = reranker.filter(|_| candidate_count > 0) {
         let documents = snapshot
             .candidates
@@ -465,7 +610,11 @@ async fn retrieve(
             },
         )
     };
-    let body = run_database_task(limiter.as_ref(), move || {
+    if externally_reranked {
+        timings.reranking_ms = elapsed_ms(reranking_started);
+    }
+    let selection_started = Instant::now();
+    let result = run_database_task(limiter, move || {
         let mut result = snapshot.finalize(
             GraphRagSelection {
                 limit: input.max_results,
@@ -479,14 +628,17 @@ async fn retrieve(
             result.edges.truncate(max_edges);
             result.truncated = true;
         }
-        encoded(&RetrieveResponse {
-            result,
-            reranking: summary,
-            embedding_usage: usage,
-        })
+        Ok::<_, ApiError>(result)
     })
     .await?;
-    Ok(json_body(body))
+    timings.selection_ms = elapsed_ms(selection_started);
+    timings.total_ms = search_ms + elapsed_ms(started);
+    Ok(RetrieveResponse {
+        result,
+        reranking: summary,
+        embedding_usage: usage,
+        timings,
+    })
 }
 
 #[cfg(test)]

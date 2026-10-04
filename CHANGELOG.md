@@ -16,6 +16,70 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Fixed
 
+## 0.10.0 - 2026-10-04
+
+### Added
+
+- Conversational RAG search and explicit retrieval-query overrides, with separate
+  rewrite usage/timing and unchanged document-filter scope.
+- Optional structured answers with exact source-quote checks, explicit answer
+  outcomes, actually cited labels and concise voice scripts. Invalid strict
+  evidence and incomplete output are withheld; matching quotes do not establish
+  factual entailment.
+- Python sync/async chat methods and a bounded answer-evaluation runner with
+  follow-up, stale-history, topic-change and unanswerable-question fixtures.
+- Playground controls for conversation context, answer style and evidence policy,
+  plus query traces, source excerpts and copyable voice scripts.
+- PDF file/folder import in Playground with browser-local text extraction,
+  bounded sequential uploads, page citations, progress, pause and explicit retry.
+- RAG chat with optional OpenAI answers, source labels, retrieval-only mode and
+  per-turn retrieval diagnostics. Generation reuses the private OpenAI key.
+- Collection capacity reporting and actual graph traversal seed identifiers,
+  plus measured retrieval and generation stage timings.
+- A PDF RAG lab guide, deterministic PDF corpus/question generator, retrieval
+  evaluation script and durable ingestion/retrieval benchmark for v0.10.0.
+- A simplified Playground with Chat, Documents, and Graph tabs, collapsible
+  configuration, four retrieval strategies, repeat runs and source comparisons.
+- Provider-free keyword retrieval when `vector_weight=0`, with no query
+  embedding request or dense candidate scan; local ranking and filtering remain
+  available without an embedding key.
+- Playground evaluation of question sets with sampled sequential retrieval,
+  pause/resume, source and fact matching, rank/latency metrics, bounded evidence
+  and downloadable reports that retain the run's settings and document filters.
+
+### Changed
+
+- Standalone server binaries include the PDF parser and its worker/font assets;
+  PDF extraction does not depend on a CDN or transmit the original PDF file.
+- The console opens in Playground, with a light theme and compact conversations
+  with source citations. Retrieval diagnostics stay in expandable panels.
+- Rust `GraphHit.similarity` is now `Option<f64>`. JSON keyword-only hits return
+  `null`; vector/default retrieval and search retain numeric similarities.
+- Repeated RAG queries reuse maintained chunk-ID indexes instead of rebuilding
+  full-collection lookup maps. Ranking, citations and graph paths are unchanged;
+  focused benchmarks and mutation/recovery regressions cover the optimization.
+- Catalog snapshots share unchanged tables; writes detach only affected tables.
+- New graph documents use prepared atomic appends instead of staging the full
+  catalog. Replacement and orphan repair retain their transactional behavior.
+- Selective RAG filters use chunk document-ID indexes, with sparse query state,
+  bounded similarity memoization and reusable embedding-profile validation.
+  Current collection limits and exact retrieval semantics remain unchanged.
+
+### Fixed
+
+- Voice scripts must preserve the accepted answer's wording before they can be
+  displayed, copied or exported from Playground; mismatches retain the cited answer.
+- Empty structured abstentions use the server's insufficient-evidence response
+  instead of being mistaken for invalid answers.
+- Oversized chat responses no longer discard recent user questions from history;
+  reruns preserve the original conversation snapshot.
+- Chat validates retrieval scope and provider settings before paid query rewriting,
+  and empty filtered collections skip provider calls.
+- Creating a collection clears previous chat history and pending answers;
+  conversation history is also restricted to the selected collection and filters.
+- Inspecting a retrieved passage preserves the exact source snapshot used by
+  that run, even if the graph contains a newer version of the same chunk.
+
 ## 0.9.0 - 2026-09-26
 
 ### Added

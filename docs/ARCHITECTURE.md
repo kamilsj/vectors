@@ -159,7 +159,17 @@ If no document matches, retrieval returns before building citation maps or
 running the vector/keyword rankers. Profile and query validation still run;
 this does not bypass embedding generation at the HTTP boundary.
 
-The graph engine stages a catalog copy under the write lock. Document replacement
+Eligible chunk positions come from the maintained document-ID index and stay
+sorted and unique. Selective queries probe eligible rows in common-term posting
+lists instead of walking every posting. BM25 keeps its collection-wide IDF and
+length normalization; score storage is sparse for selective/rare matches and
+dense for broad matches. Graph path state is sparse, cosine memoization is
+bounded by the query beam, and citation maps include only admitted documents.
+
+New graph documents prepare document, chunk and edge append plans under one
+write lock. Constraint, capacity and WAL serialization checks finish before
+one WAL commit; only then are all three plans applied. Existing document IDs
+or orphaned chunk/edge namespaces use the staged replacement path. Replacement
 removes old chunks and all incident edges, adds new rows, and uses the existing
 exact vector top-k executor for cross-document semantic neighbors. Adjacent and
 mirrored semantic edges are bounded. In durable mode it appends one equivalent
@@ -199,12 +209,24 @@ incoming links. Only retained paths allocate owned edge strings; omitted bridge
 text is never added outside the context budget. External reranking and final
 selection use this snapshot without rereading a newer graph.
 
+Successful chunk embedding-profile validation is cached for at most 128
+generations, keyed by globally unique dense storage ID, row count and expected
+profile. Failed checks are never cached. A new-document append may propagate a
+successful check only because the old generation was validated under the same
+write lock and all appended profile values were constructed canonically.
+
 Lexical indexes use catalog identity, collection name, and the chunk embedding
 column's storage generation and row count. Every chunk append or rebuild
 changes that generation, including text-only SQL updates, typed upserts,
 document replacement/deletion, and restore. Catalog clones preserve unchanged
 generations, so relationship edits and unrelated writes do not force
 retokenization. Mutation paths must preserve this invalidation invariant.
+The profile cache shares this content-generation contract. If vector rebuilds
+become selective, scalar edits to `embedding_profile` or `embedding_text` must
+still advance an explicit content/field generation; row count alone is not an
+invalidation key. Equal-row-count replacement, reorder, recreate and recovery
+must also invalidate affected cache entries. COW clones may preserve a
+generation only while their contents are identical.
 The LRU retains at most three indexes, each checked against a conservative
 16 MiB capacity-aware allocation budget. Oversized vocabularies use exact,
 uncached query-specific postings; builders tokenize outside the global cache
@@ -275,7 +297,11 @@ catalog rather than copying data.
   private staged catalog. Persistent databases synchronize one WAL record before
   publishing either mutation form. Validation and storage failures publish
   neither state.
-- Snapshot saves copy a coherent catalog while holding a read lock, then release
+- Catalog copies share immutable tables through `Arc`; mutable access detaches
+  only the affected table. This preserves transaction rollback and snapshot
+  isolation while avoiding copies of unrelated rows and indexes. A pinned
+  snapshot can still make a writer copy the entire table it changes.
+- Snapshot saves capture a coherent catalog while holding a read lock, then release
   the lock before disk I/O. A separate mutex serializes saves from cloned
   handles.
 - Durable checkpoint compaction holds a shared catalog read guard through
@@ -460,6 +486,6 @@ newer checkpoint with a not-yet-reset WAL without applying a transaction twice.
 
 The next substantial boundaries are an ANN index behind the planner,
 non-blocking checkpoint rotation, prepared statements above AST validation,
-and bounded external-memory ingestion that does not require cloning an entire
-prospective catalog. See [the roadmap](../ROADMAP.md) for ordering and
-acceptance criteria.
+and bounded external-memory ingestion, recovery and compaction. See
+[the roadmap](../ROADMAP.md) and the [ten-million-document scaling plan](SCALING.md)
+for ordering and acceptance criteria.

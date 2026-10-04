@@ -63,7 +63,7 @@ async function mockApi(page, names = ["documents"]) {
 
 async function openConsole(page, names) {
   await mockApi(page, names);
-  await page.goto("/");
+  await page.goto("/?view=search");
   await expect(page.locator("#status-label")).toHaveText("Connected");
   await page.locator('.nav-item[data-view="console"]').click();
 }
@@ -84,7 +84,10 @@ test("the console keeps controls and statistics inside the layout at desktop and
   for (const width of [1440, 1280, 1024, 820, 768, 390]) {
     await test.step(`${width}px viewport`, async () => {
       await page.setViewportSize({ width, height: 1000 });
-      const layout = await page.evaluate(() => {
+      const layout = await page.evaluate(async () => {
+        // A resize can expose the new viewport before inherited responsive
+        // layout has painted; measure after that layout has settled.
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const panel = document.querySelector(".editor-panel").getBoundingClientRect();
         return {
           viewport: document.documentElement.clientWidth,

@@ -27,7 +27,7 @@ cargo run --example hybrid_search
 ```
 
 Console development still needs no frontend build step. To run its optional
-browser regression tests, install Node.js 20 or newer, then run:
+browser regression tests, install Node.js 24 (or at least 22.13), then run:
 
 ```sh
 npm ci
@@ -153,7 +153,7 @@ downloads on every supported platform. Run it locally with an isolated temporary
 database (created and removed by the script):
 
 ```sh
-python3 scripts/release_smoke.py --server target/release/vectors-server --expected-version v0.9.0
+python3 scripts/release_smoke.py --server target/release/vectors-server --expected-version v0.10.0
 ```
 
 ## Performance changes

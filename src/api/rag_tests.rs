@@ -155,7 +155,7 @@ fn add_traversal_link(db: &Database, from: &str, to: &str, kind: &str, weight: f
 #[actix_web::test]
 async fn retrieval_document_filters_apply_before_vector_and_lexical_top_k() {
     let db = document_filter_fixture();
-    let (endpoint, mock) = mock_provider(6, |_, _, _| (200, embedding_response()));
+    let (endpoint, mock) = mock_provider(4, |_, _, _| (200, embedding_response()));
     let embeddings = configured(&endpoint, Provider::Openai);
     for (vector_weight, lexical_weight) in [(1, 0), (0, 1), (1, 1)] {
         let mut request = json!({
@@ -192,6 +192,14 @@ async fn retrieval_document_filters_apply_before_vector_and_lexical_top_k() {
         assert_eq!(filtered["hits"][0]["document_id"], "two");
         assert_eq!(filtered["hits"][0]["metadata"]["tenant_id"], 2);
         assert_eq!(filtered["hits"][0]["metadata"]["published"], true);
+        assert_eq!(
+            filtered["hits"][0]["similarity"].is_null(),
+            vector_weight == 0
+        );
+        assert_eq!(
+            filtered["embedding_usage"]["total_tokens"],
+            if vector_weight == 0 { 0 } else { 4 }
+        );
     }
     mock.join().unwrap();
 }
@@ -312,11 +320,117 @@ async fn document_filters_rebind_after_query_embedding_and_before_snapshot() {
 }
 
 #[actix_web::test]
+async fn keyword_retrieval_without_provider_preserves_filtered_graph_provenance() {
+    let db = document_filter_fixture();
+    db.execute("UPDATE graph_notes_documents SET tenant_id = 2 WHERE document_id = 'three'")
+        .unwrap();
+    add_traversal_link(&db, "3:two:0", "3:one:0", "supports", 1.0);
+    add_traversal_link(&db, "3:one:0", "5:three:0", "supports", 1.0);
+    add_traversal_link(&db, "3:two:0", "5:three:0", "supports", 0.7);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(db.clone()))
+            .configure(crate::api::configure),
+    )
+    .await;
+    let mut request = traversal_query();
+    request["max_hops"] = json!(2);
+    request["kind"] = json!("supports");
+    request["document_filters"] = json!([{"column":"tenant_id", "operator":"eq", "value":2}]);
+    for connected in [true, false] {
+        let response = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/graph/collections/notes/retrieve")
+                .set_json(&request)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: JsonValue = test::read_body_json(response).await;
+        let hits = result["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), if connected { 2 } else { 1 });
+        assert_eq!(hits[0]["document_id"], "two");
+        assert!(hits.iter().all(|hit| hit["similarity"].is_null()));
+        assert!(hits.iter().all(|hit| hit["metadata"]["tenant_id"] == 2));
+        assert_eq!(result["traversal_seed_ids"], json!(["3:two:0"]));
+        assert_eq!(result["embedding_usage"]["total_tokens"], 0);
+        assert_eq!(result["timings"]["embedding_ms"], 0.0);
+        if connected {
+            let context = hits
+                .iter()
+                .find(|hit| hit["document_id"] == "three")
+                .unwrap();
+            assert_eq!(context["depth"], 1);
+            assert_eq!(
+                context["retrieval_path"],
+                json!({
+                    "seed_chunk_id":"3:two:0", "edges":[{
+                        "from_chunk":"3:two:0", "to_chunk":"5:three:0",
+                        "kind":"supports", "weight":0.7
+                    }]
+                })
+            );
+            assert_eq!(result["edges"], context["retrieval_path"]["edges"]);
+            db.graph_delete_relationship(GraphRelationshipDeleteRequest {
+                collection: "notes".into(),
+                expected_revision: db.revision().unwrap(),
+                from_chunk: "3:two:0".into(),
+                to_chunk: "5:three:0".into(),
+                kind: "supports".into(),
+            })
+            .unwrap();
+        } else {
+            // The excluded document cannot bridge to an otherwise allowed hit.
+            assert_eq!(result["edges"], json!([]));
+        }
+    }
+}
+
+#[actix_web::test]
+async fn keyword_retrieval_without_provider_handles_no_matches_and_keeps_vector_preflight() {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(fixture()))
+            .configure(crate::api::configure),
+    )
+    .await;
+    let mut request = traversal_query();
+    request["text"] = json!("nonexistentkeyword");
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/graph/collections/notes/retrieve")
+            .set_json(&request)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: JsonValue = test::read_body_json(response).await;
+    assert_eq!(result["hits"], json!([]));
+    assert_eq!(result["edges"], json!([]));
+    assert_eq!(result["traversal_seed_ids"], json!([]));
+    assert_eq!(result["embedding_usage"]["total_tokens"], 0);
+    assert_eq!(result["timings"]["embedding_ms"], 0.0);
+    request["vector_weight"] = json!(1);
+    let response = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/v1/graph/collections/notes/retrieve")
+            .set_json(&request)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let result: JsonValue = test::read_body_json(response).await;
+    assert_eq!(result["error"]["code"], "embeddings_unavailable");
+}
+
+#[actix_web::test]
 async fn retrieval_incoming_control_discovers_reverse_links_and_preserves_default_direction() {
     let db = fixture();
     add_traversal_link(&db, "3:one:0", "3:two:0", "supports", 0.8);
-    let (endpoint, mock) = mock_provider(3, |_, _, _| (200, embedding_response()));
-    let embeddings = configured(&endpoint, Provider::Openai);
+    let embeddings = crate::embedding::tests::test_service(None);
     for direction in [None, Some("incoming"), Some("both")] {
         let mut request = traversal_query();
         request["kind"] = json!("supports");
@@ -355,7 +469,6 @@ async fn retrieval_incoming_control_discovers_reverse_links_and_preserves_defaul
             assert_eq!(result["edges"], context["retrieval_path"]["edges"]);
         }
     }
-    mock.join().unwrap();
 }
 
 #[actix_web::test]
@@ -365,8 +478,7 @@ async fn retrieval_filters_relationships_before_neighbor_budget_and_returned_edg
     add_traversal_link(&db, "3:two:0", "3:one:0", "supports", 0.2);
     add_traversal_link(&db, "3:two:0", "5:three:0", "supports", 0.8);
     add_traversal_link(&db, "5:three:0", "3:two:0", "supports", 0.1);
-    let (endpoint, mock) = mock_provider(1, |_, _, _| (200, embedding_response()));
-    let embeddings = configured(&endpoint, Provider::Openai);
+    let embeddings = crate::embedding::tests::test_service(None);
     let mut request = traversal_query();
     request["kind"] = json!("supports");
     request["min_weight"] = json!(0.8);
@@ -392,7 +504,6 @@ async fn retrieval_filters_relationships_before_neighbor_budget_and_returned_edg
             "kind":"supports", "weight":0.8
         }])
     );
-    mock.join().unwrap();
 }
 
 #[actix_web::test]
@@ -607,7 +718,12 @@ async fn invalid_seed_document_caps_fail_before_provider_for_nonempty_and_empty_
 #[actix_web::test]
 async fn local_hybrid_retrieval_recovers_keywords_with_consistent_repeated_results() {
     let db = fixture();
-    let (endpoint, mock) = mock_provider(2, |_, _, _| (200, embedding_response()));
+    let provider_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = provider_calls.clone();
+    let (endpoint, mock) = mock_provider(1, move |_, _, _| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (200, embedding_response())
+    });
     let embeddings = configured(&endpoint, Provider::Openai);
     let mut request = query();
     request["text"] = json!("ZX419");
@@ -630,7 +746,9 @@ async fn local_hybrid_retrieval_recovers_keywords_with_consistent_repeated_resul
         assert!(result["hits"][0]["lexical_score"].as_f64().unwrap() > 0.0);
         assert_eq!(result["reranking"]["method"], "local");
         assert!(result["hits"][0]["rerank_score"].is_null());
-        assert_eq!(result["embedding_usage"]["total_tokens"], 4);
+        assert_eq!(result["embedding_usage"]["total_tokens"], 0);
+        assert_eq!(result["timings"]["embedding_ms"], 0.0);
+        assert!(result["hits"][0]["similarity"].is_null());
         // Other parallel API tests may evict this bounded, process-wide cache.
         // Isolated engine tests and the benchmark assert cold/warm cache hits.
         assert!(result["lexical_cache_hit"].is_boolean());
@@ -640,7 +758,18 @@ async fn local_hybrid_retrieval_recovers_keywords_with_consistent_repeated_resul
             first = Some(result["hits"].clone());
         }
     }
+    let observed_calls = provider_calls.load(std::sync::atomic::Ordering::SeqCst);
+    if observed_calls == 0 {
+        // Stop the one-shot loopback mock after proving retrieval never called it.
+        reqwest::Client::new()
+            .post(&endpoint)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+    }
     mock.join().unwrap();
+    assert_eq!(observed_calls, 0);
 }
 
 #[actix_web::test]

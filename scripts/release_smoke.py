@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 r"""Smoke-test an extracted release binary using Python 3.10+ and synthetic provider keys.
 
-Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.9.0
-Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.9.0
+Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.10.0
+Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.10.0
 
 Only loopback HTTP and a temporary durable database are used; no provider calls
 are made. This checks embedded UI assets, not browser rendering. A nonzero exit
@@ -156,17 +156,25 @@ def running_server(binary, directory, timeout, expected_version, *,
 
 def check_assets(api):
     for path, markers in {
-        "/": ["Connections", 'id="view-connections"', 'id="graph-canvas"',
+        "/": ["Playground", 'id="view-connections"', 'id="graph-canvas"',
+              'id="playground-strategy"', 'id="playground-run-again"',
+              'id="playground-compare"', 'id="playground-documents"',
               'id="graph-search-form"', 'id="graph-seeds"',
               'id="graph-seeds-per-document"',
               'id="graph-retrieval-direction"', 'id="graph-retrieval-kind"',
               'id="graph-retrieval-min-weight"', 'id="graph-document-fields"',
               'id="graph-filters-panel"', 'id="graph-document-filters"',
-              'id="relationship-dialog"'],
+              'id="relationship-dialog"', 'id="graph-upload-panel"',
+              'id="graph-chat-form"', 'id="graph-pdf-folder"',
+              'id="graph-chat-context"', 'id="graph-chat-delivery"', 'id="graph-chat-grounding"'],
         "/assets/app.js": ["retrieval_path", "graph-retrieval-direction", "/retrieve",
                            "document_columns", "document_filters", "/relationships",
-                           "max_seeds_per_document"],
+                           "max_seeds_per_document", "/chat", "runPdfImport"],
         "/assets/app.css": [".graph-workspace", ".graph-retrieval-path", ".relationship-card"],
+        "/assets/pdf-import.js": ["extractPdfPages", "pdf.worker.mjs", "isEvalSupported: false"],
+        "/assets/rag-evaluation.mjs": ["parseEvaluationSet", "scoreEvaluationResult", "summarizeEvaluation"],
+        "/assets/vendor/pdfjs/pdf.mjs": ["getDocument"],
+        "/assets/vendor/pdfjs/pdf.worker.mjs": ["WorkerMessageHandler"],
     }.items():
         asset = api.request(path, authenticated=False)
         require(isinstance(asset, str), f"{path}: expected a text asset")
@@ -222,6 +230,29 @@ def check_apis(api):
     })
     require(retrieved["hits"] == [] and retrieved["embedding_usage"]["total_tokens"] == 0,
             "empty graph retrieval should succeed without provider usage")
+    require(retrieved["traversal_seed_ids"] == [] and retrieved["timings"]["total_ms"] == 0,
+            "empty retrieval diagnostics should not invent traversal or timings")
+    capacity = api.request("/v1/graph/collections/release_smoke/capacity")
+    require(capacity["usage"]["chunks"] == 0 and capacity["limits"]["chunks"] == 10000,
+            "collection capacity endpoint omitted current usage or enforced limits")
+    for mode in ["answer", "retrieve"]:
+        chat = api.request("/v1/graph/collections/release_smoke/chat", {
+            "text": "Release chat check", "mode": mode,
+            "context_mode": "conversation", "grounding": "strict", "answer_style": "voice",
+            "history": [{"role": "user", "content": "Tell me about the release."}],
+            "retrieval": {"max_seeds_per_document": 1},
+        })
+        require(chat["answer"] is None and chat["citations"] == [] and
+                chat["generation"]["provider"] is None and chat["timings"]["total_ms"] == 0,
+                "empty chat should expose diagnostics without calling providers")
+        require(chat["answer_status"] == ("no_sources" if mode == "answer" else "retrieval_only")
+                and chat["speech_text"] is None and chat["cited_labels"] == []
+                and not chat["query_context"]["rewritten"] and chat["query_context"]["generation"]["provider"] is None,
+                "empty conversational chat must return typed outcomes without paid rewriting")
+    invalid_chat = api.request("/v1/graph/collections/release_smoke/chat", {
+        "text": "Release chat check", "history": [{"role": "system", "content": "invalid"}],
+    }, status=400)
+    require("error" in invalid_chat, "chat accepted an unsupported history role")
     api.request("/v1/graph/collections/release_smoke/retrieve",
                 {"text": "Release check", "min_weight": 2}, status=400)
     rejected = api.request("/v1/graph/collections/release_smoke/retrieve",
@@ -242,6 +273,16 @@ def check_apis(api):
         "document_id": "manual", "title": "Manual", "source": "fixture", "text": "Release",
         "metadata": "{}", "chunking": "{}", "chunk_fingerprint": "", "record_id": 1,
     }]})
+    profile = created["config"]["profile"]
+    profile_key = json.dumps({key: profile[key] for key in
+                              ("provider", "model", "dimensions", "context_format_version")},
+                             separators=(",", ":"))
+    api.request("/v1/tables/graph_release_smoke_chunks/rows", {"rows": [{
+        "chunk_id": "6:manual:0", "document_id": "manual", "ordinal": 0,
+        "start_byte": 0, "end_byte": 7, "text": "Release", "embedding_text": "Release",
+        "embedding_profile": profile_key, "embedding": [1] + [0] * (profile["dimensions"] - 1),
+    }]})
+    check_keyword_chat(api)
     revision = api.request("/v1/relationships")["revision"]
     relationship = api.request("/v1/relationships", {
         "name": "release_record", "source_table": "graph_release_smoke_documents",
@@ -252,6 +293,25 @@ def check_apis(api):
     sql(api, "CREATE TABLE release_labels (record_id INTEGER UNIQUE, label TEXT); "
              "INSERT INTO release_labels VALUES (1, 'Published')")
     check_relationship_join(api)
+
+
+def check_keyword_chat(api):
+    keyword = api.request("/v1/graph/collections/release_smoke/chat", {
+        "text": "What about it?", "retrieval_query": "Release", "mode": "retrieve", "retrieval": {
+            "vector_weight": 0, "max_hops": 0,
+            "document_filters": [{"column": "record_id", "operator": "eq", "value": 1}],
+        },
+    })
+    hits = keyword["retrieval"]["hits"]
+    require(len(hits) == 1 and hits[0]["document_id"] == "manual" and
+            hits[0]["similarity"] is None and keyword["answer"] is None and
+            keyword["retrieval"]["embedding_usage"]["total_tokens"] == 0 and
+            keyword["timings"]["embedding_ms"] == 0 and
+            keyword["citations"][0]["label"] == "S1",
+            "keyword Playground retrieval failed to return a cited source without provider usage")
+    require(keyword["retrieval_query"] == "Release" and keyword["query_context"]["mode"] == "provided"
+            and keyword["answer_status"] == "retrieval_only" and keyword["cited_labels"] == [],
+            "explicit follow-up query lost its diagnostics or confused retrieved and cited sources")
 
 
 def check_relationship_join(api):
@@ -281,6 +341,8 @@ def check_provider_settings(api, *, openai, voyage, sensitive_values):
             "provider credential status differs from local configuration")
     require(embeddings.get("configured") is providers.get(embeddings.get("provider")),
             "active embedding provider credential status is inconsistent")
+    require(embeddings.get("generation_configured") is openai,
+            "chat generation credential status must follow the OpenAI key")
     require(reranking.get("configured") is voyage,
             "Voyage reranking did not use the local credential configuration")
     serialized = json.dumps([embeddings, reranking])
@@ -297,7 +359,7 @@ def run(binary, expected_version, timeout):
     with tempfile.TemporaryDirectory(prefix="vectors-release-smoke-") as temporary:
         directory = Path(temporary)
         # These are local test strings, never usable credentials. All API checks
-        # below use settings, local SQL/vectors, previews, or empty retrieval.
+        # below use settings, local SQL/vectors, previews, or local retrieval.
         openai_key = "release-smoke-openai-" + secrets.token_hex(16)
         voyage_key = "release-smoke-voyage-" + secrets.token_hex(16)
         sensitive_values = (openai_key, voyage_key)
@@ -316,7 +378,7 @@ def run(binary, expected_version, timeout):
             result = sql(api, "SELECT id, title FROM release_smoke ORDER BY id")[0]
             require(result["rows"] == [[1, "Release ✓"], [2, "Other"]], "SQL data did not survive restart")
             collection = api.request("/v1/graph/collections/release_smoke")
-            require(collection["config"]["name"] == "release_smoke" and collection["chunk_count"] == 0,
+            require(collection["config"]["name"] == "release_smoke" and collection["chunk_count"] == 1,
                     "graph collection did not survive restart")
             check_relationship_join(api)
         write_key_file(default_file, f"OPENAI_API_KEY={openai_key}\nVOYAGE_API_KEY={voyage_key}\n")
@@ -324,6 +386,7 @@ def run(binary, expected_version, timeout):
                             environment_overrides={"OPENAI_API_KEY": "", "VOYAGE_API_KEY": ""},
                             sensitive_values=sensitive_values) as api:
             check_provider_settings(api, openai=False, voyage=False, sensitive_values=sensitive_values)
+            check_keyword_chat(api)
         explicit_file = directory / "provider keys.env"
         write_key_file(explicit_file, f"OPENAI_API_KEY='{openai_key}'\nVOYAGE_API_KEY=\n")
         # Explicit selection must replace the default file, even if it is malformed.
@@ -332,13 +395,13 @@ def run(binary, expected_version, timeout):
                             extra_args=("--env-file", str(explicit_file)),
                             sensitive_values=sensitive_values) as api:
             check_provider_settings(api, openai=True, voyage=False, sensitive_values=sensitive_values)
-    print(f"PASS vectors-server {expected_version}: embedded UI, authenticated SQL/vector/GraphRAG APIs, seed document caps, typed filters, relationships, join chains, restart, local provider key files and environment precedence")
+    print(f"PASS vectors-server {expected_version}: embedded PDF/chat UI, capacity and chat APIs, authenticated SQL/vector/GraphRAG APIs, seed document caps, typed filters, relationships, join chains, restart, local provider key files and environment precedence")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
-    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.9.0")
+    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.10.0")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
     args = parser.parse_args()
     version = args.expected_version.removeprefix("v")

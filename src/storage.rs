@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::{
     extend_vector_columns, rebuild_relational_indexes, validate_row, validate_unique, Catalog,
-    Column, DataType, HashIndex, Table, Value, MAX_TABLE_ROWS,
+    Column, DataType, HashIndex, Table, TableMap, Value, MAX_TABLE_ROWS,
 };
 use crate::{Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
@@ -61,7 +61,7 @@ pub(crate) fn load(path: &Path) -> Result<Catalog> {
     }
 
     let table_count = read_count(&mut reader, "table count", MAX_TABLES)?;
-    let mut tables = std::collections::HashMap::new();
+    let mut tables = TableMap::default();
     let mut global_index_names = HashSet::new();
     for _ in 0..table_count {
         let name = read_string(&mut reader)?;

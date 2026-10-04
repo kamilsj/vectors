@@ -161,6 +161,7 @@ pub(crate) struct SettingsResponse {
     #[serde(flatten)]
     config: Config,
     configured: bool,
+    generation_configured: bool,
     providers: Vec<ProviderInfo>,
     persistence: &'static str,
 }
@@ -400,6 +401,21 @@ impl EmbeddingService {
         Ok(settings_response(&state, self.inner.config_path.is_some()))
     }
 
+    /// Internal-only credential snapshot for the fixed OpenAI Responses endpoint.
+    /// The active embedding provider does not change which generation key is used.
+    pub(crate) fn generation_credentials(
+        &self,
+    ) -> Result<Option<(reqwest::Client, String)>, EmbeddingError> {
+        let state = self
+            .inner
+            .state
+            .read()
+            .map_err(|_| EmbeddingError::Internal)?;
+        Ok(state.keys[Provider::Openai.key_index()]
+            .as_ref()
+            .map(|key| (self.inner.client.clone(), key.clone())))
+    }
+
     /// Capture the active non-secret vector-space identity. Generation must
     /// still use GenerateRequest::pinned because settings can change afterward.
     pub(crate) fn profile(&self) -> Result<ExpectedSettings, EmbeddingError> {
@@ -409,6 +425,26 @@ impl EmbeddingService {
             .read()
             .map_err(|_| EmbeddingError::Internal)?;
         Ok(ExpectedSettings::from_config(&state.config))
+    }
+
+    /// Read-only admission preflight before another paid stage (such as query
+    /// rewriting). Generate still rechecks this snapshot before its own call.
+    pub(crate) fn ensure_configured_for(
+        &self,
+        expected: &ExpectedSettings,
+    ) -> Result<(), EmbeddingError> {
+        let state = self
+            .inner
+            .state
+            .read()
+            .map_err(|_| EmbeddingError::Internal)?;
+        if &ExpectedSettings::from_config(&state.config) != expected {
+            return Err(EmbeddingError::SettingsChanged);
+        }
+        if state.keys[state.config.provider.key_index()].is_none() {
+            return Err(EmbeddingError::NotConfigured);
+        }
+        Ok(())
     }
 
     pub(crate) fn acquire_settings_update(&self) -> Result<SettingsUpdatePermit, EmbeddingError> {
@@ -715,6 +751,7 @@ fn settings_response(state: &RuntimeState, durable: bool) -> SettingsResponse {
     SettingsResponse {
         config: state.config.clone(),
         configured: state.keys[state.config.provider.key_index()].is_some(),
+        generation_configured: state.keys[Provider::Openai.key_index()].is_some(),
         providers: [
             (Provider::Openai, "OpenAI"),
             (Provider::Voyage, "Voyage AI"),

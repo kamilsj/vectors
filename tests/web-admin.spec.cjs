@@ -102,7 +102,7 @@ async function workspace(page, { count = 3, dimensions = 3 } = {}) {
     }
     return reply(route, { error: { code: "unexpected_request", message: "Unexpected test API request" } }, 404);
   });
-  await page.goto("/");
+  await page.goto("/?view=search");
   await expect(page.locator("#status-label")).toHaveText("Connected");
   return fixture;
 }
