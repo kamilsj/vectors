@@ -506,7 +506,11 @@ struct GenerationPermit(Arc<AtomicUsize>);
 
 impl GenerationPermit {
     fn acquire(counter: Arc<AtomicUsize>) -> Result<Self, ApiError> {
-        counter
+        #[allow(
+            deprecated,
+            reason = "Retain fetch_update for the Rust 1.89 MSRV; try_update requires a newer compiler."
+        )]
+        let _previous_count = counter
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < MAX_GENERATION_REQUESTS).then_some(current + 1)
             })

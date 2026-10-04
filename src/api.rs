@@ -224,6 +224,10 @@ impl DatabaseTaskLimiter {
     }
 
     fn acquire(&self) -> Result<DatabaseTaskPermit, ApiError> {
+        #[allow(
+            deprecated,
+            reason = "Retain fetch_update for the Rust 1.89 MSRV; try_update requires a newer compiler."
+        )]
         let acquired = self
             .state
             .in_flight

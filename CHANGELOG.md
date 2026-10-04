@@ -79,6 +79,8 @@ uses that section as the curated introduction to the GitHub release notes.
   conversation history is also restricted to the selected collection and filters.
 - Inspecting a retrieved passage preserves the exact source snapshot used by
   that run, even if the graph contains a newer version of the same chunk.
+- Admission limits remain compatible with Rust 1.89 and newer compilers that
+  deprecate the original atomic update method.
 
 ## 0.9.0 - 2026-09-26
 

@@ -328,7 +328,12 @@ impl RerankingService {
                 state.key.clone().ok_or(RerankingError::NotConfigured)?,
             )
         };
-        self.inner
+        #[allow(
+            deprecated,
+            reason = "Retain fetch_update for the Rust 1.89 MSRV; try_update requires a newer compiler."
+        )]
+        let _previous_count = self
+            .inner
             .in_flight
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < config.max_concurrent_requests).then_some(current + 1)
