@@ -1749,7 +1749,9 @@ fn explain_query(
                 .selection
                 .as_ref()
                 .and_then(|selection| indexed_candidate_rows(table, selection));
-            let index_covers_filter = indexed.as_ref().is_some_and(|candidates| candidates.exact);
+            let index_covers_filter = indexed
+                .as_ref()
+                .is_some_and(|candidates| candidates.residual.is_none());
             let candidate_count = indexed
                 .as_ref()
                 .map_or(table.rows.len(), |indexes| indexes.rows.len());
@@ -2388,13 +2390,13 @@ fn run_typed_vector_search_in_rows(
         }
         (None, Some(allowed)) => Some(IndexedCandidates {
             rows: allowed.to_vec(),
-            exact: selection.is_none(),
+            residual: selection.clone(),
         }),
         (candidates, None) => candidates,
     };
     let residual_selection = match &indexed_rows {
-        Some(candidates) if candidates.exact => None,
-        _ => selection.as_ref(),
+        Some(candidates) => candidates.residual.as_ref(),
+        None => selection.as_ref(),
     };
     let rows_examined = indexed_rows
         .as_ref()
@@ -2522,8 +2524,8 @@ fn run_query(
             .and_then(|selection| indexed_candidate_rows(table, selection))
     });
     let residual_selection = match &indexed_rows {
-        Some(candidates) if candidates.exact => None,
-        _ => select.selection.as_ref(),
+        Some(candidates) => candidates.residual.as_ref(),
+        None => select.selection.as_ref(),
     };
     let rows_examined = table.map_or(1, |table| {
         indexed_rows
@@ -3502,7 +3504,21 @@ fn validate_expression_columns(expression: &Expr, columns: &[Column]) -> Result<
 
 struct IndexedCandidates {
     rows: Vec<usize>,
-    exact: bool,
+    // Only evaluate terms not already proven TRUE by the selected index rows.
+    // This matters for large membership lists combined with a profile/version
+    // predicate: rechecking IN per candidate would undo much of the pruning.
+    residual: Option<Expr>,
+}
+
+fn and_residual(left: Option<Expr>, right: Option<Expr>) -> Option<Expr> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::And,
+            right: Box::new(right),
+        }),
+        (remaining, None) | (None, remaining) => remaining,
+    }
 }
 
 fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<IndexedCandidates> {
@@ -3517,10 +3533,14 @@ fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<IndexedCan
         ) {
             (Some(left), Some(right)) => Some(IndexedCandidates {
                 rows: intersect_sorted(&left.rows, &right.rows),
-                exact: left.exact && right.exact,
+                residual: and_residual(left.residual, right.residual),
             }),
-            (Some(mut candidates), None) | (None, Some(mut candidates)) => {
-                candidates.exact = false;
+            (Some(mut candidates), None) => {
+                candidates.residual = and_residual(candidates.residual, Some(*right.clone()));
+                Some(candidates)
+            }
+            (None, Some(mut candidates)) => {
+                candidates.residual = and_residual(Some(*left.clone()), candidates.residual);
                 Some(candidates)
             }
             (None, None) => None,
@@ -3535,7 +3555,10 @@ fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<IndexedCan
         ) {
             (Some(left), Some(right)) => Some(IndexedCandidates {
                 rows: union_sorted(&left.rows, &right.rows),
-                exact: left.exact && right.exact,
+                // A union does not prove which branch matched each row. If
+                // either branch has a residual, retain the entire disjunction.
+                residual: (left.residual.is_some() || right.residual.is_some())
+                    .then(|| expression.clone()),
             }),
             _ => None,
         },
@@ -3545,10 +3568,57 @@ fn indexed_candidate_rows(table: &Table, expression: &Expr) -> Option<IndexedCan
             right,
         } => equality_index_lookup(table, left, right)
             .or_else(|| equality_index_lookup(table, right, left))
-            .map(|rows| IndexedCandidates { rows, exact: true }),
+            .map(|rows| IndexedCandidates {
+                rows,
+                residual: None,
+            }),
+        Expr::InList {
+            expr,
+            list,
+            negated: false,
+        } => membership_index_lookup(table, expr, list).map(|rows| IndexedCandidates {
+            rows,
+            residual: None,
+        }),
         Expr::Nested(expression) => indexed_candidate_rows(table, expression),
         _ => None,
     }
+}
+
+fn membership_index_lookup(table: &Table, expression: &Expr, list: &[Expr]) -> Option<Vec<usize>> {
+    let column = simple_column_expression(expression, &table.columns)?;
+    let index = table
+        .indexes
+        .values()
+        .find(|index| index.column == column)?;
+    let mut keys = HashSet::with_capacity(list.len());
+    for expression in list {
+        // Resolve every member before pruning. A row-dependent expression or
+        // incompatible type must retain normal SQL evaluation, not a partial
+        // union that could silently omit matches or suppress an invalid list.
+        let value = evaluate(expression, &EvalContext::empty()).ok()?;
+        let value = coerce(value, &table.columns[column].data_type).ok()?;
+        match value {
+            // Positive IN selects only TRUE: NULL members do not add rows.
+            // NOT IN remains on the evaluator's three-valued-logic path.
+            Value::Null => continue,
+            Value::Vector(_) => return None,
+            _ => {
+                keys.insert(UniqueKey::from(&value));
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    for key in keys {
+        if let Some(bucket) = index.buckets.get(&key) {
+            rows.extend_from_slice(bucket);
+        }
+    }
+    // Distinct scalar keys have disjoint buckets. Deduplicating the input
+    // keys bounds allocation to the table size even for repeated large scopes.
+    // Restore row order for boolean merges, dense scans and top-k tie breaks.
+    rows.sort_unstable();
+    Some(rows)
 }
 
 fn equality_index_lookup(table: &Table, column: &Expr, value: &Expr) -> Option<Vec<usize>> {

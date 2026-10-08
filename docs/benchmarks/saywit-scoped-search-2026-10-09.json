@@ -1,0 +1,514 @@
+{
+  "date": "2026-10-09",
+  "baseline_commit": "f70e71ab9f926cf684ea841f7086349e6443bad9",
+  "hardware": "Apple M4 Max, 48 GiB RAM",
+  "os": "macOS 27.0 arm64",
+  "rust": "1.99.0",
+  "scope": "Synthetic parameterized Saywit-shaped SQL. Includes binding, parsing, filtering and exact top-k; excludes corpus setup, provider latency, HTTP and serialization. LIMIT 100, cosine distance, 1000 chats, active-profile filter and current-turn exclusion. One warm-up and seven measured queries per scope in each of three alternating process pairs. Every result compared with a full-scan/full-sort reference including exact scores.",
+  "binary_sha256": {
+    "before": "88d6a52165d97c2e197bd65610ea8b06016527a4ae911895d6410c9a34d11298",
+    "after": "01213675482a924e36e3fd34aaa2edcd67574a078505ba9643ae496d78f83dac"
+  },
+  "source_sha256": {
+    "src/engine.rs": "4acdefa54f6f51f37e3e55a043eb1c584059df58f5c1833836a4ad7da8ae745e",
+    "examples/benchmark_scoped_search.rs": "d25152072ff373c78090df3c845d89ca8cb0593aaae330a18637e99526c8822d"
+  },
+  "runs": [
+    {
+      "pair": 0,
+      "variant": "before",
+      "chats": 1000,
+      "compute": "cpu",
+      "dimensions": 1024,
+      "exact_reference_parity": true,
+      "profile": "release",
+      "provider_calls": 0,
+      "repetitions": 7,
+      "rows": 20000,
+      "threads": 16,
+      "workloads": [
+        {
+          "allowed_chats": 1,
+          "median_ms": 1.328834,
+          "p95_ms": 1.408583,
+          "rows_examined": 20000,
+          "samples_ms": [
+            1.341583,
+            1.328834,
+            1.254,
+            1.371916,
+            1.328833,
+            1.408583,
+            1.250917
+          ],
+          "result_id_sha256": "eca59e7de74ece9c08ead9a3b9ad1ae5cf4454bc2773c19085520a06a04a6862"
+        },
+        {
+          "allowed_chats": 8,
+          "median_ms": 1.597583,
+          "p95_ms": 1.8757920000000001,
+          "rows_examined": 20000,
+          "samples_ms": [
+            1.58575,
+            1.597583,
+            1.597084,
+            1.555875,
+            1.635875,
+            1.62775,
+            1.8757920000000001
+          ],
+          "result_id_sha256": "2453e456202156e25546b98fb4c58ad517418cbed1dcc7d647d1b58d2255d2fc"
+        },
+        {
+          "allowed_chats": 64,
+          "median_ms": 4.4095,
+          "p95_ms": 23.818584,
+          "rows_examined": 20000,
+          "samples_ms": [
+            4.4095,
+            4.223625,
+            4.184541,
+            23.818584,
+            14.146958,
+            4.816166,
+            4.016625
+          ],
+          "result_id_sha256": "6445207a7436131784bd724ecfd7a8b5a5d93af975a897aea183be0e7c6dac02"
+        },
+        {
+          "allowed_chats": 500,
+          "median_ms": 26.137291,
+          "p95_ms": 52.346208,
+          "rows_examined": 20000,
+          "samples_ms": [
+            20.513625,
+            20.660917,
+            40.379125,
+            20.56125,
+            52.346208,
+            26.137291,
+            27.636833
+          ],
+          "result_id_sha256": "b150330bf3ae756cbe34ed5a18cb49102cce9bca051f3f1563c379bf85dabcf4"
+        }
+      ]
+    },
+    {
+      "pair": 0,
+      "variant": "after",
+      "chats": 1000,
+      "compute": "cpu",
+      "dimensions": 1024,
+      "exact_reference_parity": true,
+      "profile": "release",
+      "provider_calls": 0,
+      "repetitions": 7,
+      "rows": 20000,
+      "threads": 16,
+      "workloads": [
+        {
+          "allowed_chats": 1,
+          "median_ms": 0.8310839999999999,
+          "p95_ms": 0.884041,
+          "rows_examined": 20,
+          "samples_ms": [
+            0.840709,
+            0.8310839999999999,
+            0.8164170000000001,
+            0.884041,
+            0.840041,
+            0.8033750000000001,
+            0.802167
+          ],
+          "result_id_sha256": "eca59e7de74ece9c08ead9a3b9ad1ae5cf4454bc2773c19085520a06a04a6862"
+        },
+        {
+          "allowed_chats": 8,
+          "median_ms": 0.9892080000000001,
+          "p95_ms": 1.0959999999999999,
+          "rows_examined": 160,
+          "samples_ms": [
+            1.0959999999999999,
+            0.9892080000000001,
+            0.9982920000000001,
+            1.021792,
+            0.949416,
+            0.985917,
+            0.951583
+          ],
+          "result_id_sha256": "2453e456202156e25546b98fb4c58ad517418cbed1dcc7d647d1b58d2255d2fc"
+        },
+        {
+          "allowed_chats": 64,
+          "median_ms": 1.306041,
+          "p95_ms": 1.723042,
+          "rows_examined": 1280,
+          "samples_ms": [
+            1.216042,
+            1.22275,
+            1.723042,
+            1.324,
+            1.2156669999999998,
+            1.306041,
+            1.322875
+          ],
+          "result_id_sha256": "6445207a7436131784bd724ecfd7a8b5a5d93af975a897aea183be0e7c6dac02"
+        },
+        {
+          "allowed_chats": 500,
+          "median_ms": 2.182458,
+          "p95_ms": 12.071375,
+          "rows_examined": 10000,
+          "samples_ms": [
+            2.163208,
+            2.246542,
+            12.071375,
+            2.182458,
+            2.1502499999999998,
+            8.756207999999999,
+            2.122667
+          ],
+          "result_id_sha256": "b150330bf3ae756cbe34ed5a18cb49102cce9bca051f3f1563c379bf85dabcf4"
+        }
+      ]
+    },
+    {
+      "pair": 1,
+      "variant": "after",
+      "chats": 1000,
+      "compute": "cpu",
+      "dimensions": 1024,
+      "exact_reference_parity": true,
+      "profile": "release",
+      "provider_calls": 0,
+      "repetitions": 7,
+      "rows": 20000,
+      "threads": 16,
+      "workloads": [
+        {
+          "allowed_chats": 1,
+          "median_ms": 0.8673339999999999,
+          "p95_ms": 0.893834,
+          "rows_examined": 20,
+          "samples_ms": [
+            0.8673339999999999,
+            0.837375,
+            0.893834,
+            0.8063750000000001,
+            0.815292,
+            0.889292,
+            0.89275
+          ],
+          "result_id_sha256": "eca59e7de74ece9c08ead9a3b9ad1ae5cf4454bc2773c19085520a06a04a6862"
+        },
+        {
+          "allowed_chats": 8,
+          "median_ms": 0.97425,
+          "p95_ms": 0.9971249999999999,
+          "rows_examined": 160,
+          "samples_ms": [
+            0.955917,
+            0.934083,
+            0.9430000000000001,
+            0.996833,
+            0.9971249999999999,
+            0.995917,
+            0.97425
+          ],
+          "result_id_sha256": "2453e456202156e25546b98fb4c58ad517418cbed1dcc7d647d1b58d2255d2fc"
+        },
+        {
+          "allowed_chats": 64,
+          "median_ms": 1.317709,
+          "p95_ms": 8.018042,
+          "rows_examined": 1280,
+          "samples_ms": [
+            1.272542,
+            1.614208,
+            1.2967499999999998,
+            8.018042,
+            2.135166,
+            1.256417,
+            1.317709
+          ],
+          "result_id_sha256": "6445207a7436131784bd724ecfd7a8b5a5d93af975a897aea183be0e7c6dac02"
+        },
+        {
+          "allowed_chats": 500,
+          "median_ms": 2.296583,
+          "p95_ms": 2.649959,
+          "rows_examined": 10000,
+          "samples_ms": [
+            2.229333,
+            2.55375,
+            2.1585419999999997,
+            2.649959,
+            2.296583,
+            2.390208,
+            2.184709
+          ],
+          "result_id_sha256": "b150330bf3ae756cbe34ed5a18cb49102cce9bca051f3f1563c379bf85dabcf4"
+        }
+      ]
+    },
+    {
+      "pair": 1,
+      "variant": "before",
+      "chats": 1000,
+      "compute": "cpu",
+      "dimensions": 1024,
+      "exact_reference_parity": true,
+      "profile": "release",
+      "provider_calls": 0,
+      "repetitions": 7,
+      "rows": 20000,
+      "threads": 16,
+      "workloads": [
+        {
+          "allowed_chats": 1,
+          "median_ms": 1.240542,
+          "p95_ms": 1.44475,
+          "rows_examined": 20000,
+          "samples_ms": [
+            1.44475,
+            1.151292,
+            1.240542,
+            1.286875,
+            1.236416,
+            1.429292,
+            1.22425
+          ],
+          "result_id_sha256": "eca59e7de74ece9c08ead9a3b9ad1ae5cf4454bc2773c19085520a06a04a6862"
+        },
+        {
+          "allowed_chats": 8,
+          "median_ms": 1.6637089999999999,
+          "p95_ms": 11.63625,
+          "rows_examined": 20000,
+          "samples_ms": [
+            1.49225,
+            1.837708,
+            1.971416,
+            1.617667,
+            1.6637089999999999,
+            1.5785,
+            11.63625
+          ],
+          "result_id_sha256": "2453e456202156e25546b98fb4c58ad517418cbed1dcc7d647d1b58d2255d2fc"
+        },
+        {
+          "allowed_chats": 64,
+          "median_ms": 4.76475,
+          "p95_ms": 12.822875,
+          "rows_examined": 20000,
+          "samples_ms": [
+            4.76475,
+            4.986125,
+            4.700791000000001,
+            12.822875,
+            4.01025,
+            4.202208,
+            10.336500000000001
+          ],
+          "result_id_sha256": "6445207a7436131784bd724ecfd7a8b5a5d93af975a897aea183be0e7c6dac02"
+        },
+        {
+          "allowed_chats": 500,
+          "median_ms": 28.932917,
+          "p95_ms": 33.185667,
+          "rows_examined": 20000,
+          "samples_ms": [
+            33.185667,
+            25.908583999999998,
+            27.293499999999998,
+            28.932917,
+            31.711833000000002,
+            28.070208,
+            32.187583
+          ],
+          "result_id_sha256": "b150330bf3ae756cbe34ed5a18cb49102cce9bca051f3f1563c379bf85dabcf4"
+        }
+      ]
+    },
+    {
+      "pair": 2,
+      "variant": "before",
+      "chats": 1000,
+      "compute": "cpu",
+      "dimensions": 1024,
+      "exact_reference_parity": true,
+      "profile": "release",
+      "provider_calls": 0,
+      "repetitions": 7,
+      "rows": 20000,
+      "threads": 16,
+      "workloads": [
+        {
+          "allowed_chats": 1,
+          "median_ms": 1.3610829999999998,
+          "p95_ms": 4.5847500000000005,
+          "rows_examined": 20000,
+          "samples_ms": [
+            4.5847500000000005,
+            1.2572079999999999,
+            1.325166,
+            1.562792,
+            2.02,
+            1.3610829999999998,
+            1.3498329999999998
+          ],
+          "result_id_sha256": "eca59e7de74ece9c08ead9a3b9ad1ae5cf4454bc2773c19085520a06a04a6862"
+        },
+        {
+          "allowed_chats": 8,
+          "median_ms": 1.85425,
+          "p95_ms": 6.009708,
+          "rows_examined": 20000,
+          "samples_ms": [
+            1.883791,
+            1.6854159999999998,
+            1.776417,
+            1.930292,
+            1.85425,
+            1.726959,
+            6.009708
+          ],
+          "result_id_sha256": "2453e456202156e25546b98fb4c58ad517418cbed1dcc7d647d1b58d2255d2fc"
+        },
+        {
+          "allowed_chats": 64,
+          "median_ms": 5.406208,
+          "p95_ms": 15.177125,
+          "rows_examined": 20000,
+          "samples_ms": [
+            15.177125,
+            11.260041,
+            5.541209,
+            5.373875,
+            4.7056249999999995,
+            5.406208,
+            4.370459
+          ],
+          "result_id_sha256": "6445207a7436131784bd724ecfd7a8b5a5d93af975a897aea183be0e7c6dac02"
+        },
+        {
+          "allowed_chats": 500,
+          "median_ms": 27.617666999999997,
+          "p95_ms": 34.355042000000005,
+          "rows_examined": 20000,
+          "samples_ms": [
+            27.617666999999997,
+            33.055665999999995,
+            34.355042000000005,
+            25.831542,
+            27.559959,
+            27.488875,
+            33.577042
+          ],
+          "result_id_sha256": "b150330bf3ae756cbe34ed5a18cb49102cce9bca051f3f1563c379bf85dabcf4"
+        }
+      ]
+    },
+    {
+      "pair": 2,
+      "variant": "after",
+      "chats": 1000,
+      "compute": "cpu",
+      "dimensions": 1024,
+      "exact_reference_parity": true,
+      "profile": "release",
+      "provider_calls": 0,
+      "repetitions": 7,
+      "rows": 20000,
+      "threads": 16,
+      "workloads": [
+        {
+          "allowed_chats": 1,
+          "median_ms": 0.862666,
+          "p95_ms": 0.8652920000000001,
+          "rows_examined": 20,
+          "samples_ms": [
+            0.8652920000000001,
+            0.862666,
+            0.862667,
+            0.832958,
+            0.8645,
+            0.827958,
+            0.830791
+          ],
+          "result_id_sha256": "eca59e7de74ece9c08ead9a3b9ad1ae5cf4454bc2773c19085520a06a04a6862"
+        },
+        {
+          "allowed_chats": 8,
+          "median_ms": 0.934625,
+          "p95_ms": 1.018708,
+          "rows_examined": 160,
+          "samples_ms": [
+            0.900083,
+            0.974583,
+            0.936292,
+            0.9292499999999999,
+            0.9063749999999999,
+            1.018708,
+            0.934625
+          ],
+          "result_id_sha256": "2453e456202156e25546b98fb4c58ad517418cbed1dcc7d647d1b58d2255d2fc"
+        },
+        {
+          "allowed_chats": 64,
+          "median_ms": 1.250625,
+          "p95_ms": 1.760125,
+          "rows_examined": 1280,
+          "samples_ms": [
+            1.291666,
+            1.2173749999999999,
+            1.20325,
+            1.760125,
+            1.209583,
+            1.296916,
+            1.250625
+          ],
+          "result_id_sha256": "6445207a7436131784bd724ecfd7a8b5a5d93af975a897aea183be0e7c6dac02"
+        },
+        {
+          "allowed_chats": 500,
+          "median_ms": 2.2686249999999997,
+          "p95_ms": 12.224917,
+          "rows_examined": 10000,
+          "samples_ms": [
+            2.244209,
+            12.224917,
+            2.241,
+            2.769833,
+            2.450084,
+            2.2686249999999997,
+            2.205709
+          ],
+          "result_id_sha256": "b150330bf3ae756cbe34ed5a18cb49102cce9bca051f3f1563c379bf85dabcf4"
+        }
+      ]
+    }
+  ],
+  "adapter_compatibility": {
+    "status": "passed",
+    "version": "0.10.0",
+    "dimensions": 1024,
+    "checks": [
+      "real HTTP transport",
+      "schema",
+      "normalized bulk insert",
+      "scope before ranking",
+      "profile and turn exclusion",
+      "duplicate IDs",
+      "bound quoted IDs",
+      "500-chat scope",
+      "exact cosine scores",
+      "durable restart",
+      "deletion"
+    ],
+    "provider_calls": 0,
+    "user_messages_read": 0,
+    "transport_sha256": "2e0b9a487b26c899dec6b9c3fe01ff7758a8e1695861e3d562d5fdc92f0e876e",
+    "transport": "Saywit semantic/transport.py"
+  }
+}

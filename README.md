@@ -143,8 +143,9 @@ curl -fsSL https://github.com/kamilsj/vectors/releases/latest/download/install.s
   even when the result is empty or contains only `NULL` values; expression type
   errors are rejected before scanning rows.
 - **Hybrid by default.** Scalar hash indexes prune relational candidates before
-  exact vector distance evaluation; predicates fully covered by an index are
-  not evaluated a second time row by row.
+  exact vector distance evaluation, including constant `IN` membership lists.
+  Indexed terms in an `AND` filter are not evaluated a second time row by row.
+  See the [Saywit integration check](docs/SAYWIT_COMPATIBILITY.md).
 - **Dense scan storage.** Each vector column has append-only, contiguous `f32`
   slabs with cached norms and compact presence metadata, so exact scans avoid
   walking the relational `Value` representation for every candidate.

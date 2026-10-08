@@ -7,6 +7,46 @@ with another database.
 
 ## Run the benchmark
 
+### Saywit scoped message search
+
+```sh
+RAYON_NUM_THREADS=16 cargo run --release --locked --example benchmark_scoped_search -- 20000 1024 7
+```
+
+Measured on 2026-10-09, Apple M4 Max, 48 GiB RAM, macOS 27.0 arm64,
+Rust 1.99.0, release CPU, sixteen Rayon workers. The baseline is the v0.10.0
+engine at `f70e71a`, using the same benchmark harness. The updated engine uses
+scalar indexes for positive constant `IN` lists and skips indexed `AND` terms
+when evaluating the remaining predicates.
+
+The workload models Saywit's existing parameterized SQL: 20,000 message units,
+1,024-dimensional synthetic vectors, 1,000 chats, an active embedding-profile
+filter, exclusion of the current turn, cosine distance and `LIMIT 100`. These
+are regular SQL rows, not GraphRAG collections. No source messages or embedding
+providers are used.
+
+Three independent before/after process pairs alternate execution order. Each
+process performs one warm-up and seven measured queries per scope. Entries are
+the median of the three process medians and p95 values; with seven samples,
+each process's p95 is its maximum. Timings include parameter binding, SQL
+parsing, filtering and exact top-k. They exclude fixture insertion, HTTP,
+serialization and provider latency.
+
+| Allowed chats | Rows examined before → after | Before median / p95 (ms) | After median / p95 (ms) | Median speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 20,000 → 20 | 1.329 / 1.445 | 0.863 / 0.884 | 1.54× |
+| 8 | 20,000 → 160 | 1.664 / 6.010 | 0.974 / 1.019 | 1.71× |
+| 64 | 20,000 → 1,280 | 4.765 / 15.177 | 1.306 / 1.760 | 3.65× |
+| 500 | 20,000 → 10,000 | 27.618 / 34.355 | 2.269 / 12.071 | 12.17× |
+
+Every query's IDs, ordering and exact scores match a full-scan/full-sort SQL
+reference with explicit source-order tie breaking. Result-ID digests also
+match across all before/after runs. [Raw samples and hashes](benchmarks/saywit-scoped-search-2026-10-09.json)
+retain every timing. The tail timings vary noticeably on this local machine;
+these measurements are not production latency guarantees or a semantic-recall
+evaluation. See the [real-adapter compatibility check](SAYWIT_COMPATIBILITY.md)
+for transport, scope and durable-restart verification.
+
 ### Scaling foundations: filtered retrieval and catalog sharing
 
 ```sh

@@ -12,7 +12,14 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- A Saywit adapter compatibility check against a temporary durable server and
+  a reproducible benchmark for permission-scoped message retrieval.
+
 ### Changed
+
+- SQL `IN` filters use existing scalar indexes before exact vector ranking.
+  Indexed conjuncts are no longer reevaluated for every candidate when other
+  filters remain, speeding up Saywit chat scopes without changing results.
 
 ### Fixed
 
