@@ -281,8 +281,14 @@ workspaces:
   needs no embedding key.
 - **Search:** search with text through OpenAI or Voyage AI, or supply a vector.
 - **Data:** browse pages, create tables, add documents with embeddings, and
-  edit or delete rows with protection against stale edits.
+  edit or delete rows with protection against stale edits. The **Connections**
+  card maps saved field relationships; select a table to focus its links, or a
+  link to prepare a join in SQL. Large maps show up to 12 tables at a time.
 - **SQL:** run SQL, inspect schemas, and understand queries before execution.
+  Autocomplete suggests tables, columns, join aliases, keywords and supported
+  vector functions as you type. Use **Ctrl Space** for suggestions, **↑/↓** to
+  choose, **Tab/Enter** to insert, and **Esc** to dismiss. **Ctrl/⌘ Enter** runs
+  the query. Suggestions read schema metadata only and never execute SQL.
 - **Settings:** configure embedding and reranking providers and request limits;
   adjust browser preferences and inspect server capacity.
 

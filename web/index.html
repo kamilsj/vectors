@@ -26,7 +26,7 @@
 <header class="topbar"><button aria-controls="app-sidebar" aria-expanded="false" aria-label="Toggle navigation" class="mobile-menu" id="mobile-menu" type="button">☰</button><div><span class="eyebrow">WORKSPACE</span><h1 id="view-title">Playground</h1></div><div class="topbar-actions"><button class="button ghost" id="open-token" type="button">Connection</button><button class="button ghost" id="top-guide" type="button">Help</button></div></header>
 <div class="connection-notice" hidden="" id="connection-notice" role="status"><span id="connection-message"></span><button class="button ghost compact" id="reconnect" type="button">Reconnect</button></div>
 <section class="view" id="view-search">
-<div class="workspace-heading"><div><h2>Vector search</h2><p>Search a table by text or vector.</p></div><button class="button ghost" data-go="settings" type="button">Embedding settings <span aria-hidden="true">↗</span></button></div>
+<div class="workspace-heading"><div><h2>Vector search</h2></div><button class="button ghost" data-go="settings" type="button">Embedding settings <span aria-hidden="true">↗</span></button></div>
 <div class="empty-workspace panel" hidden="" id="search-empty"><span aria-hidden="true" class="empty-icon">▦</span><h3>No tables yet</h3><p>Create a table to start searching.</p><div class="inline-actions"><button class="button primary" data-go="data" type="button">Add your data</button><button class="button ghost" data-go="guide" type="button">Try an example</button></div></div>
 <div class="search-layout">
 <form class="panel search-form" id="search-form" novalidate="">
@@ -97,7 +97,7 @@
     <section class="panel graph-chat-layout" id="graph-chat-panel">
      <div class="panel-header playground-conversation-header">
       <h2>
-       Conversation
+       Chat
       </h2>
       <div class="inline-actions">
        <button aria-controls="playground-evaluation" aria-expanded="false" class="button ghost compact" id="playground-evaluate-open" type="button">
@@ -116,7 +116,7 @@
      <div class="graph-chat-results">
       <div aria-label="Conversation" class="graph-chat-turns" id="graph-chat-turns">
        <p class="empty-workspace">
-        Ask a question to see answers and sources.
+        Ask about your documents.
        </p>
       </div>
      </div>
@@ -127,7 +127,7 @@
       </label>
       <div class="playground-composer-actions">
        <p class="field-hint" id="graph-chat-question-hint">
-        Name the subject in each question.
+
        </p>
        <div class="inline-actions">
         <button class="button ghost compact" id="graph-chat-clear" type="button">
@@ -842,7 +842,7 @@
 
 
       <section class="view" id="view-data">
-<div class="workspace-heading"><div><h2>Data</h2><p>Browse and manage records.</p></div><button class="button primary" id="admin-new-table" type="button">Create <span aria-hidden="true">+</span></button></div>
+<div class="workspace-heading"><div><h2>Tables</h2></div><button class="button primary" id="admin-new-table" type="button">Create <span aria-hidden="true">+</span></button></div>
 <div aria-label="Database overview" class="stats-grid">
 <article class="stat-card accent-a">
 <span class="stat-label">Tables</span>
@@ -852,25 +852,25 @@
 <article class="stat-card accent-b">
 <span class="stat-label">Rows</span>
 <strong id="stat-rows">—</strong>
-<small>across all tables</small>
+
 </article>
 <article class="stat-card accent-c">
 <span class="stat-label">Indexes</span>
 <strong id="stat-indexes">—</strong>
-<small>scalar hash indexes</small>
+
 </article>
 <article class="stat-card accent-d">
 <span class="stat-label">Revision</span>
 <strong id="stat-revision">—</strong>
-<small>committed catalog</small>
+
 </article>
 </div>
-<div class="panel data-browser"><div class="data-toolbar"><label>Table<select id="admin-table"><option value="">Choose a table</option></select></label><div class="inline-actions"><button class="button ghost" id="admin-refresh" type="button">Refresh rows</button><button class="button ghost" id="admin-new-row" type="button">Add row</button><button class="button danger ghost" id="admin-drop-table" type="button">Delete table</button></div></div>
+<div class="panel data-browser"><div class="data-toolbar"><label>Table<select id="admin-table"><option value="">Choose a table</option></select></label><div class="inline-actions"><button class="button ghost" id="admin-refresh" type="button">Refresh</button><button class="button ghost" id="admin-new-row" type="button">Add row</button><button class="button danger ghost" id="admin-drop-table" type="button">Delete table</button></div></div>
 <div class="inline-status" id="admin-status" role="status">Choose a table to browse its rows.</div>
 <div class="admin-rows" id="admin-rows"><div class="empty-workspace"><p>Your tables will appear here.</p></div></div>
-<nav aria-label="Data pages" class="admin-pagination"><span id="admin-range">0 rows</span><label>Rows per page<select id="admin-page-size"><option value="50">50</option><option value="100">100</option><option value="250">250</option></select></label><button class="button ghost compact" disabled="" id="admin-previous" type="button">Previous page</button><button class="button ghost compact" disabled="" id="admin-next" type="button">Next page</button></nav>
+<nav aria-label="Data pages" class="admin-pagination"><span id="admin-range">0 rows</span><label>Rows per page<select id="admin-page-size"><option value="50">50</option><option value="100">100</option><option value="250">250</option></select></label><button class="button ghost compact" disabled="" id="admin-previous" type="button">Previous</button><button class="button ghost compact" disabled="" id="admin-next" type="button">Next</button></nav>
 </div>
-<section class="panel data-relationships" id="data-relationships"><div class="panel-header"><div><span class="panel-kicker">CONNECTED RECORDS</span><h3>Relationships</h3></div><div class="inline-actions"><button class="button ghost compact" id="relationships-refresh" type="button">Refresh links</button><button class="button ghost compact" id="relationship-new" type="button">Add relationship</button></div></div><p class="field-hint relationship-intro">Connect records with matching field values. Links do not enforce foreign-key constraints.</p><p class="inline-status" id="relationships-status" role="status"></p><div class="relationship-list" id="relationship-list"></div></section>
+<section class="panel data-relationships" id="data-relationships"><div class="panel-header"><div><h3>Connections</h3></div><div class="inline-actions"><button class="button ghost compact" id="relationships-refresh" type="button">Refresh</button><button class="button ghost compact" id="relationship-new" type="button">Add relationship</button></div></div><div class="connection-map" id="connection-map" aria-label="Table connections"></div><p class="field-hint connection-map-caption" id="connection-map-caption"></p><p class="inline-status" id="relationships-status" role="status"></p><div class="relationship-list" id="relationship-list"></div><details class="connection-map-help"><summary>About connections</summary><p>Arrows show saved field matches, not enforced foreign keys. Select a table to focus its connections, or open a join in SQL. Passage-level semantic links are in Playground → Graph.</p></details></section>
 <div class="admin-tools" hidden="" id="admin-tools">
 <details class="panel schema-details"><summary>Table structure <span id="admin-schema-summary"></span></summary><div id="admin-schema"></div></details>
 <div class="admin-edit-grid">
@@ -879,12 +879,11 @@
 </div>
 </div>
 </section>
-<section class="view" id="view-console"><div class="workspace-heading"><div><h2>SQL editor</h2><p>Run a query or inspect its plan. <kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd> to run.</p></div></div>
+<section class="view" id="view-console">
 <div class="console-grid">
 <section class="panel editor-panel">
 <div class="panel-header">
 <div>
-<span class="panel-kicker">QUERY</span>
 <h2>Query</h2>
 </div>
 <div class="editor-actions">
@@ -897,7 +896,7 @@
 <option value="aggregate">Aggregate by category</option>
 </select>
 </label>
-<button class="button ghost compact" id="format-sql" type="button">Format</button>
+<button class="button ghost compact" id="format-sql" title="Remove extra blank lines" type="button">Tidy</button>
 <button class="button ghost compact" id="analyze-sql" type="button">Explain</button>
 <button class="button primary compact" id="run-sql" type="button">
 <span>Run query</span><span aria-hidden="true">▶</span>
@@ -906,10 +905,12 @@
 </div>
 <div class="editor-wrap">
 <div aria-hidden="true" class="line-numbers" id="line-numbers">1</div>
-<textarea aria-label="SQL editor" id="sql-editor" spellcheck="false" wrap="off"></textarea>
+<textarea aria-label="SQL editor" aria-autocomplete="list" aria-controls="sql-suggestions" aria-describedby="sql-shortcuts" id="sql-editor" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"></textarea>
+<div class="sql-completion" id="sql-completion" hidden><div aria-label="SQL suggestions" id="sql-suggestions" role="listbox"></div><div class="sql-completion-hint">↑ ↓ choose · Tab insert · Esc close</div></div>
+<span class="sr-only" id="sql-completion-status" role="status"></span>
 </div>
 <div class="editor-footer">
-<span>SQL</span>
+<span id="sql-shortcuts">Ctrl / ⌘ Enter · Run <span class="shortcut-divider">|</span> Ctrl Space · Suggest</span>
 <span id="editor-status" role="status">Ready</span>
 </div>
 </section>
@@ -924,7 +925,6 @@
 <section class="panel results-panel">
 <div class="panel-header results-header">
 <div>
-<span class="panel-kicker">RESULTS</span>
 <h2 id="results-title">No query run yet</h2>
 </div>
 <div class="query-metrics" id="query-metrics"></div>
@@ -938,7 +938,7 @@
 </section>
 </section>
 <section class="view" id="view-settings">
-<div class="workspace-heading"><div><h2>Settings</h2><p>Manage providers and workspace preferences.</p></div><button class="button ghost" id="settings-refresh" type="button">Refresh settings</button></div>
+<div class="workspace-heading"><div><h2>Providers</h2></div><button class="button ghost" id="settings-refresh" type="button">Refresh settings</button></div>
 <div class="settings-grid">
 <form class="panel form-card" id="settings-embedding-form"><span class="panel-kicker">EMBEDDINGS</span><h3>Embedding provider</h3><p>Use the same provider and model for your documents and queries.</p><div class="form-row two"><label>Provider<select id="embedding-provider"><option value="openai">OpenAI</option><option value="voyage">Voyage AI</option></select></label><label>Model<select id="embedding-model"></select></label></div><label>Dimensions<input id="embedding-dimensions" min="1" required="" type="number" value="1536"/></label><p class="field-hint" id="embedding-dimension-note"></p><label>Provider API key<input autocomplete="off" id="embedding-api-key" placeholder="Leave blank to keep the current key" type="password"/></label><p class="provider-note" id="embedding-key-status">Loading provider settings…</p><label class="checkbox-label"><input id="embedding-clear-key" type="checkbox"/> Clear this provider's active key</label><p class="privacy-note">Keys entered here stay in server memory and are never saved in this browser. Keys from the server environment or its private local file return after a restart.</p><details class="form-advanced"><summary>Request settings</summary><div class="form-row three"><label>Batch size<input id="embedding-batch-size" max="128" min="1" required="" type="number" value="32"/></label><label>Timeout (seconds)<input id="embedding-timeout" max="120" min="1" required="" type="number" value="60"/></label><label>Concurrent requests<input id="embedding-concurrency" max="16" min="1" required="" type="number" value="4"/></label></div></details><div class="inline-actions"><button class="button primary" id="embedding-save" type="submit">Save embedding settings</button></div><p class="inline-status" id="embedding-settings-status" role="status"></p></form>
 <form class="panel form-card" id="settings-rerank-form"><span class="panel-kicker">OPTIONAL RERANKING</span><h3>Reranking</h3><p>Reorder retrieved passages with Voyage. Enable per search in Playground.</p><label>Reranking model<select id="rerank-model"><option value="rerank-2.5">rerank-2.5</option><option value="rerank-2.5-lite">rerank-2.5-lite</option></select></label><label>Voyage reranking API key<input autocomplete="off" id="rerank-api-key" placeholder="Leave blank to keep the current key" type="password"/></label><p class="provider-note" id="rerank-key-status">Open Settings to load reranking configuration.</p><label class="checkbox-label"><input id="rerank-clear-key" type="checkbox"/> Clear the active reranking key</label><p class="privacy-note">A reranked search sends your question and candidate passage context to Voyage. A key entered here stays in server memory and is never saved in this browser. VOYAGE_API_KEY from the server environment or its private local file is loaded again after a restart.</p><div class="form-row two"><label>Reranking timeout (seconds)<input id="rerank-timeout" max="120" min="1" required="" type="number" value="60"/></label><label>Concurrent reranking requests<input id="rerank-concurrency" max="16" min="1" required="" type="number" value="4"/></label></div><button class="button primary" id="rerank-save" type="submit">Save reranking settings</button><p class="inline-status" id="rerank-settings-status" role="status"></p></form>

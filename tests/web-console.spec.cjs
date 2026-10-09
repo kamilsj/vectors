@@ -583,3 +583,112 @@ test("large results keep the visible table bounded and expand vectors on demand"
   await results.getByLabel("Rows per page", { exact: true }).selectOption("250");
   await expect(visibleRows).toHaveCount(250);
 });
+
+test('SQL autocomplete inserts catalog tables and alias columns without running a query', async ({ page }) => {
+  await openConsole(page, ['documents', 'table_a']);
+  const sqlCalls = []; page.on('request', (r) => { if (r.url().endsWith('/v1/sql')) sqlCalls.push(r); });
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SELECT * FROM doc');
+  await expect(page.getByRole('option', { name: 'documents Table', exact: true })).toBeVisible();
+  await editor.press('Tab');
+  await expect(editor).toHaveValue('SELECT * FROM "documents"');
+  await editor.fill('SELECT d. FROM documents AS d');
+  await editor.evaluate((e) => e.setSelectionRange(9, 9));
+  await editor.press('Control+Space');
+  await expect(page.locator('#sql-suggestions')).toContainText('title');
+  await expect(page.locator('#sql-suggestions')).not.toContainText('name_a');
+  await editor.press('ArrowDown'); await editor.press('Enter');
+  await expect(editor).toHaveValue('SELECT d."title" FROM documents AS d');
+  expect(sqlCalls).toHaveLength(0);
+});
+
+test('SQL completion replaces the full word at the caret and qualifies ambiguous join fields', async ({ page }) => {
+  await openConsole(page, ['documents', 'table_a']);
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SELECT titwrong FROM documents AS d JOIN table_a AS a ON d.id = 1');
+  await editor.evaluate((e) => e.setSelectionRange(10, 10));
+  await editor.press('Control+Space');
+  await page.getByRole('option', { name: 'title d · TEXT', exact: true }).click();
+  await expect(editor).toHaveValue('SELECT "d"."title" FROM documents AS d JOIN table_a AS a ON d.id = 1');
+});
+
+test('SQL completion ignores strings, comments and earlier statements', async ({ page }) => {
+  await openConsole(page, ['documents', 'table_a']);
+  const editor = page.locator('#sql-editor');
+  for (const text of ["SELECT 'FROM doc", 'SELECT 1 -- FROM doc', '/* SELECT * FROM doc']) {
+    await editor.fill(text); await editor.press('Control+Space');
+    await expect(page.locator('#sql-completion')).toBeHidden();
+  }
+  await editor.fill('SELECT * FROM documents; SELECT na FROM table_a');
+  await editor.evaluate((e) => e.setSelectionRange(34, 34));
+  await editor.press('Control+Space');
+  await expect(page.locator('#sql-suggestions')).toContainText('name_a');
+  await expect(page.locator('#sql-suggestions')).not.toContainText('title');
+});
+
+test('SQL suggestions handle quoted identifiers and never interpret metadata as markup', async ({ page }) => {
+  await openConsole(page, ['odd"table']);
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SELECT * FROM odd'); await editor.press('Control+Space');
+  await editor.press('Tab');
+  await expect(editor).toHaveValue('SELECT * FROM "odd""table"');
+  await page.route('**/v1/tables/odd%22table/schema', (r) => json(r, { columns: [column('<img src=x>', 'TEXT')] }));
+  await editor.fill('SELECT o. FROM "odd""table" AS o');
+  await editor.evaluate((e) => e.setSelectionRange(9, 9)); await editor.press('Control+Space');
+  await expect(page.locator('#sql-suggestions')).toContainText('<img src=x>');
+  await expect(page.locator('#sql-suggestions img')).toHaveCount(0);
+  await editor.press('Tab');
+  await expect(editor).toHaveValue('SELECT o."<img src=x>" FROM "odd""table" AS o');
+});
+
+test('SQL suggestions dismiss on Escape, allow keyboard exit and preserve run shortcut', async ({ page }) => {
+  await openConsole(page);
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SEL'); await editor.press('Control+Space');
+  await expect(page.locator('#sql-completion')).toBeVisible();
+  await editor.press('Escape'); await editor.press('Tab'); await expect(editor).not.toBeFocused();
+  await editor.focus(); await editor.press('Control+Space'); await editor.press('Shift+Tab'); await expect(editor).not.toBeFocused();
+  let sql;
+  await page.route('**/v1/sql', (r) => { sql = r.request().postDataJSON().sql; return json(r, { results: [] }); });
+  await editor.fill('SELECT 1;'); await editor.press('Control+Enter');
+  await expect(page.locator('#editor-status')).toHaveText('Complete'); expect(sql).toBe('SELECT 1;');
+});
+
+test('a late SQL schema response cannot reopen dismissed suggestions or overwrite a new query', async ({ page }) => {
+  await openConsole(page, ['table_a', 'table_b']);
+  const received = deferred(), release = deferred();
+  await page.route('**/v1/tables/table_a/schema', async (r) => { received.resolve(); await release.promise; await json(r, { columns: schemas.table_a }); });
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SELECT a. FROM table_a a'); await editor.evaluate((e) => e.setSelectionRange(9, 9)); await editor.press('Control+Space');
+  await received.promise;
+  await editor.fill('SELECT b. FROM table_b b'); await editor.evaluate((e) => e.setSelectionRange(9, 9)); await editor.press('Control+Space');
+  await expect(page.locator('#sql-suggestions')).toContainText('name_b');
+  release.resolve();
+  await expect(page.locator('#sql-suggestions')).not.toContainText('name_a');
+  await editor.press('Escape');
+  await expect(page.locator('#sql-completion')).toBeHidden();
+});
+
+test('SQL completion survives unavailable schemas and stays within the mobile editor', async ({ page }) => {
+  await openConsole(page);
+  await page.route('**/v1/tables/documents/schema', (r) => json(r, { error: { message: 'Unavailable' } }, 503));
+  await page.setViewportSize({ width: 390, height: 844 });
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SELECT cos FROM documents'); await editor.evaluate((e) => e.setSelectionRange(10, 10)); await editor.press('Control+Space');
+  await expect(page.locator('#sql-suggestions')).toContainText('cosine_distance');
+  const box = await page.locator('#sql-completion').boundingBox();
+  expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(390);
+  await editor.press('Tab'); await expect(editor).toHaveValue('SELECT cosine_distance( FROM documents');
+});
+
+test('Escape cancels an in-flight completion before its schema arrives', async ({ page }) => {
+  await openConsole(page, ['table_a']);
+  const received = deferred(), release = deferred();
+  await page.route('**/v1/tables/table_a/schema', async (r) => { received.resolve(); await release.promise; await json(r, { columns: schemas.table_a }); });
+  const editor = page.locator('#sql-editor');
+  await editor.fill('SELECT a. FROM table_a a'); await editor.evaluate((e) => e.setSelectionRange(9, 9)); await editor.press('Control+Space');
+  await received.promise; await editor.press('Escape');
+  const response = page.waitForResponse('**/v1/tables/table_a/schema'); release.resolve(); await response;
+  await expect(page.locator('#sql-completion')).toBeHidden();
+  await editor.press('Tab'); await expect(editor).not.toBeFocused();
+});

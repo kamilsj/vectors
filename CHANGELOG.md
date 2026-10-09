@@ -12,7 +12,17 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- Schema-aware SQL autocomplete with table and column suggestions, join aliases,
+  quoted identifiers, supported vector functions, and keyboard navigation.
+- A bounded Connections card in Data: browse linked tables and open join queries
+  from a map of saved field relationships. Invalid links remain visibly marked.
+
 ### Changed
+
+- Reduced repeated console headings, compacted database statistics, and shortened
+  routine labels. Connection details remain available on demand.
+- Tab leaves the SQL editor when suggestions are closed, allowing keyboard-only
+  navigation without trapping focus.
 
 ### Removed
 

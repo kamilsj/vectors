@@ -666,3 +666,48 @@ test("a new connection reloads relationships and ignores a late unauthorized cat
   await expect(page.locator("#relationship-new")).toBeEnabled();
   expect(fixture.calls.filter((call) => call.path.startsWith("/v1/relationships") && call.method !== "GET")).toHaveLength(0);
 });
+
+test('the connection map follows saved links and opens a join without executing it', async ({ page }) => {
+  const fixture = await workspace(page, relationshipCollections());
+  fixture.relationships = [{ ...relationshipDefinition, data_type: 'INTEGER', valid: true }];
+  await page.locator('.nav-item[data-view="data"]').click();
+  const map = page.locator('#connection-map');
+  await expect(map.locator('[data-map-table]')).toHaveCount(2);
+  await map.getByRole('button', { name: `Browse ${relationshipDefinition.source_table}`, exact: true }).click();
+  await expect(page.locator('#admin-table')).toHaveValue(relationshipDefinition.source_table);
+  const link = map.getByRole('button', { name: /^Open SQL for papers_by_year:/ });
+  await link.click();
+  await expect(page.locator('#view-console')).toBeVisible();
+  await expect(page.locator('#sql-editor')).toHaveValue(new RegExp('LEFT JOIN.*' + relationshipDefinition.target_table));
+  expect(fixture.calls.filter((call) => call.path === '/v1/sql')).toHaveLength(0);
+});
+
+test('connection maps bound large catalogs, support self links and mark invalid links', async ({ page }) => {
+  const names = Array.from({ length: 15 }, (_, i) => `table_${i}`);
+  const fixture = await workspace(page, [], {}, names.map((name) => [name, { schema: [field('id', 'INTEGER')], rows: [] }]));
+  fixture.relationships = names.map((name, i) => ({ name: `link_${i}`, source_table: name, source_column: 'id', target_table: names[(i + 1) % names.length], target_column: 'id', data_type: 'INTEGER', valid: true }));
+  fixture.relationships.push({ ...fixture.relationships[0], name: 'self_link', target_table: names[0], valid: false, error: 'Field changed' });
+  await page.locator('.nav-item[data-view="data"]').click();
+  await expect(page.locator('#connection-map [data-map-table]')).toHaveCount(12);
+  await expect(page.locator('#connection-map-caption')).toContainText('Limited to 12 tables');
+  await expect(page.locator('#connection-map .invalid [role=button]')).toHaveAttribute('aria-disabled', 'true');
+  await page.locator('#admin-table').selectOption('table_14');
+  await expect(page.locator('#connection-map [data-map-table]')).toHaveCount(3);
+  await expect(page.locator('#connection-map-caption')).not.toContainText('Limited');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test('multiple field links between the same tables have one readable map control', async ({ page }) => {
+  const fixture = await workspace(page, relationshipCollections());
+  fixture.relationships = [
+    { ...relationshipDefinition, data_type: 'INTEGER', valid: true },
+    { ...relationshipDefinition, name: 'papers_by_title', source_column: 'title', target_column: 'title', data_type: 'TEXT', valid: true },
+  ];
+  await page.locator('.nav-item[data-view="data"]').click();
+  await expect(page.locator('#connection-map .connection-map-link')).toHaveCount(1);
+  await page.locator('#connection-map').getByRole('button', { name: /^View 2 relationships/ }).click();
+  await expect(page.locator('#view-data')).toBeVisible();
+  await expect(page.locator('[data-relationship-name="papers_by_year"] [data-relationship-sql]')).toBeFocused();
+  expect(fixture.calls.filter((call) => call.path === '/v1/sql')).toHaveLength(0);
+});

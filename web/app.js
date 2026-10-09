@@ -243,6 +243,7 @@ function showError(error, { quiet = false } = {}) {
 }
 
 function invalidateSchemas() {
+  closeSqlCompletion();
   state.schemaGeneration += 1;
   state.schemas.clear();
   state.schemaRequests.clear();
@@ -417,6 +418,7 @@ function quoteIdentifier(value) {
 }
 
 function switchView(view) {
+  closeSqlCompletion();
   state.view = view;
   $$(".view").forEach((element) => element.classList.toggle("active", element.id === `view-${view}`));
   $$(".nav-item").forEach((element) => {
@@ -437,7 +439,137 @@ function switchView(view) {
   }
 }
 
+// Completion reads only catalog metadata. It never executes a query.
+const sqlCompletion = { generation: 0, items: [], index: 0, context: null, timer: null };
+const SQL_KEYWORDS = ['SELECT', 'FROM', 'WHERE', 'JOIN', 'LEFT JOIN', 'INNER JOIN', 'ON', 'AS', 'AND', 'OR', 'NOT', 'IS NULL', 'IS NOT NULL', 'IN', 'ORDER BY', 'GROUP BY', 'HAVING', 'LIMIT', 'OFFSET', 'ASC', 'DESC', 'DISTINCT', 'INSERT INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE FROM', 'CREATE TABLE', 'CREATE INDEX', 'IF NOT EXISTS', 'PRIMARY KEY', 'NOT NULL', 'INTEGER', 'TEXT', 'DOUBLE', 'BOOLEAN', 'VECTOR'];
+const SQL_FUNCTIONS = ['cosine_distance', 'l2_distance', 'squared_l2_distance', 'dot_product', 'vector_norm', 'vector_dims', 'normalize', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX'];
+const SQL_RESERVED = new Set(SQL_KEYWORDS.flatMap((word) => word.split(' ')).concat(['RIGHT', 'FULL', 'CROSS', 'UNION', 'RETURNING']));
+
+function sqlCompletionContext(text, caret) {
+  // Tokens preserve offsets and quoted identifiers; literals/comments cannot
+  // introduce fake tables or statement boundaries into the completion context.
+  const pattern = /--[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:''|[^'])*(?:'|$)|"(?:""|[^"])*(?:"|$)|[a-zA-Z_][\w$]*|[^\s]/g;
+  const tokens = Array.from(text.matchAll(pattern), (match) => {
+    const raw = match[0];
+    const kind = raw.startsWith('--') || raw.startsWith('/*') ? 'comment' : raw[0] === "'" ? 'string' : raw[0] === '"' || /^[a-zA-Z_]/.test(raw) ? 'identifier' : 'symbol';
+    return { raw, kind, start: match.index, end: match.index + raw.length, value: raw[0] === '"' ? raw.slice(1).replace(/"$/, '').replaceAll('""', '"') : raw };
+  });
+  if (tokens.some((t) => ['string', 'comment'].includes(t.kind) && t.start < caret && (caret < t.end || caret === t.end && (t.raw.startsWith('--') || t.raw.startsWith('/*') && !t.raw.endsWith('*/') || t.raw[0] === "'" && !t.raw.slice(1).endsWith("'"))))) return null;
+  const meaningful = tokens.filter((t) => t.kind !== 'comment');
+  const from = meaningful.filter((t) => t.raw === ';' && t.end <= caret).at(-1)?.end || 0;
+  const until = meaningful.find((t) => t.raw === ';' && t.start >= caret)?.start ?? text.length;
+  const statement = meaningful.filter((t) => t.start >= from && t.end <= until);
+  const word = statement.find((t) => t.kind === 'identifier' && t.start < caret && t.end >= caret);
+  const start = word?.start ?? caret;
+  const before = statement.filter((t) => t.end <= start);
+  const previous = before.at(-1);
+  const qualifier = previous?.raw === '.' ? before.at(-2)?.value : null;
+  const tablePosition = ['FROM', 'JOIN', 'UPDATE', 'INTO', 'TABLE'].includes(previous?.raw.toUpperCase());
+  const references = [];
+  for (let i = 0; i < statement.length - 1; i++) {
+    if (!['FROM', 'JOIN', 'UPDATE', 'INTO'].includes(statement[i].raw.toUpperCase())) continue;
+    const table = statement[i + 1];
+    if (table.kind !== 'identifier') continue;
+    let alias = statement[i + 2];
+    if (alias?.raw.toUpperCase() === 'AS') alias = statement[i + 3];
+    references.push({ table: table.value, alias: alias?.kind === 'identifier' && (alias.raw.startsWith('"') || !SQL_RESERVED.has(alias.raw.toUpperCase())) ? alias.value : table.value });
+  }
+  const rawPrefix = text.slice(start, caret);
+  return { start, end: word?.end ?? caret, prefix: (rawPrefix.startsWith('"') ? rawPrefix.slice(1).replaceAll('""', '"') : rawPrefix).toLowerCase(), qualifier, tablePosition, references };
+}
+
+function closeSqlCompletion() {
+  clearTimeout(sqlCompletion.timer);
+  sqlCompletion.generation += 1;
+  sqlCompletion.items = [];
+  $('#sql-completion').hidden = true;
+  $('#sql-editor').removeAttribute('aria-activedescendant');
+  $('#sql-completion-status').textContent = '';
+}
+
+async function suggestSql(manual = false) {
+  const editor = $('#sql-editor');
+  const generation = ++sqlCompletion.generation;
+  const text = editor.value, caret = editor.selectionStart, schemaGeneration = state.schemaGeneration;
+  const context = editor.selectionEnd === caret && sqlCompletionContext(text, caret);
+  if (!context || document.activeElement !== editor || (!manual && !context.prefix && !context.qualifier && !context.tablePosition)) { closeSqlCompletion(); return; }
+  const exists = (name) => state.tables.find((table) => table.name.toLowerCase() === name.toLowerCase())?.name;
+  const refs = context.references.map((ref) => ({ ...ref, table: exists(ref.table) })).filter((ref) => ref.table);
+  if (!refs.length && state.activeTable && !context.tablePosition) refs.push({ table: state.activeTable, alias: state.activeTable });
+  const relevant = context.qualifier ? refs.filter((ref) => ref.alias.toLowerCase() === context.qualifier.toLowerCase()) : refs;
+  const schemas = context.tablePosition ? [] : await Promise.all(relevant.slice(0, 8).map(async (ref) => {
+    try { return { ...ref, columns: await loadSchema(ref.table) }; }
+    catch { return { ...ref, columns: [] }; } // An unavailable schema never blocks typing.
+  }));
+  if (generation !== sqlCompletion.generation || schemaGeneration !== state.schemaGeneration || text !== editor.value || caret !== editor.selectionStart || document.activeElement !== editor) return;
+  const items = [];
+  const add = (label, detail, insert = label) => { if (label.toLowerCase().startsWith(context.prefix)) items.push({ label, detail, insert }); };
+  if (context.tablePosition) state.tables.forEach((table) => add(table.name, 'Table', quoteIdentifier(table.name)));
+  else {
+    schemas.forEach((ref) => ref.columns.forEach((column) => {
+      const qualified = !context.qualifier && refs.length > 1;
+      add(column.name, `${ref.alias} · ${column.data_type}`, `${qualified ? quoteIdentifier(ref.alias) + '.' : ''}${quoteIdentifier(column.name)}`);
+    }));
+    if (!context.qualifier) {
+      SQL_KEYWORDS.forEach((keyword) => add(keyword, 'Keyword'));
+      SQL_FUNCTIONS.forEach((name) => add(name, 'Function', name + '('));
+    }
+  }
+  const unique = items.filter((item, i) => items.findIndex((other) => other.insert === item.insert) === i).slice(0, 40);
+  if (!unique.length) { closeSqlCompletion(); return; }
+  sqlCompletion.items = unique; sqlCompletion.index = 0;
+  sqlCompletion.context = { ...context, text, caret };
+  const list = clear($('#sql-suggestions'));
+  unique.forEach((item, index) => {
+    const option = node('div', 'sql-suggestion'); option.id = `sql-option-${index}`;
+    option.setAttribute('role', 'option');
+    option.append(node('span', '', item.label), node('small', '', item.detail));
+    option.addEventListener('pointerdown', (event) => { if (event.button === 0) { event.preventDefault(); acceptSqlCompletion(index); } });
+    list.append(option);
+  });
+  const popup = $('#sql-completion'); popup.hidden = false;
+  const style = getComputedStyle(editor), lineHeight = parseFloat(style.lineHeight);
+  const lines = text.slice(0, caret).split('\n');
+  const canvas = document.createElement('canvas').getContext('2d'); canvas.font = style.font;
+  const left = editor.offsetLeft + parseFloat(style.paddingLeft) + canvas.measureText(lines.at(-1).replaceAll('\t', '  ')).width - editor.scrollLeft;
+  const top = parseFloat(style.paddingTop) + lines.length * lineHeight - editor.scrollTop;
+  popup.style.left = `${Math.max(editor.offsetLeft, Math.min(left, editor.parentElement.clientWidth - popup.offsetWidth - 8))}px`;
+  popup.style.top = `${Math.max(8, Math.min(top, editor.parentElement.clientHeight - popup.offsetHeight - 8))}px`;
+  $('#sql-completion-status').textContent = `${unique.length} suggestions. Use arrow keys and Tab to insert.`;
+  selectSqlCompletion(0);
+}
+
+function selectSqlCompletion(index) {
+  sqlCompletion.index = (index + sqlCompletion.items.length) % sqlCompletion.items.length;
+  $$('#sql-suggestions [role="option"]').forEach((option, i) => option.setAttribute('aria-selected', String(i === sqlCompletion.index)));
+  const option = $(`#sql-option-${sqlCompletion.index}`);
+  $('#sql-editor').setAttribute('aria-activedescendant', option.id);
+  option.scrollIntoView({ block: 'nearest' });
+}
+
+function acceptSqlCompletion(index = sqlCompletion.index) {
+  const editor = $('#sql-editor'), context = sqlCompletion.context, item = sqlCompletion.items[index];
+  if (!item || !context || context.text !== editor.value || context.caret !== editor.selectionStart) { closeSqlCompletion(); return; }
+  editor.setRangeText(item.insert, context.start, context.end, 'end');
+  closeSqlCompletion(); updateLineNumbers(); editor.focus();
+}
+
+function sqlEditorKeydown(event) {
+  if (event.isComposing) return;
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') { event.preventDefault(); closeSqlCompletion(); void runSql(); return; }
+  if (event.ctrlKey && event.code === 'Space') { event.preventDefault(); void suggestSql(true); return; }
+  if (event.key === 'Escape') { event.preventDefault(); closeSqlCompletion(); return; }
+  if (sqlCompletion.items.length) {
+    if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); selectSqlCompletion(sqlCompletion.index + (event.key === 'ArrowDown' ? 1 : -1)); return; }
+    if (['Tab', 'Enter'].includes(event.key) && !event.shiftKey) { event.preventDefault(); acceptSqlCompletion(); return; }
+  }
+  if (['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Tab'].includes(event.key)) closeSqlCompletion();
+  // Tab without a suggestion follows normal focus navigation; users can leave
+  // the editor with a keyboard, including Shift+Tab.
+}
+
 function setEditor(sql) {
+  closeSqlCompletion();
   const editor = $("#sql-editor");
   editor.value = sql;
   updateLineNumbers();
@@ -1527,10 +1659,85 @@ function updateRelationshipControls() {
   $$('[data-relationship-remove]').forEach((button) => { button.disabled = current.busy || !editable; });
 }
 
+function renderConnectionMap(items) {
+  const target = clear($('#connection-map'));
+  const caption = $('#connection-map-caption');
+  const current = state.relationships;
+  if (current.error || current.loading) {
+    target.append(node('p', 'connection-map-empty', current.loading ? 'Loading connections…' : 'Connection map unavailable. Refresh to retry.'));
+    caption.textContent = ''; return;
+  }
+  const focus = state.admin.table;
+  const names = [...new Set([...(focus ? [focus] : []), ...items.flatMap((item) => [item.source_table, item.target_table])])].slice(0, 12);
+  if (!names.length || !items.length) {
+    target.append(node('p', 'connection-map-empty', focus ? 'No connections for this table.' : 'Connect tables to visualize your data.'));
+    caption.textContent = ''; return;
+  }
+  const visible = items.filter((item) => names.includes(item.source_table) && names.includes(item.target_table));
+  const svg = svgNode('svg', { viewBox: `0 0 800 ${Math.max(240, Math.ceil(names.length / 2) * 104 + 40)}`, role: 'group', 'aria-label': 'Saved table relationships' });
+  const defs = svgNode('defs');
+  const arrow = svgNode('marker', { id: 'connection-arrow', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' });
+  arrow.append(svgNode('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: '#7387a1' })); defs.append(arrow); svg.append(defs);
+  const positions = new Map(names.map((name, i) => [name, { x: i % 2 ? 510 : 30, y: 30 + Math.floor(i / 2) * 104 }]));
+  const groups = new Map();
+  for (const item of visible) {
+    const key = JSON.stringify([item.source_table, item.target_table].sort());
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  groups.forEach((links) => {
+    const item = links[0], multiple = links.length > 1, disabled = !multiple && item.valid === false;
+    const bidirectional = links.some((link) => link.source_table !== item.source_table);
+    const source = positions.get(item.source_table), dest = positions.get(item.target_table);
+    const same = source === dest, right = dest.x > source.x;
+    const side = source.x === 30 ? 1 : -1;
+    const x1 = source.x + (same || source.x === dest.x ? (side > 0 ? 260 : 0) : right ? 260 : 0), y1 = source.y + 34;
+    const x2 = dest.x + (source.x === dest.x ? (side > 0 ? 260 : 0) : right ? 0 : 260), y2 = dest.y + 34;
+    const bend = x1 + side * 60;
+    const d = same ? `M ${x1} ${y1 - 10} C ${bend} ${y1 - 70}, ${bend} ${y1 + 70}, ${x1} ${y1 + 10}`
+      : source.x === dest.x ? `M ${x1} ${y1} C ${bend} ${y1}, ${bend} ${y2}, ${x2} ${y2}`
+      : `M ${x1} ${y1} C 400 ${y1}, 400 ${y2}, ${x2} ${y2}`;
+    const link = svgNode('g', { class: `connection-map-link${links.some((link) => link.valid === false) ? ' invalid' : ''}` });
+    const title = svgNode('title'); title.textContent = `${item.name}: ${item.source_column} → ${item.target_column}${item.valid === false ? ' (invalid)' : ''}`;
+    link.append(title, svgNode('path', { d, class: 'connection-map-hit' }), svgNode('path', { d, class: 'connection-map-line', 'marker-end': 'url(#connection-arrow)', 'marker-start': bidirectional ? 'url(#connection-arrow)' : 'none' }));
+    // A real hit target makes horizontal and curved links reachable by touch
+    // and automation, even when the path itself has a zero-height SVG box.
+    const midX = source.x === dest.x ? x1 + side * 45 : (x1 + 2400 + x2) / 8;
+    const midY = (y1 + y2) / 2;
+    const button = svgNode('g', { transform: `translate(${midX}, ${midY})`, role: 'button', tabindex: disabled ? -1 : 0, 'aria-disabled': String(disabled), 'aria-label': multiple ? `View ${links.length} relationships between ${item.source_table} and ${item.target_table}` : `Open SQL for ${item.name}: ${item.source_table}.${item.source_column} to ${item.target_table}.${item.target_column}` });
+    const label = svgNode('text', { 'text-anchor': 'middle', y: 4 }); label.textContent = multiple ? `${links.length} links` : 'JOIN';
+    button.append(svgNode('rect', { x: -23, y: -13, width: 46, height: 26, rx: 5 }), label); link.append(button);
+    const open = () => {
+      if (multiple) {
+        const card = $$('[data-relationship-name]').find((card) => card.dataset.relationshipName === item.name);
+        card?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (card) $('button:not(:disabled)', card)?.focus({ preventScroll: true });
+      } else if (!disabled) openRelationshipSql(item);
+    };
+    link.addEventListener('click', open); button.addEventListener('keydown', (event) => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); open(); } });
+    svg.append(link);
+  });
+  names.forEach((name) => {
+    const pos = positions.get(name), table = state.tables.find((item) => item.name === name);
+    const group = svgNode('g', { transform: `translate(${pos.x}, ${pos.y})`, class: `connection-map-table${focus === name ? ' selected' : ''}`, role: 'button', tabindex: table && !state.admin.busy ? 0 : -1, 'aria-label': `Browse ${name}`, 'aria-disabled': String(!table || state.admin.busy), 'data-map-table': name });
+    const title = svgNode('title'); title.textContent = name;
+    const label = svgNode('text', { x: 16, y: 28, class: 'connection-map-name' }); label.textContent = name.length > 27 ? `${name.slice(0, 25)}…` : name;
+    const count = svgNode('text', { x: 16, y: 49, class: 'connection-map-count' }); count.textContent = table ? `${table.row_count.toLocaleString()} rows` : 'Table unavailable';
+    group.append(title, svgNode('rect', { width: 260, height: 68, rx: 9 }), label, count);
+    const open = () => { if (table && !state.admin.busy) void selectAdminTable(name); };
+    group.addEventListener('click', open); group.addEventListener('keydown', (event) => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); open(); } });
+    svg.append(group);
+  });
+  target.append(svg);
+  const bounded = items.length !== visible.length || new Set(items.flatMap((item) => [item.source_table, item.target_table])).size > names.length;
+  caption.textContent = `${names.length} tables · ${visible.length} links${bounded ? ' · Limited to 12 tables; choose a table to focus' : ''}${visible.some((item) => item.valid === false) ? ' · Dashed links need repair' : ''}`;
+}
+
 function renderRelationships() {
   const current = state.relationships;
   const table = state.admin.table;
   const items = current.items.filter((item) => !table || item.source_table === table || item.target_table === table);
+  renderConnectionMap(items);
   const target = clear($("#relationship-list"));
   for (const item of items) {
     const card = node("article", "relationship-card"); card.dataset.relationshipName = item.name;
@@ -1545,8 +1752,7 @@ function renderRelationships() {
     remove.addEventListener("click", () => void removeRelationship(item));
     actions.append(sql, remove); card.append(description, actions); target.append(card);
   }
-  if (!items.length && !current.error && !current.loading) target.append(node("p", "field-hint", table ? "No saved relationships for this table yet." : "Choose a table or connect two matching fields."));
-  $("#relationships-status").textContent = [current.error || (current.loading ? "Loading relationships…" : `${items.length} ${items.length === 1 ? "relationship" : "relationships"}${table ? ` involving ${table}` : " across your tables"}.`), current.notice].filter(Boolean).join(" ");
+  $("#relationships-status").textContent = [current.error || (current.loading ? "Loading relationships…" : ""), current.notice].filter(Boolean).join(" ");
   updateRelationshipControls();
 }
 
@@ -3840,21 +4046,15 @@ function bindEvents() {
   $("#analyze-sql").addEventListener("click", analyzeSql);
   $("#example-select").addEventListener("change", (event) => setEditor(examples[event.target.value]));
   $("#format-sql").addEventListener("click", () => setEditor($("#sql-editor").value.trim().replace(/\n{3,}/g, "\n\n")));
-  $("#sql-editor").addEventListener("input", updateLineNumbers);
-  $("#sql-editor").addEventListener("scroll", () => { $("#line-numbers").scrollTop = $("#sql-editor").scrollTop; });
-  $("#sql-editor").addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-      event.preventDefault();
-      runSql();
-    }
-    if (event.key === "Tab") {
-      event.preventDefault();
-      const editor = event.target;
-      const start = editor.selectionStart;
-      editor.setRangeText("  ", start, editor.selectionEnd, "end");
-      updateLineNumbers();
-    }
+  $("#sql-editor").addEventListener("input", (event) => {
+    updateLineNumbers(); closeSqlCompletion();
+    if (!event.isComposing) sqlCompletion.timer = setTimeout(() => void suggestSql(), 90);
   });
+  $("#sql-editor").addEventListener("scroll", () => { $("#line-numbers").scrollTop = $("#sql-editor").scrollTop; closeSqlCompletion(); });
+  $("#sql-editor").addEventListener("blur", closeSqlCompletion);
+  $("#sql-editor").addEventListener("pointerdown", closeSqlCompletion);
+  $("#sql-editor").addEventListener("keydown", sqlEditorKeydown);
+  window.addEventListener("resize", closeSqlCompletion);
   $("#search-table").addEventListener("change", (event) => { state.searchIntentGeneration += 1; void populateSearchColumns(event.target.value); });
   $("#search-vector-column").addEventListener("change", () => { state.searchIntentGeneration += 1; updateDimensionHint(); });
   $("#search-form").addEventListener("submit", runVectorSearch);
