@@ -739,6 +739,9 @@ fn validate_adapter_limits(limits: &wgpu::Limits) -> Result<(), String> {
     if limits.max_compute_workgroups_per_dimension == 0 {
         return Err("adapter reports no compute workgroups".into());
     }
+    if limits.max_compute_workgroup_storage_size < WORKGROUP_SIZE * size_of::<f32>() as u32 {
+        return Err("adapter workgroup storage is too small for score reduction".into());
+    }
     if limits.max_storage_buffers_per_shader_stage < REQUIRED_STORAGE_BINDINGS {
         return Err(format!(
             "adapter exposes {} storage buffers per shader stage; {REQUIRED_STORAGE_BINDINGS} are required",
@@ -794,25 +797,21 @@ fn dispatch_shape(candidate_count: u32, max_workgroups: u32) -> Result<DispatchS
             "cannot dispatch an empty candidate batch".into(),
         ));
     }
-    let max_x = max_workgroups.min(u32::MAX / WORKGROUP_SIZE);
+    let max_x = max_workgroups;
     if max_x == 0 {
         return Err(GpuError::Limit(
             "adapter cannot address a compute workgroup".into(),
         ));
     }
-    let total_workgroups = candidate_count.div_ceil(WORKGROUP_SIZE);
+    let total_workgroups = candidate_count;
     let x = total_workgroups.min(max_x);
     let y = total_workgroups.div_ceil(x);
-    if y > max_workgroups {
+    if y > max_workgroups || u64::from(x) * u64::from(y) > u64::from(u32::MAX) {
         return Err(GpuError::Limit(format!(
             "{candidate_count} candidates exceed the two-dimensional dispatch grid"
         )));
     }
-    Ok(DispatchShape {
-        x,
-        y,
-        width: x * WORKGROUP_SIZE,
-    })
+    Ok(DispatchShape { x, y, width: x })
 }
 
 fn usize_from_u64(value: u64) -> usize {
@@ -825,32 +824,45 @@ mod tests {
 
     #[test]
     fn dispatch_uses_second_dimension_after_x_is_full() {
-        let shape = dispatch_shape(1_025, 4).unwrap();
+        let shape = dispatch_shape(9, 4).unwrap();
         assert_eq!(
             shape,
             DispatchShape {
                 x: 4,
                 y: 3,
-                width: 512
+                width: 4
             }
         );
     }
 
     #[test]
     fn dispatch_rejects_candidates_beyond_the_two_dimensional_grid() {
-        let error = dispatch_shape(2_049, 4).unwrap_err();
+        let error = dispatch_shape(17, 4).unwrap_err();
         assert!(matches!(error, GpuError::Limit(_)));
     }
 
     #[test]
-    fn dispatch_handles_partial_workgroups() {
+    fn dispatch_assigns_one_workgroup_per_vector() {
         assert_eq!(
             dispatch_shape(129, 65_535).unwrap(),
             DispatchShape {
-                x: 2,
+                x: 129,
                 y: 1,
-                width: 256,
+                width: 129,
             }
         );
+    }
+
+    #[test]
+    fn dispatch_rejects_grid_address_overflow_and_empty_batches() {
+        assert!(matches!(
+            dispatch_shape(u32::MAX, 65_536),
+            Err(GpuError::Limit(_))
+        ));
+        assert!(matches!(
+            dispatch_shape(0, 65_535),
+            Err(GpuError::InvalidInput(_))
+        ));
+        assert!(matches!(dispatch_shape(1, 0), Err(GpuError::Limit(_))));
     }
 }

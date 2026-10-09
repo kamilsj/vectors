@@ -20,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--saywit", type=Path, required=True)
     parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--compute", choices=("cpu", "auto", "gpu"), default="cpu")
     args = parser.parse_args()
     from django.conf import settings
 
@@ -77,7 +78,8 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="vectors-saywit-") as temporary:
         directory = Path(temporary)
-        with running_server(args.server.resolve(), directory, 30, version) as api:
+        with running_server(args.server.resolve(), directory, 30, version,
+                            compute=args.compute, require_gpu=args.compute == "gpu") as api:
             connect(api)
             transport.insert_units(rows)
             transport.insert_units(rows)
@@ -93,7 +95,8 @@ def main():
             search()
             transport.insert_units([edited])
             require(transport.nearest(vector, ["team-b"]) == [], "old chat scope retained edited unit")
-        with running_server(args.server.resolve(), directory, 30, version) as api:
+        with running_server(args.server.resolve(), directory, 30, version,
+                            compute=args.compute, require_gpu=args.compute == "gpu") as api:
             connect(api)
             require(transport.nearest(vector, ["team-b"]) == [], "old scope returned after recovery")
             hits = transport.nearest(vector, ["team-c"])
@@ -102,7 +105,7 @@ def main():
             search()
             transport.sql(f"DELETE FROM {transport.TABLE} WHERE turn_id=$1", ["answer-turn-b"])
             require(transport.nearest(vector, ["team-b"]) == [], "deleted turn remained searchable")
-    print(json.dumps({"status": "passed", "version": version,
+    print(json.dumps({"status": "passed", "version": version, "compute": args.compute,
                       "transport": str(path), "dimensions": transport.DIMENSIONS,
                       "checks": ["real HTTP transport", "schema", "normalized bulk insert", "scope before ranking",
                                  "profile and turn exclusion", "duplicate IDs", "bound quoted IDs", "500-chat scope",

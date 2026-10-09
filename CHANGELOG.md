@@ -12,6 +12,16 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+### Changed
+
+### Removed
+
+### Fixed
+
+## 0.11.1 - 2026-10-09
+
+### Added
+
 - A filter-planning benchmark with exact result comparisons at 20,000 and
   100,000 units, plus regression coverage for reordered filters and unique keys.
 - GPU feature checks for release binaries and installed archives, plus required
@@ -23,6 +33,12 @@ uses that section as the curated introduction to the GitHub release notes.
 - Scalar filters choose their smallest indexed candidate set before allocating
   row lists. PRIMARY KEY and UNIQUE lookups reuse their maintained indexes;
   selective intersections avoid copying broad chat/profile postings.
+- Automatic compute can filter large candidate sets on CPU and score matches
+  on GPU. It rechecks the GPU threshold after filtering and reuses filtered
+  candidates for CPU fallback; small searches retain the direct CPU path.
+- GPU lanes cooperate on each vector with adjacent memory reads and parallel
+  score reduction. Large residual-filter batches use parallel CPU preparation.
+  A reproducible CPU/GPU crossover benchmark records warm and cold timings.
 
 ### Removed
 
@@ -30,6 +46,10 @@ uses that section as the curated introduction to the GitHub release notes.
   replaced by one scalar candidate planner for SQL, typed search and GraphRAG.
 
 ### Fixed
+
+- Forced GPU vector scans now evaluate residual profile and turn-exclusion
+  filters before GPU scoring. Saywit queries no longer silently score on CPU
+  because their filters are not fully indexed.
 
 ## 0.11.0 - 2026-10-09
 

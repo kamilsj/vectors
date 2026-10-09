@@ -1901,15 +1901,18 @@ fn explain_query(
                         "GPU required, but this build has no GPU backend".to_string()
                     }
                     crate::ComputeDevice::Gpu if !gpu_compatible => {
-                        "CPU exact scan (residual SQL filter requires row evaluation)".to_string()
+                        "GPU exact scan required after CPU residual filtering".to_string()
                     }
                     crate::ComputeDevice::Gpu => "GPU exact scan required".to_string(),
                     crate::ComputeDevice::Auto
                         if cfg!(feature = "gpu")
-                            && gpu_compatible
                             && element_count >= compute.config().gpu_min_elements =>
                     {
-                        "GPU exact scan eligible; automatic CPU fallback".to_string()
+                        if gpu_compatible {
+                            "GPU exact scan eligible; automatic CPU fallback".to_string()
+                        } else {
+                            "GPU exact scan eligible after CPU residual filtering; threshold rechecked on matches; automatic CPU fallback".to_string()
+                        }
                     }
                     crate::ComputeDevice::Auto => "CPU exact scan".to_string(),
                 };
@@ -4488,6 +4491,59 @@ fn run_fast_vector_top_k(
             "dense vector storage row count does not match the row store".into(),
         ));
     }
+    // Filter before GPU scoring, including profile and turn exclusions. Small
+    // automatic scans keep the single-pass CPU path. The runtime rechecks the
+    // crossover on actual matches, and CPU fallback reuses these filtered IDs.
+    let prefilter_gpu = match compute.config().device {
+        crate::ComputeDevice::Gpu => true,
+        crate::ComputeDevice::Auto => {
+            cfg!(feature = "gpu")
+                && source_count.saturating_mul(plan.query.dimensions())
+                    >= compute.config().gpu_min_elements
+        }
+        crate::ComputeDevice::Cpu => false,
+    };
+    let filtered_rows = if prefilter_gpu {
+        selection
+            .map(|selection| {
+                if source_count >= 4096 && rayon::current_num_threads() > 1 {
+                    // Ordered collection preserves source-row ties while CPU
+                    // workers prepare a large GPU candidate batch in parallel.
+                    let matches = (0..source_count)
+                        .into_par_iter()
+                        .with_min_len(1024)
+                        .map(|position| {
+                            let row = indexed_rows.map_or(position, |rows| rows[position]);
+                            let context = EvalContext::new(&table.columns, &table.rows[row]);
+                            Ok(evaluate(selection, &context)?
+                                .as_bool()?
+                                .unwrap_or(false)
+                                .then_some(row))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    return Ok(matches.into_iter().flatten().collect());
+                }
+                let mut rows = Vec::new();
+                for position in 0..source_count {
+                    let row = indexed_rows.map_or(position, |rows| rows[position]);
+                    let context = EvalContext::new(&table.columns, &table.rows[row]);
+                    if evaluate(selection, &context)?.as_bool()?.unwrap_or(false) {
+                        rows.push(row);
+                    }
+                }
+                Ok::<_, Error>(rows)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let indexed_rows = filtered_rows.as_deref().or(indexed_rows);
+    let selection = if filtered_rows.is_some() {
+        None
+    } else {
+        selection
+    };
+    let source_count = indexed_rows.map_or(source_count, <[usize]>::len);
     let gpu_heap = if selection.is_none() {
         let mut heap = BinaryHeap::new();
         let completed = compute.scan_dense_column(

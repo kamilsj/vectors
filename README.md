@@ -52,7 +52,8 @@ New to the project? The [guided tutorial](docs/TUTORIAL.md) covers installation,
 every shell command, the web console, SQL and typed API examples, persistence,
 GPU selection, production batching, and troubleshooting.
 
-Version **0.11.0** improves scoped chat search and turn indexing for Saywit.
+Version **0.11.1** improves indexed filtering and verifies Linux GPU execution,
+including Saywit queries with profile and turn-exclusion filters.
 The [PDF upload and RAG chat lab](docs/PDF_RAG_LAB.md) supports folder imports,
 cited answers, retrieval diagnostics and repeatable corpus tests.
 The [chatbot and voicebot guide](docs/CHATBOTS.md) covers conversational search,
@@ -71,11 +72,11 @@ install both binaries for the current user, start a durable server, and open
 the web console when a desktop is available. Releases support Linux x86-64 and
 ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
-[v0.11.0](https://github.com/kamilsj/vectors/releases/tag/v0.11.0) speeds up chat
-scope filtering, stable-ID indexing and turn cleanup while preserving exact
-retrieval results. At 100,000 synthetic units, durable eight-unit replacement
-improved from 48.98 to 8.98 ms; see the [benchmarks](docs/BENCHMARKS.md) for
-methodology and limits. The release also verifies Saywit's real transport.
+[v0.11.1](https://github.com/kamilsj/vectors/releases/tag/v0.11.1) adds selective
+filter planning and GPU release checks on Linux x86-64 and ARM64. Forced GPU
+mode filters candidates on CPU before GPU scoring when needed, including
+Saywit profile and turn exclusions. See the [benchmarks](docs/BENCHMARKS.md)
+for measured query-planning gains and their limits.
 Run the installer below with `--restart` (PowerShell: `-Restart`) to upgrade a
 running server, then reload the console.
 
@@ -215,8 +216,10 @@ thread counts with `cargo run --release --locked --example benchmark_scan_layout
 see the [measured CPU results](docs/BENCHMARKS.md#cpu-scan-scheduling).
 
 GPU execution accelerates scoring; result selection and projection remain on
-the CPU. It is considered only when `VectorTopK` has no residual predicate to
-evaluate row by row. `auto` also checks the candidate-count × dimensions
+the CPU. In forced `gpu` mode, residual predicates are evaluated first and
+matching candidate IDs are passed to GPU scoring. In `auto`, large candidate
+sets are filtered first and the GPU threshold is checked again on actual
+matches; small searches keep the direct CPU path. Automatic selection checks the candidate-count × dimensions
 crossover, adapter availability, device limits, and the configured cache bound.
 Any of those checks may retain the Rayon path. For scans that satisfy the GPU
 eligibility rules, `gpu` requires accelerator execution and returns a clear
@@ -294,7 +297,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.11.0 | in-memory SQL vector database
+vectors 0.11.1 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```

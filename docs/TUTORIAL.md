@@ -756,9 +756,11 @@ The crossover is `candidate rows × vector dimensions`; it defaults to
 bounded. Device uploads may be sharded and dispatch/readback work is batched.
 
 GPU execution is exhaustive, not ANN. It is considered only for a compatible
-top-k plan without a residual row-by-row predicate. A predicate fully covered
-by a scalar index is compatible; a more complex residual filter remains on the
-CPU path. In `auto`, adapter, device, cache, or execution failures fall back to
+top-k plan. In forced `gpu` mode, residual filters run on CPU first, then the
+GPU scores only matching candidates. In `auto`, large candidate sets are
+filtered first and the threshold is rechecked on actual matches. Small queries
+retain CPU scoring. Fully indexed filters can use the GPU directly. In `auto`, adapter,
+device, cache, or execution failures fall back to
 the CPU. Use `EXPLAIN` and `--compute gpu` during controlled testing when you
 must prove that an eligible workload reaches the accelerator.
 

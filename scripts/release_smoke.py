@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 r"""Smoke-test an extracted release binary using Python 3.10+ and synthetic provider keys.
 
-Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.0
-Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.0
+Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.1
+Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.1
 
 Only loopback HTTP and a temporary durable database are used; no provider calls
 are made. This checks embedded UI assets, not browser rendering. A nonzero exit
@@ -362,9 +362,10 @@ def check_gpu_execution(binary, expected_version, timeout):
         directory = Path(temporary)
         reference = {}
         query = [1, 0, 0] + [0] * 126
-        for compute in ("cpu", "gpu"):
+        for compute in ("cpu", "gpu", "auto"):
             with running_server(binary, directory, timeout, expected_version,
-                                compute=compute, require_gpu=True) as api:
+                                compute=compute, require_gpu=True,
+                                environment_overrides={"VECTORS_GPU_MIN_ELEMENTS": "1"}) as api:
                 if compute == "cpu":
                     sql(api, "CREATE TABLE gpu_smoke (id INTEGER PRIMARY KEY, category TEXT, "
                              "embedding VECTOR(129)); CREATE INDEX gpu_category ON gpu_smoke(category)")
@@ -376,20 +377,30 @@ def check_gpu_execution(binary, expected_version, timeout):
                         api.request("/v1/tables/gpu_smoke/rows", {"rows": rows[start:start + 100]})
                 for metric, function in (("cosine", "cosine_distance"), ("l2", "l2_distance"),
                                          ("squared_l2", "squared_l2_distance"), ("dot_product", "dot_product")):
-                    for scope in ("all", "indexed", "membership"):
+                    for scope in ("all", "indexed", "membership", "residual", "mixed"):
                         predicate = {"all": "", "indexed": " WHERE category='keep'",
-                                     "membership": " WHERE category IN ('keep','other') AND id IN (1,4,128,255,257)"}[scope]
+                                     "membership": " WHERE category IN ('keep','other') AND id IN (1,4,128,255,257)",
+                                     "residual": " WHERE id<>4",
+                                     "mixed": " WHERE category='keep' AND id<>4"}[scope]
                         order = "DESC" if metric == "dot_product" else "ASC"
                         statement = (f"SELECT id,{function}(embedding,ARRAY{query}) AS distance FROM gpu_smoke"
                                      f"{predicate} ORDER BY distance {order} LIMIT 300")
+                        if compute == "gpu":
+                            plan = sql(api, "EXPLAIN " + statement)[0]
+                            require(any("GPU exact scan required" in row[0] for row in plan["rows"]),
+                                    f"{metric}/{scope}: planner did not select required GPU scoring")
                         result = sql(api, statement, timeout=timeout)[0]
                         results = {f"sql/{metric}/{scope}": result}
                         if scope != "membership":
+                            filters = []
+                            if scope in ("indexed", "mixed"):
+                                filters.append({"column": "category", "operator": "eq", "value": "keep"})
+                            if scope in ("residual", "mixed"):
+                                filters.append({"column": "id", "operator": "ne", "value": 4})
                             results[f"typed/{metric}/{scope}"] = api.request("/v1/vector/search", {
                                 "table": "gpu_smoke", "vector_column": "embedding", "query": query,
                                 "metric": metric, "select": ["id"], "limit": 300,
-                                "filters": [] if scope == "all" else [
-                                    {"column": "category", "operator": "eq", "value": "keep"}],
+                                "filters": filters,
                             }, timeout=timeout)
                         for name, result in results.items():
                             if compute == "cpu":
@@ -406,8 +417,8 @@ def check_gpu_execution(binary, expected_version, timeout):
                                 require(actual is expected_score if expected_score is None else
                                         actual is not None and math.isclose(actual, expected_score, rel_tol=1e-5, abs_tol=1e-6),
                                         f"{name}: GPU score differs from CPU at row {actual_row[0]}")
-        print(f"PASS required GPU execution: {len(reference)} SQL/typed searches match CPU, "
-              "four metrics, indexed filters, membership, NULLs, ties and durable restart")
+        print(f"PASS GPU and automatic execution: {len(reference)} SQL/typed searches per mode match CPU, "
+              "four metrics, indexed/residual filters, membership, NULLs, ties and durable restart")
 
 
 def run(binary, expected_version, timeout, *, require_gpu=False, exercise_gpu=False):
@@ -464,7 +475,7 @@ def run(binary, expected_version, timeout, *, require_gpu=False, exercise_gpu=Fa
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
-    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.0")
+    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.1")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
     parser.add_argument("--require-gpu", action="store_true", help="fail if the binary lacks the GPU feature")
     parser.add_argument("--exercise-gpu", action="store_true",

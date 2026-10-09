@@ -7,6 +7,42 @@ with another database.
 
 ## Run the benchmark
 
+### Cooperative CPU/GPU execution
+
+```sh
+RAYON_NUM_THREADS=8 VECTORS_GPU_MIN_ELEMENTS=33554432 cargo run --release --locked --features gpu --example benchmark_compute_policy -- auto 50000 1024 40
+```
+
+Measured on Ubuntu 26.04.1, NVIDIA RTX 4000 SFF Ada (driver 595.91.07), Rust
+1.98.1, using 1,024-dimensional synthetic vectors and residual profile/turn
+filters. Three processes per configuration ran five warmups and forty measured
+queries; policy order was reversed in round two. Values are medians of process
+medians in milliseconds. Setup and CPU-reference verification are excluded.
+Ordered IDs matched the generic CPU reference, with scores within `1e-5`.
+
+| Rows | Filter | CPU | Forced GPU | Auto |
+| ---: | --- | ---: | ---: | ---: |
+| 1,000 | Broad residual | 0.310 | 0.381 | 0.317 |
+| 10,000 | Broad residual | 1.628 | 0.937 | 1.407 |
+| 50,000 | Broad residual | 5.446 | 7.252 | 3.432 |
+| 1,000 | Indexed scope + residual | 0.243 | 0.247 | 0.206 |
+| 10,000 | Indexed scope + residual | 0.454 | 0.302 | 0.389 |
+| 50,000 | Indexed scope + residual | 0.592 | 0.467 | 0.399 |
+
+The host also serves application traffic; competing load was not controlled.
+Forced and automatic GPU use the same scoring path above the threshold, so
+their different 50,000-row timings show substantial scheduling variance, not
+a faster automatic kernel. First broad GPU queries took 159–219 ms including
+initialization/upload, versus 1.5–6.5 ms on CPU. Scoped cases ran afterward and
+could reuse the device/cache. These figures are not a universal optimum.
+This host uses a conservative 33,554,432-element crossover; the library default
+remains 8,388,608 and is configurable. Small searches retain the CPU path.
+
+The shader reads adjacent dimensions using 128 cooperating lanes per vector.
+Large residual filters use ordered parallel CPU preparation, with the GPU
+threshold rechecked on surviving rows. CPU fallback reuses filtered candidates.
+See [raw runs, p95/cold timings and limitations](benchmarks/hybrid-compute-2026-10-09.json).
+
 ### Adaptive scalar filter planning
 
 ```sh

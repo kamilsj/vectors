@@ -21,10 +21,14 @@ struct ScanResult {
 @group(0) @binding(4) var<storage, read> query: array<f32>;
 @group(0) @binding(5) var<uniform> parameters: Parameters;
 @group(0) @binding(6) var<storage, read_write> results: array<ScanResult>;
+var<workgroup> partial_scores: array<f32, 128>;
 
 @compute @workgroup_size(128)
-fn scan(@builtin(global_invocation_id) invocation: vec3<u32>) {
-    let candidate = invocation.x + invocation.y * parameters.dispatch_width;
+fn scan(@builtin(workgroup_id) group: vec3<u32>,
+        @builtin(local_invocation_index) lane: u32) {
+    // A workgroup cooperates on one vector so adjacent lanes read adjacent
+    // elements, rather than striding across many independent vector rows.
+    let candidate = group.x + group.y * parameters.dispatch_width;
     if candidate >= parameters.candidate_count {
         return;
     }
@@ -33,16 +37,12 @@ fn scan(@builtin(global_invocation_id) invocation: vec3<u32>) {
     if parameters.indexed != 0u {
         row = candidates[candidate];
     }
-    if row >= parameters.row_count || present[row] == 0u {
-        results[candidate] = ScanResult(0.0, 0u);
-        return;
-    }
-
+    let valid = row < parameters.row_count && present[row] != 0u;
     let base = row * parameters.dimensions;
     var score = 0.0;
-    var dimension = 0u;
+    var dimension = lane;
     loop {
-        if dimension >= parameters.dimensions {
+        if !valid || dimension >= parameters.dimensions {
             break;
         }
         let stored = vectors[base + dimension];
@@ -53,8 +53,26 @@ fn scan(@builtin(global_invocation_id) invocation: vec3<u32>) {
         } else {
             score += stored * requested;
         }
-        dimension += 1u;
+        dimension += 128u;
     }
+
+    partial_scores[lane] = score;
+    workgroupBarrier();
+    var stride = 64u;
+    loop {
+        if lane < stride {
+            partial_scores[lane] += partial_scores[lane + stride];
+        }
+        workgroupBarrier();
+        stride /= 2u;
+        if stride == 0u { break; }
+    }
+    if lane != 0u { return; }
+    if !valid {
+        results[candidate] = ScanResult(0.0, 0u);
+        return;
+    }
+    score = partial_scores[0];
 
     if parameters.metric == 0u {
         score = sqrt(score);

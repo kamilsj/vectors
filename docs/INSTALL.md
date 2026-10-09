@@ -538,12 +538,12 @@ test against your installed binary:
 ```sh
 WGPU_BACKEND=vulkan python3 scripts/release_smoke.py \
   --server "$HOME/.local/bin/vectors-server" \
-  --expected-version v0.11.0 --exercise-gpu
+  --expected-version v0.11.1 --exercise-gpu
 ```
 
 The test creates a temporary authenticated server and database. It compares
-20 SQL/typed searches in required-GPU mode with CPU results, including four
-metrics, indexed filters, membership lists, NULL vectors and tie ordering.
+36 SQL/typed searches in both required-GPU and automatic modes with CPU results, including four
+metrics, indexed and residual filters, membership lists, NULL vectors and tie ordering.
 It fails if the feature, adapter or shader execution is unavailable. It does
 not change a running server's compute policy or data. `--require-gpu` checks
 only that GPU support was compiled in; the authenticated server settings API

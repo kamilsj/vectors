@@ -362,10 +362,18 @@ With the optional `gpu` Cargo feature, a compute policy may send eligible large
 scans through wgpu. `auto` requires at least `gpu_min_elements` candidate vector
 elements, initializes a high-performance adapter lazily, and returns to the CPU
 path if no adapter is available or a device/cache limit is exceeded. `gpu`
-reports those conditions as errors. GPU scoring is currently eligible only
-when no residual predicate requires row-level expression evaluation; a filter
-fully covered by a scalar index is eligible because its candidate list is
-already exact.
+reports those conditions as errors. In forced `gpu` mode, residual predicates
+are evaluated on CPU before scoring and only matching row IDs reach the GPU.
+This preserves scope filtering for profile checks and turn exclusions. `auto`
+prefilters when candidate work reaches the GPU threshold and rechecks that
+threshold on actual matches. Small searches retain the direct CPU path. CPU
+fallback reuses filtered IDs without evaluating residual predicates again.
+
+Each GPU workgroup assigns 128 lanes to one vector. Lanes read adjacent
+elements and combine partial scores in workgroup memory. The two-dimensional
+dispatch grid assigns one workgroup per candidate; NULL and indexed candidates
+retain their source row positions. Large CPU prefilter batches collect matches
+in source order before GPU scoring, preserving stable ties.
 
 Dense GPU columns are cached by storage generation in an LRU bounded by
 `gpu_cache_bytes`. Upload walks the append chunks once per generation and splits
