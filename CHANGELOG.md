@@ -12,6 +12,16 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+### Changed
+
+### Removed
+
+### Fixed
+
+## 0.11.3 - 2026-10-09
+
+### Added
+
 - Schema-aware SQL autocomplete with table and column suggestions, join aliases,
   quoted identifiers, supported vector functions, and keyboard navigation.
 - A bounded Connections card in Data: browse linked tables and open join queries
@@ -24,9 +34,10 @@ uses that section as the curated introduction to the GitHub release notes.
 - Tab leaves the SQL editor when suggestions are closed, allowing keyboard-only
   navigation without trapping focus.
 
-### Removed
-
 ### Fixed
+
+- Installer regression checks allow slower process startup on macOS CI runners
+  while retaining updater-lock and interruption assertions.
 
 ## 0.11.2 - 2026-10-09
 

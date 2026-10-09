@@ -52,8 +52,8 @@ New to the project? The [guided tutorial](docs/TUTORIAL.md) covers installation,
 every shell command, the web console, SQL and typed API examples, persistence,
 GPU selection, production batching, and troubleshooting.
 
-Version **0.11.2** overlaps GPU scoring with CPU result selection using bounded
-asynchronous batches, including filtered Saywit message searches.
+Version **0.11.3** adds schema-aware SQL autocomplete and an interactive
+Connections card, with a simpler console and keyboard navigation.
 The [PDF upload and RAG chat lab](docs/PDF_RAG_LAB.md) supports folder imports,
 cited answers, retrieval diagnostics and repeatable corpus tests.
 The [chatbot and voicebot guide](docs/CHATBOTS.md) covers conversational search,
@@ -72,9 +72,10 @@ install both binaries for the current user, start a durable server, and open
 the web console when a desktop is available. Releases support Linux x86-64 and
 ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
-[v0.11.2](https://github.com/kamilsj/vectors/releases/tag/v0.11.2) pipelines large
-GPU searches: the GPU scores the next batch while the CPU ranks completed
-results. At most two result batches are resident. Small automatic searches
+[v0.11.3](https://github.com/kamilsj/vectors/releases/tag/v0.11.3) includes the
+updated console and GPU-enabled binaries. Large GPU searches use a pipeline:
+the GPU scores the next batch while the CPU ranks completed results. At most
+two result batches are resident. Small automatic searches
 retain the CPU path. See the [benchmarks](docs/BENCHMARKS.md) for measurements
 on an NVIDIA RTX 4000 SFF Ada and their limits.
 Run the installer below with `--restart` (PowerShell: `-Restart`) to upgrade a
@@ -307,7 +308,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.11.2 | in-memory SQL vector database
+vectors 0.11.3 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```

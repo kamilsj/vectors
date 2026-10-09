@@ -228,7 +228,10 @@ class UpdaterTests(unittest.TestCase):
 
     @staticmethod
     def wait_for(path, process):
-        deadline = time.monotonic() + 5
+        # Shared macOS runners can take several seconds to start the fixture
+        # Python processes. Wait for its readiness marker, not a five-second
+        # performance target; the lock and interruption assertions stay intact.
+        deadline = time.monotonic() + 30
         while not path.exists():
             if process.poll() is not None:
                 raise AssertionError("Updater exited before reaching fixture installer")

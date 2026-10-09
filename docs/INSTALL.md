@@ -538,7 +538,7 @@ test against your installed binary:
 ```sh
 WGPU_BACKEND=vulkan python3 scripts/release_smoke.py \
   --server "$HOME/.local/bin/vectors-server" \
-  --expected-version v0.11.2 --exercise-gpu
+  --expected-version v0.11.3 --exercise-gpu
 ```
 
 The test creates a temporary authenticated server and database. It compares
