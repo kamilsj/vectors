@@ -14,6 +14,9 @@ uses that section as the curated introduction to the GitHub release notes.
 
 - A filter-planning benchmark with exact result comparisons at 20,000 and
   100,000 units, plus regression coverage for reordered filters and unique keys.
+- GPU feature checks for release binaries and installed archives, plus required
+  Vulkan execution tests on Linux x86-64 and ARM64. The smoke harness compares
+  SQL and typed GPU searches with CPU results across all four metrics.
 
 ### Changed
 

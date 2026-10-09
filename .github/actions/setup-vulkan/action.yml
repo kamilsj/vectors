@@ -1,0 +1,22 @@
+name: Set up software Vulkan
+description: Select Mesa Lavapipe to exercise GPU shaders on Linux runners without hardware GPUs
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+        python3 - <<'PY'
+        import os
+        from pathlib import Path
+        drivers = list(Path('/usr/share/vulkan/icd.d').glob('lvp*.json'))
+        if len(drivers) != 1:
+            raise SystemExit(f'Expected one Lavapipe ICD, found {drivers}')
+        runtime = Path(os.environ['RUNNER_TEMP']) / 'vectors-vulkan-runtime'
+        runtime.mkdir(mode=0o700, exist_ok=True)
+        with open(os.environ['GITHUB_ENV'], 'a') as output:
+            output.write(f'WGPU_BACKEND=vulkan\nVK_DRIVER_FILES={drivers[0]}\n')
+            output.write(f'VK_ICD_FILENAMES={drivers[0]}\nXDG_RUNTIME_DIR={runtime}\n')
+        PY

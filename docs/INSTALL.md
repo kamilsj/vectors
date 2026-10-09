@@ -517,3 +517,49 @@ cargo build --release --locked
 
 The executables are written to `target/release`. Add `--features gpu` to match
 the optional GPU support included in official release archives.
+
+## Linux GPU support
+
+Official Linux x86-64 and ARM64 archives include the `gpu` feature and use
+Vulkan through [wgpu](https://wgpu.rs/). Install a Vulkan loader and a Vulkan
+driver compatible with your GPU. CUDA is not used by this backend. Containers
+also need access to the host GPU devices and matching driver libraries.
+
+Start with automatic selection:
+
+```sh
+vectors-server --data-dir ./vectors-data --compute auto
+```
+
+`auto` uses the GPU for eligible large scans and can fall back to CPU. To verify
+the device rather than accept fallback, use the repository's isolated smoke
+test against your installed binary:
+
+```sh
+WGPU_BACKEND=vulkan python3 scripts/release_smoke.py \
+  --server "$HOME/.local/bin/vectors-server" \
+  --expected-version v0.11.0 --exercise-gpu
+```
+
+The test creates a temporary authenticated server and database. It compares
+20 SQL/typed searches in required-GPU mode with CPU results, including four
+metrics, indexed filters, membership lists, NULL vectors and tie ordering.
+It fails if the feature, adapter or shader execution is unavailable. It does
+not change a running server's compute policy or data. `--require-gpu` checks
+only that GPU support was compiled in; the authenticated server settings API
+reports this as `compute.gpu_enabled`, not as proof of an active GPU.
+
+Both Linux release targets and CI run the execution check with Mesa's
+[Lavapipe software Vulkan driver](https://docs.mesa3d.org/sourcetree.html).
+That verifies the shader path on runners without GPUs; it does not measure
+hardware acceleration. Release and installation checks also reject binaries
+built without the GPU feature. For a GPU-enabled source build, use:
+
+```sh
+cargo build --release --locked --features gpu
+```
+
+The [Linux GPU validation record](benchmarks/linux-gpu-2026-10-09.json) records
+direct NVIDIA RTX 4000 SFF Ada and Lavapipe checks on Ubuntu 26.04.1, including
+binary hashes, score tolerances and tests that reject a missing adapter or a
+build without GPU support.

@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-09",
+  "purpose": "Linux GPU compatibility and correctness, not a performance benchmark",
+  "source_commit": "29c674c37840ae63e5d2c7745122a725b7d501ef",
+  "server_version": "0.11.0",
+  "platform": {
+    "os": "Ubuntu 26.04.1 LTS",
+    "architecture": "x86_64",
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "1.98.1 (797e8a9bc 2026-08-05)",
+    "gpu": "NVIDIA RTX 4000 SFF Ada Generation",
+    "nvidia_driver": "595.91.07",
+    "vulkan_loader": "1.4.341.0-1",
+    "mesa_vulkan_drivers": "26.0.8-1ubuntu0.3"
+  },
+  "build": {
+    "command": "CARGO_BUILD_JOBS=4 nice -n 10 cargo build --release --locked --features gpu --bins",
+    "elapsed_seconds": 92,
+    "vectors_sha256": "1532d99bff4da2d8527ca673c8a26ba88e74cddd0d450d5139a0bb4987b9189b",
+    "vectors_server_sha256": "60ff12f350689cf0ea469052363f8a3735dea08a1872e9662880368b5cb6f961"
+  },
+  "harness": {
+    "path": "scripts/release_smoke.py",
+    "sha256": "258f0ba62f22484eaf32c44d2114bd97da0c4acc1f62294eac0ded9f8094ae77",
+    "arguments": "--server <binary> --expected-version v0.11.0 --exercise-gpu",
+    "rows": 258,
+    "dimensions": 129,
+    "insertion_batch_size": 100,
+    "query_comparisons_per_run": 20,
+    "metrics": ["cosine", "l2", "squared_l2", "dot_product"],
+    "coverage": ["SQL", "typed vector search", "unfiltered scans", "indexed filters", "indexed IN conjunctions", "NULL vectors", "tie order", "durable CPU-to-GPU restart"],
+    "assertions": {
+      "compute_policy": "gpu, no automatic CPU fallback",
+      "schema_row_ids_order_and_rows_examined": "exact CPU parity",
+      "score_relative_tolerance": 0.00001,
+      "score_absolute_tolerance": 0.000001
+    }
+  },
+  "runs": [
+    {
+      "binary": "installed v0.11.0 Linux release server",
+      "binary_sha256": "ac3cdcab0d602a990e20d9e591526e9b5bfeac1ce60d6743df4d72e22358b04c",
+      "driver": "NVIDIA Vulkan",
+      "result": "PASS: release API checks, compiled GPU feature and all 20 GPU comparisons"
+    },
+    {
+      "binary": "new Linux build from source_commit",
+      "environment": {
+        "WGPU_BACKEND": "vulkan",
+        "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+        "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/nvidia_icd.json"
+      },
+      "result": "PASS: release API checks, compiled GPU feature and all 20 GPU comparisons"
+    },
+    {
+      "binary": "new Linux build from source_commit",
+      "environment": {
+        "WGPU_BACKEND": "vulkan",
+        "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/lvp_icd.json",
+        "VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/lvp_icd.json"
+      },
+      "result": "PASS: release API checks, compiled GPU feature and all 20 GPU comparisons"
+    }
+  ],
+  "negative_checks": [
+    "A CPU-only binary with --require-gpu exited 1 with: release binary was built without GPU support",
+    "A GPU-enabled Linux binary restricted to a nonexistent Vulkan ICD with --exercise-gpu exited 1 with: GPU compute is unavailable: no compatible hardware adapter"
+  ],
+  "isolation": "Separate temporary authenticated server and synthetic database; no provider calls or production data; live Saywit Vectors process remained active with its original PID and CPU policy.",
+  "limits": [
+    "Direct hardware execution was tested on Linux x86_64 with one NVIDIA GPU, not on ARM64 or every GPU vendor.",
+    "Lavapipe is software Vulkan and establishes shader correctness, not GPU acceleration or throughput.",
+    "The local Ubuntu 26.04 test build is not a new published release or an older-distribution ABI compatibility check.",
+    "Linux x86_64 and ARM64 release builds previously passed --features gpu compilation in release run 37889586890; the new workflow adds required execution checks."
+  ]
+}

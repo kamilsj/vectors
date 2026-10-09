@@ -65,6 +65,17 @@ jobs:
           python scripts/release_smoke.py
           --server target/${{ matrix.target }}/release/vectors-server${{ runner.os == 'Windows' && '.exe' || '' }}
           --expected-version ${{ github.ref_name }}
+          --require-gpu
+      - name: Set up Linux Vulkan test driver
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/setup-vulkan
+      - name: Execute Linux GPU searches
+        if: runner.os == 'Linux'
+        run: >-
+          python3 scripts/release_smoke.py
+          --server target/${{ matrix.target }}/release/vectors-server
+          --expected-version ${{ github.ref_name }}
+          --exercise-gpu
       - name: Verify Unix binaries
         if: runner.os != 'Windows'
         shell: bash
@@ -194,7 +205,7 @@ jobs:
           curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$VECTORS_VERSION/install.sh" | sh
           "$VECTORS_INSTALL_DIR/vectors" --version
           "$VECTORS_INSTALL_DIR/vectors-server" --version
-          python scripts/release_smoke.py --server "$VECTORS_INSTALL_DIR/vectors-server" --expected-version "$VECTORS_VERSION"
+          python scripts/release_smoke.py --server "$VECTORS_INSTALL_DIR/vectors-server" --expected-version "$VECTORS_VERSION" --require-gpu
       - name: Verify Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -208,4 +219,4 @@ jobs:
           & ([scriptblock]::Create((irm "https://github.com/${{ github.repository }}/releases/download/$env:VECTORS_VERSION/install.ps1")))
           & "$env:RUNNER_TEMP\vectors-bin\vectors.exe" --version
           & "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --version
-          python scripts/release_smoke.py --server "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --expected-version "$env:VECTORS_VERSION"
+          python scripts/release_smoke.py --server "$env:RUNNER_TEMP\vectors-bin\vectors-server.exe" --expected-version "$env:VECTORS_VERSION" --require-gpu

@@ -75,7 +75,8 @@ class API:
 
 @contextlib.contextmanager
 def running_server(binary, directory, timeout, expected_version, *,
-                   environment_overrides=None, extra_args=(), sensitive_values=()):
+                   environment_overrides=None, extra_args=(), sensitive_values=(),
+                   compute="cpu", require_gpu=False):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -102,7 +103,7 @@ def running_server(binary, directory, timeout, expected_version, *,
                   *(environment_overrides or {}).values())
     with tempfile.TemporaryFile() as log:
         process = subprocess.Popen(
-            [str(binary), "--port", str(port), "--compute", "cpu",
+            [str(binary), "--port", str(port), "--compute", compute,
              "--data-dir", str(directory / "data"), *extra_args],
             cwd=directory, env=environment, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         )
@@ -126,6 +127,10 @@ def running_server(binary, directory, timeout, expected_version, *,
             # if another process happened to claim the selected ephemeral port.
             settings = api.request("/v1/settings/server")
             require(settings.get("authentication") is True, "temporary API authentication is missing")
+            require(settings["compute"]["device"] == compute, "unexpected compute policy")
+            if require_gpu:
+                require(settings["compute"].get("gpu_enabled") is True,
+                        "release binary was built without GPU support")
             api.request("/v1/tables", authenticated=False, status=401)
             yield api
         except BaseException:
@@ -182,8 +187,8 @@ def check_assets(api):
             require(marker in asset, f"{path}: embedded UI is missing {marker!r}; rebuild the release")
 
 
-def sql(api, statement):
-    return api.request("/v1/sql", {"sql": statement})["results"]
+def sql(api, statement, *, timeout=5):
+    return api.request("/v1/sql", {"sql": statement}, timeout=timeout)["results"]
 
 
 def check_apis(api):
@@ -351,7 +356,61 @@ def check_provider_settings(api, *, openai, voyage, sensitive_values):
             "settings responses exposed a provider credential")
 
 
-def run(binary, expected_version, timeout):
+def check_gpu_execution(binary, expected_version, timeout):
+    """Compare CPU and required-GPU execution; auto fallback cannot pass this check."""
+    with tempfile.TemporaryDirectory(prefix="vectors-gpu-smoke-") as temporary:
+        directory = Path(temporary)
+        reference = {}
+        query = [1, 0, 0] + [0] * 126
+        for compute in ("cpu", "gpu"):
+            with running_server(binary, directory, timeout, expected_version,
+                                compute=compute, require_gpu=True) as api:
+                if compute == "cpu":
+                    sql(api, "CREATE TABLE gpu_smoke (id INTEGER PRIMARY KEY, category TEXT, "
+                             "embedding VECTOR(129)); CREATE INDEX gpu_category ON gpu_smoke(category)")
+                    rows = [{"id": index, "category": "keep" if index % 3 else "other",
+                             "embedding": [1, index / 64, 0.25] + [0] * 126}
+                            for index in range(257)]
+                    rows.append({"id": 257, "category": "keep", "embedding": None})
+                    for start in range(0, len(rows), 100):
+                        api.request("/v1/tables/gpu_smoke/rows", {"rows": rows[start:start + 100]})
+                for metric, function in (("cosine", "cosine_distance"), ("l2", "l2_distance"),
+                                         ("squared_l2", "squared_l2_distance"), ("dot_product", "dot_product")):
+                    for scope in ("all", "indexed", "membership"):
+                        predicate = {"all": "", "indexed": " WHERE category='keep'",
+                                     "membership": " WHERE category IN ('keep','other') AND id IN (1,4,128,255,257)"}[scope]
+                        order = "DESC" if metric == "dot_product" else "ASC"
+                        statement = (f"SELECT id,{function}(embedding,ARRAY{query}) AS distance FROM gpu_smoke"
+                                     f"{predicate} ORDER BY distance {order} LIMIT 300")
+                        result = sql(api, statement, timeout=timeout)[0]
+                        results = {f"sql/{metric}/{scope}": result}
+                        if scope != "membership":
+                            results[f"typed/{metric}/{scope}"] = api.request("/v1/vector/search", {
+                                "table": "gpu_smoke", "vector_column": "embedding", "query": query,
+                                "metric": metric, "select": ["id"], "limit": 300,
+                                "filters": [] if scope == "all" else [
+                                    {"column": "category", "operator": "eq", "value": "keep"}],
+                            }, timeout=timeout)
+                        for name, result in results.items():
+                            if compute == "cpu":
+                                require(bool(result["rows"]), f"{name}: reference returned no candidates")
+                                reference[name] = result
+                                continue
+                            expected = reference[name]
+                            require(result["columns"] == expected["columns"] and
+                                    result["rows_examined"] == expected["rows_examined"] and
+                                    [row[0] for row in result["rows"]] == [row[0] for row in expected["rows"]],
+                                    f"{name}: GPU candidates, ordering or schema differ from CPU")
+                            for actual_row, expected_row in zip(result["rows"], expected["rows"]):
+                                actual, expected_score = actual_row[1], expected_row[1]
+                                require(actual is expected_score if expected_score is None else
+                                        actual is not None and math.isclose(actual, expected_score, rel_tol=1e-5, abs_tol=1e-6),
+                                        f"{name}: GPU score differs from CPU at row {actual_row[0]}")
+        print(f"PASS required GPU execution: {len(reference)} SQL/typed searches match CPU, "
+              "four metrics, indexed filters, membership, NULLs, ties and durable restart")
+
+
+def run(binary, expected_version, timeout, *, require_gpu=False, exercise_gpu=False):
     version = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
                              check=True, timeout=timeout).stdout.strip()
     require(version == f"vectors-server {expected_version}",
@@ -366,7 +425,7 @@ def run(binary, expected_version, timeout):
         default_file = directory / ".env.local"
         write_key_file(default_file, f"OPENAI_API_KEY={openai_key}\nVOYAGE_API_KEY={voyage_key}\n")
         with running_server(binary, directory, timeout, expected_version,
-                            sensitive_values=sensitive_values) as api:
+                            sensitive_values=sensitive_values, require_gpu=require_gpu) as api:
             check_provider_settings(api, openai=True, voyage=True, sensitive_values=sensitive_values)
             check_assets(api)
             check_apis(api)
@@ -396,6 +455,10 @@ def run(binary, expected_version, timeout):
                             sensitive_values=sensitive_values) as api:
             check_provider_settings(api, openai=True, voyage=False, sensitive_values=sensitive_values)
     print(f"PASS vectors-server {expected_version}: embedded PDF/chat UI, capacity and chat APIs, authenticated SQL/vector/GraphRAG APIs, seed document caps, typed filters, relationships, join chains, restart, local provider key files and environment precedence")
+    if require_gpu:
+        print("PASS GPU backend is compiled into the server")
+    if exercise_gpu:
+        check_gpu_execution(binary, expected_version, timeout)
 
 
 def main():
@@ -403,6 +466,9 @@ def main():
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
     parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.0")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
+    parser.add_argument("--require-gpu", action="store_true", help="fail if the binary lacks the GPU feature")
+    parser.add_argument("--exercise-gpu", action="store_true",
+                        help="require a working adapter and compare GPU searches to CPU (implies --require-gpu)")
     args = parser.parse_args()
     version = args.expected_version.removeprefix("v")
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
@@ -413,7 +479,8 @@ def main():
     if not binary.is_file():
         parser.error(f"server binary does not exist: {binary}")
     try:
-        run(binary, version, args.timeout)
+        run(binary, version, args.timeout, require_gpu=args.require_gpu or args.exercise_gpu,
+            exercise_gpu=args.exercise_gpu)
     except (SmokeError, OSError, ValueError, KeyError, TypeError,
             subprocess.SubprocessError, http.client.HTTPException) as error:
         print(f"FAIL release smoke: {error}", file=sys.stderr)
