@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 r"""Smoke-test an extracted release binary using Python 3.10+ and synthetic provider keys.
 
-Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.3
-Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.3
+Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.4
+Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.4
 
 Only loopback HTTP and a temporary durable database are used; no provider calls
 are made. This checks embedded UI assets, not browser rendering. A nonzero exit
@@ -534,7 +534,7 @@ def run(binary, expected_version, timeout, *, require_gpu=False, exercise_gpu=Fa
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
-    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.3")
+    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.4")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
     parser.add_argument("--require-gpu", action="store_true", help="fail if the binary lacks the GPU feature")
     parser.add_argument("--exercise-gpu", action="store_true",

@@ -278,8 +278,19 @@ fn stronger_later_route_keeps_matching_depth_score_and_edges() {
     link(&db, "a", "answer", "weak", 0.01);
     link(&db, "bridge", "answer", "supports", 1.0);
     let mut query = request();
+    // Keep the answer outside direct rank fusion, so its score measures the
+    // retained graph route rather than the direct-match score lower bound.
+    query.candidate_limit = 3;
     query.seed_limit = 1;
     query.neighbor_limit = 2;
+    let weak_score = db
+        .graph_rag_candidates(query.clone())
+        .unwrap()
+        .candidates
+        .iter()
+        .find(|item| item.hit.document_id == "answer")
+        .unwrap()
+        .fusion_score;
     query.max_hops = 2;
     let result = db.graph_rag_candidates(query).unwrap();
     let answer = result
@@ -297,7 +308,7 @@ fn stronger_later_route_keeps_matching_depth_score_and_edges() {
             .collect::<Vec<_>>(),
         vec!["references", "supports"]
     );
-    assert!(answer.fusion_score > 1.0 / 64.0);
+    assert!(answer.fusion_score > weak_score);
 }
 
 #[test]

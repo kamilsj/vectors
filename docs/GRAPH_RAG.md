@@ -283,13 +283,26 @@ diversity selection can still compare stored candidate vectors. Optional Voyage
 reranking and chat answer generation continue to require their provider keys.
 
 Expansion combines decayed path strength with the target passage's cosine or
-BM25 query match. Structural path strength stays separate from query fit, so a
+BM25 query match. The same relative `vector_weight` and `lexical_weight` used
+for direct rank fusion also govern graph query fit: each channel's fit is
+multiplied by its weight divided by the larger weight, then the larger weighted
+fit is used. Multiplying both weights by the same factor does not change this fit.
+This keeps a keyword-priority lookup from admitting a semantically similar
+neighbor over exact-term evidence solely because of its vector similarity, and
+likewise preserves semantic priority for paraphrase queries.
+Graph-only passages no longer receive a minimum relevance bonus merely for
+being connected. This can change their scores and order, including with default
+weights; direct reciprocal rank fusion is unchanged.
+Structural path strength stays separate from query fit, so a
 weakly matching bridge can lead to useful context. Stronger paths found later
 can improve a candidate; zero-weight links contribute no retrieval evidence.
 When the seed budget permits, part of the candidate pool is reserved for graph
 context. Each hop retains at most `candidate_limit` frontier passages, after
 the per-passage `neighbor_limit` is applied. Stable chunk IDs break score ties.
 These bounds make traversal selective, not an exhaustive graph search.
+
+See [retrieval quality research and evaluation](GRAPH_RAG_QUALITY.md) for the
+controlled regression suite, its limits, and the next corpus-level experiments.
 
 When many chunks from one document dominate the starting matches, set
 `max_seeds_per_document` to an integer from 1 to 20, for example

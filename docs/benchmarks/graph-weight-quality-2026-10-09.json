@@ -1,0 +1,1907 @@
+{
+  "date": "2026-10-09",
+  "baseline_commit": "b5979874657b3043be3b1501f1b7b3240e1a0220",
+  "platform": "macOS-27.0-arm64-arm-64bit",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "suite": "competing graph paths with configured retrieval weights",
+  "cases": 90,
+  "provider_calls": 0,
+  "synthetic_embeddings": true,
+  "scope": "Controlled candidate-admission regression probes. Excludes embeddings, external reranking and generation; does not estimate production answer accuracy or large-corpus throughput.",
+  "method": "Two separately compiled release executables; identical fixture; five alternating before/after rounds, each with 100 warm repetitions per case. Times exclude build and ingestion. Microbenchmark results are machine- and workload-specific.",
+  "source_sha256": {
+    "src/engine/graph_traversal.rs": "3a6f8712c3e525d58fb4f92dd80ec02ad2f484df114c3ee8b6cc2c004dabfe6b",
+    "examples/benchmark_graph_quality.rs": "2e6d33ef63f9b12c7b1499dcfbda0fad9bba69fa333e7bb81a3965fa2b714df2",
+    "tests/fixtures/graph_rag_weight_cases.rs": "56ad729585206003947e14672c7fd9320a423e9a9cfdac6863911768d99948e3"
+  },
+  "binary_sha256": {
+    "before": "e0ce5c8921390acaa2bef22caeb4b21894165da8f0758234c20616b20b6ca9a3",
+    "after": "e814e04eb6a44a2fd4ce7a5298143ae43736a83869e600e0ddc99638a60bd461"
+  },
+  "before": {
+    "passed": 72,
+    "rounds_warm_us": [
+      {
+        "median": 8.0,
+        "p95": 16.917
+      },
+      {
+        "median": 7.832999999999999,
+        "p95": 15.375000000000002
+      },
+      {
+        "median": 7.875,
+        "p95": 15.459
+      },
+      {
+        "median": 8.042,
+        "p95": 15.333
+      },
+      {
+        "median": 7.832999999999999,
+        "p95": 14.792
+      }
+    ],
+    "median_of_round_medians_us": 7.875,
+    "median_of_round_p95_us": 15.375000000000002
+  },
+  "after": {
+    "passed": 90,
+    "rounds_warm_us": [
+      {
+        "median": 7.791,
+        "p95": 15.125
+      },
+      {
+        "median": 7.832999999999999,
+        "p95": 15.75
+      },
+      {
+        "median": 7.791999999999999,
+        "p95": 14.875
+      },
+      {
+        "median": 7.625,
+        "p95": 14.958
+      },
+      {
+        "median": 7.834,
+        "p95": 15.167
+      }
+    ],
+    "median_of_round_medians_us": 7.791999999999999,
+    "median_of_round_p95_us": 15.125
+  },
+  "probes": [
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "semantic",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "outgoing",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "semantic",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "incoming",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 1,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 1,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 2,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "lexical"
+      ],
+      "after_graph_documents": [
+        "lexical"
+      ]
+    },
+    {
+      "candidate_limit": 4,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 2,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic"
+      ],
+      "after_graph_documents": [
+        "semantic"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 10.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.4000000059604645,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "semantic",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 10.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": false,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_priority",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 10.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "balanced",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "lexical",
+      "hops": 3,
+      "lexical_weight": 1.0,
+      "neighbor_limit": 1,
+      "policy": "keyword_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 0.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "bridge1",
+        "lexical",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "lexical",
+        "bridge1",
+        "bridge2"
+      ]
+    },
+    {
+      "candidate_limit": 12,
+      "direction": "both",
+      "expected_document": "semantic",
+      "hops": 3,
+      "lexical_weight": 0.0,
+      "neighbor_limit": 1,
+      "policy": "semantic_only",
+      "semantic_fit": 0.949999988079071,
+      "vector_weight": 1.0,
+      "before_retained": true,
+      "after_retained": true,
+      "before_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ],
+      "after_graph_documents": [
+        "semantic",
+        "bridge1",
+        "bridge2"
+      ]
+    }
+  ]
+}

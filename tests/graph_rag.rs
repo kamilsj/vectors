@@ -1062,7 +1062,12 @@ fn graph_context_keeps_stronger_later_path_and_cycles_remain_bounded() {
         .find(|candidate| candidate.hit.document_id == "z")
         .unwrap();
     assert_eq!(context.hit.depth, 1);
-    // The stronger path comes from the second seed (rank 2). This
-    // orthogonal passage receives the query-affinity floor of 0.2.
-    assert!((context.fusion_score - 0.2 * 0.5 / 62.0).abs() < 1e-12);
+    // Keep the stronger path from the second seed even though this orthogonal
+    // passage has no query relevance and must not receive an artificial bonus.
+    assert_eq!(context.fusion_score, 0.0);
+    let path = context.retrieval_path.as_ref().unwrap();
+    assert_eq!(path.seed_chunk_id, "1:b:0");
+    assert_eq!(path.edges.len(), 1);
+    assert_eq!(path.edges[0].kind, "supports");
+    assert_eq!(path.edges[0].weight, 1.0);
 }

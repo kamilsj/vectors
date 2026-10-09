@@ -213,10 +213,17 @@ impl GraphTraversal<'_> {
                     } else {
                         0.0
                     };
-                    let query_fit = 0.2 + 0.8 * vector_fit.max(lexical_fit);
+                    // Honor the same channel priorities as direct rank fusion.
+                    // Normalize by the larger weight so only the ratio matters.
+                    // Structural strength already lets zero-fit bridges advance;
+                    // a relevance floor would let those bridges displace useful
+                    // deeper evidence when the final context budget is tight.
+                    let weight_scale = request.vector_weight.max(request.lexical_weight);
+                    let weighted_fit = (vector_fit * (request.vector_weight / weight_scale))
+                        .max(lexical_fit * (request.lexical_weight / weight_scale));
                     let score = CandidateScore {
                         lexical: original.lexical,
-                        fusion: original.fusion.max(strength * query_fit),
+                        fusion: original.fusion.max(strength * weighted_fit),
                     };
                     let mut trace = source.trace;
                     trace.edges[trace.len] = edge_index;

@@ -18,6 +18,22 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Fixed
 
+## 0.11.4 - 2026-10-09
+
+### Added
+
+- A reproducible GraphRAG quality benchmark covering 90 competing-path cases
+  across retrieval weights, directions, and up to three hops, plus a research
+  note with measured results and corpus-evaluation recommendations.
+
+### Fixed
+
+- GraphRAG expansion respects relative vector/keyword weights when admitting
+  linked evidence. A lower-priority channel can no longer override those weights
+  at graph hops. Removed the artificial relevance bonus for zero-fit bridge
+  passages, so useful deeper evidence can occupy a tight final context budget.
+  Structural traversal and direct hybrid ranking are preserved.
+
 ## 0.11.3 - 2026-10-09
 
 ### Added

@@ -11,7 +11,7 @@ browser's secure cryptography API. Folder selection depends on browser support.
 
 ## Set up a collection
 
-Start the local 0.11.3 build from the repository, then open
+Start the local 0.11.4 build from the repository, then open
 <http://127.0.0.1:8081>:
 
 ```sh

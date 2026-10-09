@@ -193,6 +193,14 @@ applying each hop's candidate-width cap. Per-source distinct-neighbor limits,
 at most three hops, and a maximum 100-candidate beam bound exploration. Scores
 combine decayed path strength and target cosine/BM25 fit; structural strength
 is retained separately so low-relevance bridges can reach useful passages.
+Target fit applies relative retrieval weights using
+`max(vector_fit * vector_weight / max_weight, lexical_fit * lexical_weight / max_weight)`
+without a minimum relevance bonus for being connected. Weight ratios are computed
+before multiplying fits to avoid unnecessary underflow with small common weights.
+Zero-fit bridges still advance using structural strength, but cannot outrank
+positive-fit evidence through an artificial score floor. Graph-context scores and
+ordering can change even at default weights; direct reciprocal rank fusion and
+traversal bounds are unchanged.
 Later stronger paths can improve candidates, zero-weight edges do not propagate
 retrieval evidence, and stable IDs break ties. Traversed bridges need not appear
 in the bounded candidate pool or final selected context. This is selective
