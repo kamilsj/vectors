@@ -67,6 +67,21 @@ to 10,000,000 rows subject to available memory; GraphRAG collections retain thei
 
 ## Verify the actual adapter
 
+Large eligible searches pipeline GPU scoring with CPU result selection. To
+reproduce the measured RTX 4000 host configuration:
+
+```sh
+RAYON_NUM_THREADS=8 VECTORS_GPU_CACHE_BYTES=4294967296 \
+VECTORS_GPU_MIN_ELEMENTS=33554432 vectors-server \
+  --bind 127.0.0.1:8097 --data-dir /path/to/private/vectors-data --compute auto
+```
+
+The 4 GiB value is a cache budget allocated on demand, not a fixed reservation
+or a limit on total driver VRAM usage. Small chat scopes continue on CPU. Large
+scans retain GPU scoring while the CPU consumes completed batches; forcing all
+competing large scans onto CPU was slower on this host. See the [measured
+concurrency results](BENCHMARKS.md#parallel-cpugpu-batches).
+
 Build the updated server, then use Saywit's Python environment:
 
 ```sh

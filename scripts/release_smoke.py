@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 r"""Smoke-test an extracted release binary using Python 3.10+ and synthetic provider keys.
 
-Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.1
-Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.1
+Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.2
+Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.2
 
 Only loopback HTTP and a temporary durable database are used; no provider calls
 are made. This checks embedded UI assets, not browser rendering. A nonzero exit
@@ -421,6 +421,61 @@ def check_gpu_execution(binary, expected_version, timeout):
               "four metrics, indexed/residual filters, membership, NULLs, ties and durable restart")
 
 
+def check_gpu_pipeline(binary, expected_version, timeout):
+    """Cross three result batches, including an error after partial consumption."""
+    from concurrent.futures import ThreadPoolExecutor
+    count = 65553
+    query = [1, 0, 0] + [0] * 126
+    ordinary = [0, 1, 0] + [0] * 126
+    winners = {7, 32773, 65548}
+    nulls = {11, 32770, 65551}
+    reference = {}
+    with tempfile.TemporaryDirectory(prefix="vectors-gpu-pipeline-") as temporary:
+        directory = Path(temporary)
+        for compute in ("cpu", "gpu", "auto"):
+            with running_server(binary, directory, timeout, expected_version,
+                                compute=compute, require_gpu=True,
+                                environment_overrides={"VECTORS_GPU_MIN_ELEMENTS": "1",
+                                                       "VECTORS_MAX_CONCURRENT_DATABASE_TASKS": "8",
+                                                       "VECTORS_HTTP_MAX_BLOCKING_THREADS_PER_WORKER": "8"}) as api:
+                if compute == "cpu":
+                    sql(api, "CREATE TABLE pipeline (id INTEGER PRIMARY KEY, scope TEXT, embedding VECTOR(129)); "
+                             "CREATE INDEX pipeline_scope ON pipeline(scope)")
+                    for start in range(0, count, 512):
+                        api.request("/v1/tables/pipeline/rows", {"rows": [
+                            {"id": i, "scope": "keep" if i % 5 else "other",
+                             "embedding": None if i in nulls else query if i in winners else ordinary}
+                            for i in range(start, min(start + 512, count))
+                        ]}, timeout=timeout)
+                statements = []
+                for function in ("cosine_distance", "l2_distance", "squared_l2_distance", "dot_product"):
+                    for predicate in ("", " WHERE scope='keep' AND id<>4"):
+                        order = "DESC" if function == "dot_product" else "ASC"
+                        statement = (f"SELECT id,{function}(embedding,ARRAY{query}) AS distance FROM pipeline"
+                                     f"{predicate} ORDER BY distance {order} LIMIT 20")
+                        statements.append(statement)
+                        result = sql(api, statement, timeout=timeout)[0]
+                        if compute == "cpu":
+                            reference[statement] = result
+                        else:
+                            require(result == reference[statement],
+                                    f"{compute}: pipeline candidate mapping, ties or scores changed")
+                # Zero norm in the last batch must invalidate earlier partial results.
+                sql(api, f"UPDATE pipeline SET embedding=ARRAY{[0] * 129} WHERE id={count - 1}")
+                failed = api.request("/v1/sql", {"sql": statements[0]}, status=400, timeout=timeout)
+                require("zero" in json.dumps(failed).lower(), "pipeline swallowed a late zero-norm error")
+                sql(api, f"UPDATE pipeline SET embedding=ARRAY{ordinary} WHERE id={count - 1}")
+                require(sql(api, statements[0], timeout=timeout)[0] == reference[statements[0]],
+                        "pipeline did not recover correctly after a late error")
+                if compute == "auto":
+                    with ThreadPoolExecutor(max_workers=4) as pool:
+                        results = list(pool.map(lambda _: sql(api, statements[0], timeout=timeout)[0], range(12)))
+                    require(all(result == reference[statements[0]] for result in results),
+                            "concurrent automatic CPU/GPU searches changed results")
+    print("PASS GPU pipeline: 65,553 rows, batch boundaries, indexed/residual mapping, four metrics, "
+          "NULLs, stable ties, late error/recovery, and concurrent automatic queries")
+
+
 def run(binary, expected_version, timeout, *, require_gpu=False, exercise_gpu=False):
     version = subprocess.run([str(binary), "--version"], capture_output=True, text=True,
                              check=True, timeout=timeout).stdout.strip()
@@ -470,12 +525,13 @@ def run(binary, expected_version, timeout, *, require_gpu=False, exercise_gpu=Fa
         print("PASS GPU backend is compiled into the server")
     if exercise_gpu:
         check_gpu_execution(binary, expected_version, timeout)
+        check_gpu_pipeline(binary, expected_version, timeout)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
-    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.1")
+    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.2")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
     parser.add_argument("--require-gpu", action="store_true", help="fail if the binary lacks the GPU feature")
     parser.add_argument("--exercise-gpu", action="store_true",

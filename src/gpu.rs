@@ -10,7 +10,10 @@ use crate::engine::{DenseVectorColumn, FastVectorMetric};
 use crate::Vector;
 
 const WORKGROUP_SIZE: u32 = 128;
-const MAX_READBACK_BYTES: usize = 32 * 1024 * 1024;
+// Two bounded batches overlap device scoring with CPU result selection. Keeping
+// batches row-sized also bounds CPU work before the next device submission.
+const PIPELINE_BATCH_ROWS: usize = 32 * 1024;
+const MAX_READBACK_BYTES: usize = 16 * 1024 * 1024;
 const REQUIRED_STORAGE_BINDINGS: u32 = 6;
 
 #[repr(C)]
@@ -31,6 +34,16 @@ struct GpuParameters {
 struct GpuResult {
     score: f32,
     state: u32,
+}
+
+struct PendingBatch {
+    readback: wgpu::Buffer,
+    submission: wgpu::SubmissionIndex,
+    completion: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    first_row: usize,
+    candidate_offset: usize,
+    candidate_count: usize,
+    candidates: Option<Vec<u32>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,7 +171,8 @@ impl GpuExecutor {
         let max_output_bytes = MAX_READBACK_BYTES
             .min(usize_from_u64(max_buffer_size))
             .min(usize_from_u64(max_storage_binding_size));
-        let max_candidates_per_batch = max_output_bytes / size_of::<GpuResult>();
+        let max_candidates_per_batch =
+            (max_output_bytes / size_of::<GpuResult>()).min(PIPELINE_BATCH_ROWS);
         if max_candidates_per_batch == 0 {
             return Err(GpuError::Unavailable(
                 "adapter cannot allocate a non-empty GPU result buffer".into(),
@@ -260,30 +274,44 @@ impl GpuExecutor {
                     usage: wgpu::BufferUsages::STORAGE,
                 });
 
+        let mut pending = None;
+        // Submit the successor before consuming the previous batch. The GPU can
+        // score it while the caller performs CPU top-k selection; no CPU thread
+        // is created per query and at most two result batches are resident.
+        let mut submit = |shard: &CachedColumnShard,
+                          candidates: Option<Vec<u32>>,
+                          offset: usize,
+                          count: usize|
+         -> Result<(), GpuError> {
+            let next = self.submit_batch(
+                shard,
+                candidates,
+                offset,
+                count,
+                metric,
+                query,
+                &query_buffer,
+                &placeholder_candidates,
+            )?;
+            if let Some(previous) = pending.replace(next) {
+                self.finish_batch(previous, &mut consume)?;
+            }
+            Ok(())
+        };
         match rows {
             None => {
                 for shard in &cached.shards {
                     let mut offset = 0;
                     while offset < shard.row_count {
                         let count = (shard.row_count - offset).min(self.max_candidates_per_batch);
-                        self.scan_batch(
-                            shard,
-                            None,
-                            offset,
-                            count,
-                            metric,
-                            query,
-                            &query_buffer,
-                            &placeholder_candidates,
-                            &mut consume,
-                        )?;
+                        submit(shard, None, offset, count)?;
                         offset += count;
                     }
                 }
             }
             Some(rows) => {
-                // Group only one bounded input window at a time. This avoids a
-                // second request-sized allocation for very large indexed scans.
+                // Group one bounded input window. Pending batches own only their
+                // local row mapping, never a request-sized candidate copy.
                 for window in rows.chunks(self.max_candidates_per_batch) {
                     let mut by_shard: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
                     for row in window {
@@ -297,50 +325,39 @@ impl GpuExecutor {
                         by_shard.entry(shard_index).or_default().push(local_row);
                     }
                     for (shard_index, candidates) in by_shard {
-                        let candidate_buffer =
-                            self.device
-                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                    label: Some("vectors indexed candidate rows"),
-                                    contents: bytemuck::cast_slice(&candidates),
-                                    usage: wgpu::BufferUsages::STORAGE,
-                                });
-                        self.scan_batch(
-                            &cached.shards[shard_index],
-                            Some(&candidates),
-                            0,
-                            candidates.len(),
-                            metric,
-                            query,
-                            &query_buffer,
-                            &candidate_buffer,
-                            &mut consume,
-                        )?;
+                        let count = candidates.len();
+                        submit(&cached.shards[shard_index], Some(candidates), 0, count)?;
                     }
                 }
             }
+        }
+        if let Some(last) = pending {
+            self.finish_batch(last, &mut consume)?;
         }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn scan_batch(
+    fn submit_batch(
         &self,
         shard: &CachedColumnShard,
-        candidates: Option<&[u32]>,
+        candidates: Option<Vec<u32>>,
         candidate_offset: usize,
         candidate_count: usize,
         metric: FastVectorMetric,
         query: &Vector,
         query_buffer: &wgpu::Buffer,
-        candidate_buffer: &wgpu::Buffer,
-        consume: &mut impl FnMut(usize, Option<f64>),
-    ) -> Result<(), GpuError> {
+        placeholder_candidates: &wgpu::Buffer,
+    ) -> Result<PendingBatch, GpuError> {
         if candidate_count == 0 || candidate_count > self.max_candidates_per_batch {
             return Err(GpuError::InvalidInput(format!(
                 "GPU batch contains {candidate_count} candidates"
             )));
         }
-        if candidates.is_some_and(|rows| rows.len() != candidate_count) {
+        if candidates
+            .as_ref()
+            .is_some_and(|rows| rows.len() != candidate_count)
+        {
             return Err(GpuError::InvalidInput(
                 "candidate buffer length does not match the GPU batch".into(),
             ));
@@ -401,6 +418,15 @@ impl GpuExecutor {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let candidate_buffer = candidates.as_ref().map(|rows| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vectors indexed candidate rows"),
+                    contents: bytemuck::cast_slice(rows),
+                    usage: wgpu::BufferUsages::STORAGE,
+                })
+        });
+        let candidate_buffer = candidate_buffer.as_ref().unwrap_or(placeholder_candidates);
         let layout = self.pipeline.get_bind_group_layout(0);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("vectors scan bindings"),
@@ -457,6 +483,32 @@ impl GpuExecutor {
         readback.map_async(wgpu::MapMode::Read, .., move |result| {
             let _ = sender.send(result);
         });
+        Ok(PendingBatch {
+            readback,
+            submission,
+            completion: receiver,
+            first_row: shard.first_row,
+            candidate_offset,
+            candidate_count,
+            candidates,
+        })
+    }
+
+    fn finish_batch(
+        &self,
+        batch: PendingBatch,
+        consume: &mut impl FnMut(usize, Option<f64>),
+    ) -> Result<(), GpuError> {
+        let PendingBatch {
+            readback,
+            submission,
+            completion,
+            first_row,
+            candidate_offset,
+            candidate_count,
+            candidates,
+        } = batch;
+        let candidates = candidates.as_deref();
         self.device
             .poll(wgpu::PollType::Wait {
                 submission_index: Some(submission),
@@ -468,7 +520,7 @@ impl GpuExecutor {
                     self.adapter_name
                 ))
             })?;
-        receiver
+        completion
             .recv()
             .map_err(|_| GpuError::Execution("readback callback was dropped".into()))?
             .map_err(|error| GpuError::Execution(format!("readback failed: {error}")))?;
@@ -490,13 +542,13 @@ impl GpuExecutor {
                         let row = candidates.map_or(candidate_offset + candidate, |rows| {
                             rows[candidate] as usize
                         });
-                        consume(shard.first_row + row, None);
+                        consume(first_row + row, None);
                     }
                     1 if result.score.is_finite() => {
                         let row = candidates.map_or(candidate_offset + candidate, |rows| {
                             rows[candidate] as usize
                         });
-                        consume(shard.first_row + row, Some(f64::from(result.score)));
+                        consume(first_row + row, Some(f64::from(result.score)));
                     }
                     2 => return Err(GpuError::ZeroNorm),
                     1 => {

@@ -71,6 +71,26 @@ storage format was removed. The [benchmark](BENCHMARKS.md#adaptive-scalar-filter
 compares the v0.11.0 baseline with the same query harness and exact outputs.
 These improvements change query cost, not semantic relevance or authorization.
 
+## Parallel CPU/GPU execution after v0.11.1
+
+The prior GPU executor waited for each batch, performed CPU top-k selection,
+and only then submitted the next batch. [wgpu 29 buffer mapping](https://docs.rs/wgpu/29.0.3/wgpu/struct.Buffer.html)
+supports asynchronous readback, while [device polling](https://docs.rs/wgpu/29.0.3/wgpu/struct.Device.html#method.poll)
+can wait for a specific submission. [NVIDIA's synchronization guidance](https://developer.nvidia.com/blog/advanced-api-performance-synchronization/)
+recommends reducing unnecessary waits and measuring useful overlap.
+
+Vectors now keeps at most two result batches in flight and submits the next
+batch before consuming the previous batch on CPU. Each batch owns its candidate
+mapping and readback buffer until completion. GPU errors discard partial query
+results; cache bounds, filtering and forced-GPU requirements remain intact.
+Small searches continue on CPU. This is a bounded CPU/GPU pipeline, not a claim
+that all database operations or multiple GPU kernels execute simultaneously.
+
+The benchmark compares the identical harness on the v0.11.1 baseline and the
+new engine, including four concurrent searches. The GPU cache budget is an
+explicit benchmark parameter. Production capacity still depends on the dense
+column fitting that budget; this work does not add out-of-core GPU streaming.
+
 ## Next stages and acceptance criteria
 
 1. **Atomic turn publication.** Add a per-turn generation/revision and an atomic

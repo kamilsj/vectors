@@ -7,6 +7,47 @@ with another database.
 
 ## Run the benchmark
 
+### Parallel CPU/GPU batches
+
+```sh
+RAYON_NUM_THREADS=8 cargo run --release --locked --features gpu --example benchmark_parallel_compute -- auto 250000 1024 4 100 4096
+```
+
+Measured on 2026-10-09, Ubuntu 26.04.1, NVIDIA RTX 4000 SFF Ada (20 GiB,
+driver 595.91.07), Rust 1.98.1. The identical harness runs on v0.11.1
+(`bfc220e`) and the pipelined engine. It uses 1,024-dimensional synthetic vectors,
+residual profile/ID-exclusion filters, eight Rayon workers, a 4 GiB GPU column-cache
+budget, and the same 33,554,432-element automatic crossover. Each process runs
+five warmups and 100 measured queries per worker. Three process pairs reverse
+their order in round two. Every query matches ordered CPU-reference IDs and
+scores within `1e-5`.
+
+Values are medians of the three runs. Timed queries include SQL parsing,
+filtering, scoring and top-k selection; fixture generation, initial upload,
+HTTP and model-provider latency are excluded. Throughput includes the small
+per-query correctness check; per-query latency ends before that check.
+
+| Vectors | Concurrent queries | Queries/s before → after | Median ms before → after | p95 ms before → after |
+| ---: | ---: | ---: | ---: | ---: |
+| 100,000 | 1 | 112.2 → 97.4 | 7.08 → 8.09 | 18.41 → 17.99 |
+| 100,000 | 4 | 234.2 → 283.4 | 16.25 → 11.68 | 23.71 → 24.97 |
+| 250,000 | 1 | 44.3 → 71.4 | 19.21 → 12.16 | 38.25 → 22.13 |
+| 250,000 | 4 | 101.9 → 137.0 | 36.20 → 25.84 | 56.23 → 48.74 |
+
+At 250,000 vectors and four concurrent queries, throughput improves by 34.5%.
+This is not a uniform speedup: the 100,000-vector single-query median increases,
+and that workload's concurrent p95 changes little. The host serves production
+traffic, which was not controlled. The unchanged 1,000-vector CPU control also
+varies materially (single-query median 0.39 → 0.31 ms), so those changes cannot
+be credited to GPU pipelining. Cold GPU queries still cost roughly 265–438 ms.
+
+GPU scoring of the next batch can overlap CPU top-k processing of the previous
+batch. At most two result batches of 32,768 candidates are resident. This does
+not split one dot product between CPU and GPU or promise continuous full GPU
+utilization. The cache is allocated on demand; its budget must fit each scored
+column. The library default remains 512 MiB. See [raw runs, hashes and caveats](benchmarks/parallel-compute-2026-10-09.json)
+and the [synchronization rationale](CHAT_SCALE_RESEARCH.md#parallel-cpugpu-execution-after-v0111).
+
 ### Cooperative CPU/GPU execution
 
 ```sh
@@ -481,9 +522,9 @@ Also state whether the column was warm in the GPU cache. `auto` is appropriate
 for deployment experiments, but it is not proof that a particular query ran on
 an accelerator because fallback is part of that policy.
 
-No GPU latency or throughput number is published here yet. A result belongs in
-this document only after repeat runs on named hardware establish a crossover
-and the neighbor-ID correctness check passes.
+The RTX 4000 measurements above include repeated warm and cold observations.
+They apply to the stated workload and host; production load and CPU/GPU
+scheduling cause substantial variance.
 
 ## CPU scan scheduling
 

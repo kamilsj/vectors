@@ -18,6 +18,24 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Fixed
 
+## 0.11.2 - 2026-10-09
+
+### Added
+
+- A concurrent CPU/GPU benchmark with per-query correctness checks, cold and
+  warm timings, throughput, and latency percentiles.
+- Required GPU pipeline checks across 65,553 vectors, including indexed and
+  residual filters, stable ties, NULLs, late errors, recovery and concurrent
+  automatic searches.
+
+### Changed
+
+- GPU scans submit the next bounded batch before CPU result selection consumes
+  the previous one. Device scoring and host top-k processing can run in parallel,
+  with at most two result batches resident and no per-query CPU thread creation.
+- Indexed batches retain their row mappings through asynchronous readback, and
+  errors invalidate the complete query even after earlier batches were consumed.
+
 ## 0.11.1 - 2026-10-09
 
 ### Added
