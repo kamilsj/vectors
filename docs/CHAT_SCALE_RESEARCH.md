@@ -49,6 +49,28 @@ subsequent upserts, exact search, checkpoint recovery and a forced server kill
 after an acknowledged deletion. The [cleanup benchmark](BENCHMARKS.md#chat-turn-cleanup)
 measures missing turns, real deletions and the existing delete-then-upsert cycle.
 
+## Adaptive scalar planning after v0.11.0
+
+Stanford's [Boolean query processing chapter](https://nlp.stanford.edu/IR-book/html/htmledition/processing-boolean-queries-1.html)
+describes ordering intersections by posting frequency and using different
+intersection strategies for highly unequal list lengths. This complements
+Qdrant's cardinality-aware filtering described above.
+
+Vectors now plans scalar candidates from borrowed index postings before
+allocating result rows. Intersections start with the smaller upper bound;
+larger predicates filter that set in place. Single-posting filters choose
+binary probes for sparse candidates or a linear merge for broad ones. Positive
+membership predicates share the same lookup builder as equality, and existing
+PRIMARY KEY/UNIQUE maps participate without an additional index. OR plans
+retain source row ordering and preserve residual predicates.
+
+This replaces the old separate equality/IN materializers and eager two-list
+intersection. General expression evaluation remains necessary for unsupported
+index predicates, SQL NULL semantics and expression errors. No public API or
+storage format was removed. The [benchmark](BENCHMARKS.md#adaptive-scalar-filter-planning)
+compares the v0.11.0 baseline with the same query harness and exact outputs.
+These improvements change query cost, not semantic relevance or authorization.
+
 ## Next stages and acceptance criteria
 
 1. **Atomic turn publication.** Add a per-turn generation/revision and an atomic

@@ -14,6 +14,13 @@ indexed `OR` expressions retain their complete predicate. NULL handling,
 `NOT IN`, row-dependent lists and incompatible types retain SQL semantics.
 No Saywit query, schema migration, reindex, or embedding change is required.
 
+Combined indexed filters now start with the smallest candidate set. For
+example, a specific `turn_id` can drive a search across hundreds of chat IDs
+without first copying and sorting the entire permitted chat scope. Stable
+unit-ID lookups also reuse the PRIMARY KEY index; no duplicate secondary index
+is needed. Broad filters and the adapter's ordinary chat-only scope have
+different costs: see the [planner measurements](BENCHMARKS.md#adaptive-scalar-filter-planning).
+
 ## Incremental indexing
 
 Saywit's turn indexer first deletes previous units by `turn_id`. Fully indexed

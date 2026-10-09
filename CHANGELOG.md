@@ -12,7 +12,19 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- A filter-planning benchmark with exact result comparisons at 20,000 and
+  100,000 units, plus regression coverage for reordered filters and unique keys.
+
 ### Changed
+
+- Scalar filters choose their smallest indexed candidate set before allocating
+  row lists. PRIMARY KEY and UNIQUE lookups reuse their maintained indexes;
+  selective intersections avoid copying broad chat/profile postings.
+
+### Removed
+
+- Separate equality and membership materializers and eager intersection code,
+  replaced by one scalar candidate planner for SQL, typed search and GraphRAG.
 
 ### Fixed
 

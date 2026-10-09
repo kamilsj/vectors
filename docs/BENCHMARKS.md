@@ -7,6 +7,57 @@ with another database.
 
 ## Run the benchmark
 
+### Adaptive scalar filter planning
+
+```sh
+RAYON_NUM_THREADS=4 cargo run --release --locked --example benchmark_index_planner -- 100000 1024 50
+```
+
+Measured on 2026-10-09, Apple M4 Max, 48 GiB RAM, macOS 27.0 arm64,
+Rust 1.99.0, release CPU build with default features. The baseline is v0.11.0
+at `078568a`. Separate source/target directories build the identical harness.
+Fixtures contain 20,000 or 100,000 SQL units, 1,024-dimensional synthetic
+vectors, eight units per turn, 1,000 chats, primary/unique unit IDs, and explicit
+chat, turn and profile indexes. About 91% of units have the active profile.
+
+Three independent process pairs alternate before/after execution order. Each
+query has five warm-ups and fifty timed repetitions. Timers cover parameter
+binding, cached SQL parsing, candidate planning, filtering, exact scoring and
+result construction. They exclude fixture loading, reference queries, HTTP,
+providers and persistence. Every repetition matches a full-scan/full-sort
+reference, including source-order vector ties and exact scores. Output digests
+also agree between all variants/processes at each scale.
+
+Results at **100,000 units** are medians of the three process medians/p95s:
+
+| Query | Before median / p95 (ms) | After median / p95 (ms) | Median speedup |
+| --- | ---: | ---: | ---: |
+| PRIMARY KEY equality | 2.036291 / 2.162459 | 0.002292 / 0.004917 | 888.43× |
+| UNIQUE membership, 2 matches | 12.708708 / 13.294416 | 0.003125 / 0.003500 | 4,066.79× |
+| Active profile AND one chat | 0.062958 / 0.068709 | 0.007459 / 0.009167 | 8.44× |
+| 500-chat scope AND one turn | 0.532583 / 0.597208 | 0.086542 / 0.104125 | 6.15× |
+| Active profile AND absent turn | 0.012041 / 0.013833 | 0.002875 / 0.003000 | 4.19× |
+| Active profile AND 500 chats, count | 0.760834 / 0.829709 | 0.691959 / 0.746292 | 1.10× |
+| Two-chat scope, residual profile, vector top-20 | 0.210375 / 0.224542 | 0.204708 / 0.221750 | 1.03× |
+| 500 chats AND one turn AND profile, vector top-20 | 0.711750 / 0.771250 | 0.233125 / 0.246167 | 3.05× |
+
+The large key-lookup ratios reflect replacing full-table scans with existing
+unique-key maps. They are not end-to-end chatbot throughput claims. Ordinary
+two-chat vector retrieval changes little; at 20,000 units its median increases
+from 0.153708 to 0.158208 ms (about 2.9%). The selective vector query at that
+scale improves from 0.333167 to 0.230084 ms. This is not a uniform speedup.
+
+[Raw samples, environment and hashes](benchmarks/index-planner-2026-10-09.json)
+include every operation at both scales. Regression coverage compares 720
+boolean filter combinations with full evaluation, verifies bounded candidate
+allocation, and checks NULLs, mixed numeric types, invalid expressions,
+mutation and durable recovery. The full suite passes 406 tests (two ignored).
+Clippy, the server smoke suite and the real Saywit transport check also pass.
+
+This validates local exact-query behavior at 100,000 SQL units, not semantic
+answer quality or ten-million-document capacity. See the
+[algorithm rationale](CHAT_SCALE_RESEARCH.md#adaptive-scalar-planning-after-v0110).
+
 ### Chat-turn cleanup
 
 ```sh
