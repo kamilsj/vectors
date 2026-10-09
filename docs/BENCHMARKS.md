@@ -7,6 +7,56 @@ with another database.
 
 ## Run the benchmark
 
+### Chat indexing upserts
+
+```sh
+RAYON_NUM_THREADS=4 cargo run --release --locked --example benchmark_chat_indexing -- 100000 1024 7
+```
+
+Measured on 2026-10-09, Apple M4 Max, 48 GiB RAM, macOS 27.0 arm64,
+Rust 1.99.0, release CPU build with default features. The baseline is `8c50968`.
+Both versions run the same harness against 20,000 and 100,000 existing SQL rows
+with 1,024-dimensional synthetic embeddings, stable unit/turn IDs, a profile,
+and chat/turn indexes. The initial rows share one chat; new and edited units
+move to a second chat. This also exercises removal from a large scalar-index
+bucket. Fixtures load in 512-row batches before measurement.
+
+Three independent process pairs alternate order. Each workload performs one
+warm-up and seven measured batches. Append adds fresh IDs, edit changes vectors
+for existing IDs, and replay resends identical units. Timers cover the typed
+engine call, including validation and index maintenance. Durable timings also
+include WAL encoding and fsync. Input generation, HTTP, provider calls, fixture
+loading and checkpoints are outside these timers. The durable fixture is
+checkpointed before measurement; measured writes remain below the automatic
+checkpoint threshold.
+
+Durable results with **100,000 existing units** (median of the three process
+medians/p95 values; each process's seven-sample p95 is its maximum):
+
+| Operation | Batch | Before median / p95 (ms) | After median / p95 (ms) | Median speedup |
+| --- | ---: | ---: | ---: | ---: |
+| Append | 8 | 59.031 / 83.250 | 4.009 / 4.937 | 14.73× |
+| Edit | 8 | 56.185 / 57.200 | 3.981 / 4.224 | 14.11× |
+| Replay | 8 | 55.618 / 56.671 | 3.936 / 4.186 | 14.13× |
+| Append | 128 | 110.576 / 112.350 | 4.770 / 4.997 | 23.18× |
+| Edit | 128 | 76.005 / 78.980 | 4.978 / 5.375 | 15.27× |
+| Replay | 128 | 76.989 / 78.054 | 4.811 / 4.974 | 16.00× |
+
+For comparison, an 8-unit durable append into the 20,000-row fixture falls
+from 14.698 to 3.976 ms. [Raw samples](benchmarks/chat-indexing-2026-10-09.json)
+include both scales, memory-only timings, environment, source hashes and
+distinct baseline/updated binary hashes. Both variants check result count and
+exact scoped ranking against a full-scan/full-sort reference, then repeat the
+check after durable recovery. Regression tests separately compare generated
+typed batches against the general SQL upsert path and verify atomic rejection,
+NULLs, unique-key swaps, snapshot isolation and GraphRAG cache invalidation.
+
+These are local synthetic indexing measurements, not production latency or
+semantic-recall guarantees. They establish progress at 100,000 SQL units,
+not ten million documents. GraphRAG's 10,000-chunk collection limit remains.
+See [Saywit indexing guidance](SAYWIT_COMPATIBILITY.md#incremental-indexing) for
+bounded batches, stable IDs, retries and application revision checks.
+
 ### Saywit scoped message search
 
 ```sh

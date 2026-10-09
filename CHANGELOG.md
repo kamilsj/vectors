@@ -12,11 +12,17 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- A repeatable chat-indexing benchmark covering append, edit and retry batches
+  with durable recovery and exact retrieval checks.
 - A Saywit adapter compatibility check against a temporary durable server and
   a reproducible benchmark for permission-scoped message retrieval.
 
 ### Changed
 
+- Typed upserts that retain their conflict key resolve conflicts through unique
+  indexes and apply validated row changes incrementally. Fresh chat units avoid
+  copying the existing table; edits rebuild only affected vector slabs. Scalar
+  edits still invalidate GraphRAG lexical/profile caches.
 - SQL `IN` filters use existing scalar indexes before exact vector ranking.
   Indexed conjuncts are no longer reevaluated for every candidate when other
   filters remain, speeding up Saywit chat scopes without changing results.

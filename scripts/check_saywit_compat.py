@@ -43,6 +43,12 @@ def main():
         ("answer-b", "team-b", "answer-turn-b", transport.PROFILE, second),
         ("quoted", "team-a' OR 1=1 --", "quoted-turn", transport.PROFILE, vector),
     ]
+    rows = [
+        {"id": identity, "chat_id": chat, "turn_id": turn, "source_id": index + 1,
+         "profile": profile, "embedding": embedding}
+        for index, (identity, chat, turn, profile, embedding) in enumerate(fixtures)
+    ]
+    edited = dict(rows[4], chat_id="team-c", turn_id="edited-turn", embedding=vector)
 
     def connect(api):
         settings.SAYWIT_VECTORS_URL = f"http://127.0.0.1:{api.port}"
@@ -73,14 +79,26 @@ def main():
         directory = Path(temporary)
         with running_server(args.server.resolve(), directory, 30, version) as api:
             connect(api)
-            transport.insert_units([
-                {"id": identity, "chat_id": chat, "turn_id": turn, "source_id": index + 1,
-                 "profile": profile, "embedding": embedding}
-                for index, (identity, chat, turn, profile, embedding) in enumerate(fixtures)
-            ])
+            transport.insert_units(rows)
+            transport.insert_units(rows)
+            require(transport.sql(f"SELECT COUNT(*) FROM {transport.TABLE}")["rows"] == [[len(rows)]], "retry duplicated units")
             search()
+            # A failed batch must not expose its earlier edit to assistant retrieval.
+            try:
+                transport.insert_units([edited, rows[0], rows[0]])
+            except transport.SemanticError:
+                pass
+            else:
+                raise AssertionError("duplicate update was accepted")
+            search()
+            transport.insert_units([edited])
+            require(transport.nearest(vector, ["team-b"]) == [], "old chat scope retained edited unit")
         with running_server(args.server.resolve(), directory, 30, version) as api:
             connect(api)
+            require(transport.nearest(vector, ["team-b"]) == [], "old scope returned after recovery")
+            hits = transport.nearest(vector, ["team-c"])
+            require(len(hits) == 1 and hits[0]["id"] == "answer-b" and hits[0]["score"] == 1.0, "edited vector or scope not recovered")
+            transport.insert_units(rows)
             search()
             transport.sql(f"DELETE FROM {transport.TABLE} WHERE turn_id=$1", ["answer-turn-b"])
             require(transport.nearest(vector, ["team-b"]) == [], "deleted turn remained searchable")
@@ -88,7 +106,8 @@ def main():
                       "transport": str(path), "dimensions": transport.DIMENSIONS,
                       "checks": ["real HTTP transport", "schema", "normalized bulk insert", "scope before ranking",
                                  "profile and turn exclusion", "duplicate IDs", "bound quoted IDs", "500-chat scope",
-                                 "exact cosine scores", "durable restart", "deletion"],
+                                 "exact cosine scores", "idempotent retry", "atomic rejected batch",
+                                 "edit and chat move", "durable restart", "deletion"],
                       "provider_calls": 0, "user_messages_read": 0}))
 
 

@@ -1,7 +1,7 @@
 use serde_json::json;
 use vectors::{
-    Database, GraphChunkInput, GraphCollectionConfig, GraphDocumentInput, GraphEmbeddingProfile,
-    GraphIngestRequest, Value, Vector,
+    Database, ExecutionResult, GraphChunkInput, GraphCollectionConfig, GraphDocumentInput,
+    GraphEmbeddingProfile, GraphIngestRequest, InsertConflict, Value, Vector,
 };
 
 fn populated() -> Database {
@@ -120,4 +120,28 @@ fn cached_success_is_not_shared_with_another_database_or_reopened_snapshot() {
         .graph_collection("profiles")
         .unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn typed_profile_only_upsert_invalidates_cached_validation() {
+    let db = populated();
+    let chunks = db.graph_collection("profiles").unwrap().tables.chunks;
+    let ExecutionResult::Query(mut stored) = db
+        .execute(&format!("SELECT * FROM \"{chunks}\""))
+        .unwrap()
+        .remove(0)
+    else {
+        panic!("query")
+    };
+    let original = stored.rows[0].clone();
+    stored.rows[0][7] = Value::Text("wrong".into());
+    let conflict = InsertConflict::DoUpdate {
+        target: "chunk_id".into(),
+        update_columns: vec!["embedding_profile".into()],
+    };
+    db.insert_rows(&chunks, stored.rows, conflict.clone())
+        .unwrap();
+    invalid_profile(&db);
+    db.insert_rows(&chunks, vec![original], conflict).unwrap();
+    db.graph_collection("profiles").unwrap();
 }

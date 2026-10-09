@@ -22,6 +22,7 @@ use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 mod graph;
 mod join;
 mod table_map;
+mod upsert;
 pub use graph::{
     GraphBrowseRequest, GraphBrowseResult, GraphCapacityLimits, GraphCapacityUsage,
     GraphChunkInput, GraphChunkPreview, GraphCollection, GraphCollectionCapacity,
@@ -5670,6 +5671,7 @@ enum InsertConflictPlan {
 
 enum PreparedInsertMutation {
     Append(Vec<Vec<Value>>),
+    Patch(upsert::PreparedUpsert),
     Replace { table: Table, rows_affected: usize },
 }
 
@@ -5677,6 +5679,7 @@ impl PreparedInsertMutation {
     fn rows_affected(&self) -> usize {
         match self {
             Self::Append(rows) => rows.len(),
+            Self::Patch(patch) => patch.rows_affected(),
             Self::Replace { rows_affected, .. } => *rows_affected,
         }
     }
@@ -5688,6 +5691,7 @@ impl PreparedInsertMutation {
                 table.rows.extend(rows);
                 extend_indexes(table, first_new_row);
             }
+            Self::Patch(patch) => patch.apply(table),
             Self::Replace {
                 table: replacement, ..
             } => *table = replacement,
@@ -5716,6 +5720,13 @@ fn prepare_durable_insert(
             validate_unique(table, &accepted)?;
             ensure_table_row_capacity(table.rows.len(), accepted.len())?;
             Ok(PreparedInsertMutation::Append(accepted))
+        }
+        InsertConflictPlan::ReplaceColumns {
+            conflict_column,
+            update_columns,
+        } if !update_columns.contains(&conflict_column) => {
+            upsert::prepare(table, pending, conflict_column, &update_columns)
+                .map(PreparedInsertMutation::Patch)
         }
         plan => {
             let mut replacement = table.clone();
@@ -5899,6 +5910,12 @@ fn apply_insert_plan(
             conflict_column,
             update_columns,
         } => {
+            if !update_columns.contains(&conflict_column) {
+                let patch = upsert::prepare(table, pending, conflict_column, &update_columns)?;
+                let rows_affected = patch.rows_affected();
+                patch.apply(table);
+                return Ok(rows_affected);
+            }
             let rows_affected =
                 apply_conflict_replacements(table, pending, conflict_column, &update_columns)?;
             if rows_affected > 0 {

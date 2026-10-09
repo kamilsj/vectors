@@ -1,8 +1,9 @@
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 use vectors::{
-    ComputeConfig, ComputeDevice, Database, GraphChunkInput, GraphCollectionConfig,
-    GraphDocumentInput, GraphEmbeddingProfile, GraphIngestRequest, GraphRagRequest,
+    ComputeConfig, ComputeDevice, Database, ExecutionResult, GraphChunkInput,
+    GraphCollectionConfig, GraphDocumentInput, GraphEmbeddingProfile, GraphIngestRequest,
+    GraphRagRequest, InsertConflict, Value,
 };
 
 fn profile() -> GraphEmbeddingProfile {
@@ -179,6 +180,59 @@ fn ascii_unicode_case_expansion_and_titlecase_preserve_original_bm25() {
     ] {
         compare(&database, &texts, query);
     }
+}
+
+#[test]
+fn typed_embedding_text_only_upsert_refreshes_cached_lexical_scores() {
+    let texts = vec!["alpha beta".to_owned(), "gamma delta".to_owned()];
+    let db = database(&texts);
+    compare(&db, &texts, "alpha");
+    assert!(compare(&db, &texts, "alpha"));
+    let chunks = db.graph_collection("lexical").unwrap().tables.chunks;
+    let ExecutionResult::Query(mut stored) = db
+        .execute(&format!(
+            "SELECT * FROM \"{chunks}\" WHERE chunk_id='5:terms:0'"
+        ))
+        .unwrap()
+        .remove(0)
+    else {
+        panic!("query")
+    };
+    // Change the derived retrieval text; keep the citation's source text intact.
+    stored.rows[0][6] = Value::Text("gamma gamma".into());
+    db.insert_rows(
+        &chunks,
+        stored.rows,
+        InsertConflict::DoUpdate {
+            target: "chunk_id".into(),
+            update_columns: vec!["embedding_text".into()],
+        },
+    )
+    .unwrap();
+    let request = |query: &str| GraphRagRequest {
+        collection: "lexical".into(),
+        expected_profile: profile(),
+        query: vectors::Vector::new(vec![1., 0., 0.]).unwrap(),
+        query_text: query.into(),
+        candidate_limit: 100,
+        seed_limit: 1,
+        max_hops: 0,
+        neighbor_limit: 4,
+        vector_weight: 0.,
+        lexical_weight: 1.,
+    };
+    let result = db.graph_rag_candidates(request("gamma")).unwrap();
+    assert!(!result.lexical_cache_hit);
+    assert_eq!(result.candidates.len(), 2);
+    assert!(result
+        .candidates
+        .iter()
+        .any(|hit| hit.hit.chunk_id == "5:terms:0" && hit.hit.text == texts[0]));
+    assert!(db
+        .graph_rag_candidates(request("alpha"))
+        .unwrap()
+        .candidates
+        .is_empty());
 }
 
 #[test]

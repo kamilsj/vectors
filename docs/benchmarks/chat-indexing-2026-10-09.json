@@ -1,0 +1,2786 @@
+{
+  "date": "2026-10-09",
+  "environment": {
+    "cpu": "Apple M4 Max",
+    "ram_gib": 48,
+    "os": "macOS 27.0 arm64",
+    "rust": "1.99.0 (b940084d7 2026-09-28)",
+    "profile": "release, default features, CPU",
+    "rayon_threads": 4
+  },
+  "baseline_commit": "8c50968a6a89bc4c75662b114064d4f86063f56b",
+  "binaries": {
+    "before": "e71d3187b6fd0242b2e1ead2e17ee67a636818aa2d92ca5ee50d35b21a38d883",
+    "after": "3fd67d52dd9f06d5e6ca7bb76bb1782ff035a9c2dba94547d4d7b56a354fec01"
+  },
+  "source_hashes": {
+    "src/engine.rs": "2240e67d24841b9e470486368a1732e1d4a06044f60dc498b129069eed90bb2d",
+    "src/engine/upsert.rs": "1ec75b207e93c62eee36c6e1f559c97f64dd9350427367a61bc60e9eaf7bc94f",
+    "examples/benchmark_chat_indexing.rs": "c05654ec145d2b25a96178bd58e50c8cbd764b94f5e03d59e1266abe938ef364"
+  },
+  "methodology": {
+    "process_pairs": 3,
+    "order": "before/after, after/before, before/after at each row count",
+    "measured_batches": 7,
+    "warmups": 1,
+    "dimensions": 1024,
+    "seed_batch_rows": 512,
+    "seed_scope": "one shared original chat; edited and appended rows move to updated chat",
+    "timing": "Only Database::insert_rows, including validation, index maintenance and (durable) WAL encoding/fsync; excludes input generation, HTTP, embedding providers, fixture loading and checkpoints",
+    "percentiles": "Median of three process medians and three process p95 values; with seven samples the within-process p95 is the maximum",
+    "correctness": "Each variant checks exact scoped IDs, order and scores against a full-scan/full-sort reference; durable reopen repeats the comparison and checks row count",
+    "build_isolation": "Baseline and updated benchmark binaries have distinct SHA-256 digests. Cleared package release artifacts after switching source trees; discarded the earlier colliding-cache run."
+  },
+  "limitations": [
+    "Synthetic vectors do not measure semantic recall or provider latency.",
+    "100000 regular SQL rows tested, not ten million documents. GraphRAG capacity remains 10000 chunks.",
+    "Writes remain serialized; active snapshots can copy table metadata; durable checkpoints still write the whole catalog."
+  ],
+  "summary": [
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "batch": 8,
+      "operation": "append",
+      "before_median_ms": 7.512792,
+      "before_p95_ms": 8.432792,
+      "after_median_ms": 0.00625,
+      "after_p95_ms": 0.007125,
+      "median_speedup": 1202.04672
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "batch": 8,
+      "operation": "edit",
+      "before_median_ms": 7.2267090000000005,
+      "before_p95_ms": 7.32925,
+      "after_median_ms": 0.038875,
+      "after_p95_ms": 0.146791,
+      "median_speedup": 185.89605144694536
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "batch": 8,
+      "operation": "replay",
+      "before_median_ms": 7.228625,
+      "before_p95_ms": 7.373875,
+      "after_median_ms": 0.006625,
+      "after_p95_ms": 0.007917,
+      "median_speedup": 1091.1132075471698
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "batch": 128,
+      "operation": "append",
+      "before_median_ms": 13.486082999999999,
+      "before_p95_ms": 14.235167,
+      "after_median_ms": 0.063208,
+      "after_p95_ms": 0.094,
+      "median_speedup": 213.36038159726616
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "batch": 128,
+      "operation": "edit",
+      "before_median_ms": 10.496375,
+      "before_p95_ms": 10.642791,
+      "after_median_ms": 0.094291,
+      "after_p95_ms": 0.100458,
+      "median_speedup": 111.31894878620442
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "batch": 128,
+      "operation": "replay",
+      "before_median_ms": 10.577166,
+      "before_p95_ms": 10.891083,
+      "after_median_ms": 0.100167,
+      "after_p95_ms": 0.126959,
+      "median_speedup": 105.5953158225763
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "batch": 8,
+      "operation": "append",
+      "before_median_ms": 14.697583999999999,
+      "before_p95_ms": 19.080458,
+      "after_median_ms": 3.97575,
+      "after_p95_ms": 4.233708,
+      "median_speedup": 3.6968078978809027
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "batch": 8,
+      "operation": "edit",
+      "before_median_ms": 14.062333,
+      "before_p95_ms": 14.795957999999999,
+      "after_median_ms": 4.07975,
+      "after_p95_ms": 4.618625000000001,
+      "median_speedup": 3.4468614498437407
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "batch": 8,
+      "operation": "replay",
+      "before_median_ms": 13.953292000000001,
+      "before_p95_ms": 14.07425,
+      "after_median_ms": 4.018125,
+      "after_p95_ms": 4.1739999999999995,
+      "median_speedup": 3.4725878363664644
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "batch": 128,
+      "operation": "append",
+      "before_median_ms": 20.896167000000002,
+      "before_p95_ms": 21.852792,
+      "after_median_ms": 4.8015419999999995,
+      "after_p95_ms": 4.963792,
+      "median_speedup": 4.3519700546199545
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "batch": 128,
+      "operation": "edit",
+      "before_median_ms": 17.786040999999997,
+      "before_p95_ms": 18.039209,
+      "after_median_ms": 4.851375,
+      "after_p95_ms": 5.161041,
+      "median_speedup": 3.6661855659477975
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "batch": 128,
+      "operation": "replay",
+      "before_median_ms": 17.859209,
+      "before_p95_ms": 18.026,
+      "after_median_ms": 4.858084000000001,
+      "after_p95_ms": 5.279875,
+      "median_speedup": 3.676183655943371
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "batch": 8,
+      "operation": "append",
+      "before_median_ms": 41.984959,
+      "before_p95_ms": 57.236875,
+      "after_median_ms": 0.006875,
+      "after_p95_ms": 0.007542,
+      "median_speedup": 6106.903127272728
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "batch": 8,
+      "operation": "edit",
+      "before_median_ms": 39.253166,
+      "before_p95_ms": 40.530457999999996,
+      "after_median_ms": 0.039292,
+      "after_p95_ms": 0.145,
+      "median_speedup": 999.0116563168075
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "batch": 8,
+      "operation": "replay",
+      "before_median_ms": 39.602167,
+      "before_p95_ms": 41.042291,
+      "after_median_ms": 0.006959,
+      "after_p95_ms": 0.008208,
+      "median_speedup": 5690.784164391436
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "batch": 128,
+      "operation": "append",
+      "before_median_ms": 92.394458,
+      "before_p95_ms": 94.958708,
+      "after_median_ms": 0.06945799999999999,
+      "after_p95_ms": 0.10404200000000001,
+      "median_speedup": 1330.2205361513434
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "batch": 128,
+      "operation": "edit",
+      "before_median_ms": 58.862334000000004,
+      "before_p95_ms": 64.64437500000001,
+      "after_median_ms": 0.096459,
+      "after_p95_ms": 0.10041599999999999,
+      "median_speedup": 610.2316424594906
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "batch": 128,
+      "operation": "replay",
+      "before_median_ms": 60.602999999999994,
+      "before_p95_ms": 61.946458,
+      "after_median_ms": 0.099583,
+      "after_p95_ms": 0.109875,
+      "median_speedup": 608.5677274233553
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "batch": 8,
+      "operation": "append",
+      "before_median_ms": 59.030917,
+      "before_p95_ms": 83.250417,
+      "after_median_ms": 4.008625,
+      "after_p95_ms": 4.937208,
+      "median_speedup": 14.725976363466275
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "batch": 8,
+      "operation": "edit",
+      "before_median_ms": 56.185083,
+      "before_p95_ms": 57.199833999999996,
+      "after_median_ms": 3.980666,
+      "after_p95_ms": 4.224084,
+      "median_speedup": 14.11449315265335
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "batch": 8,
+      "operation": "replay",
+      "before_median_ms": 55.617708,
+      "before_p95_ms": 56.670832999999995,
+      "after_median_ms": 3.93575,
+      "after_p95_ms": 4.185792,
+      "median_speedup": 14.131412818395477
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "batch": 128,
+      "operation": "append",
+      "before_median_ms": 110.576042,
+      "before_p95_ms": 112.34958400000001,
+      "after_median_ms": 4.770417,
+      "after_p95_ms": 4.996917,
+      "median_speedup": 23.179533780799456
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "batch": 128,
+      "operation": "edit",
+      "before_median_ms": 76.004792,
+      "before_p95_ms": 78.980291,
+      "after_median_ms": 4.97775,
+      "after_p95_ms": 5.375042,
+      "median_speedup": 15.268905027371803
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "batch": 128,
+      "operation": "replay",
+      "before_median_ms": 76.988708,
+      "before_p95_ms": 78.05408299999999,
+      "after_median_ms": 4.81125,
+      "after_p95_ms": 4.973542,
+      "median_speedup": 16.001809924655756
+    }
+  ],
+  "runs": [
+    {
+      "pair": 0,
+      "variant": "before",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 7.487292,
+          "operation": "append",
+          "p95_ms": 9.767750000000001,
+          "samples_ms": [
+            9.767750000000001,
+            8.124083,
+            7.487292,
+            7.3480419999999995,
+            7.44325,
+            7.309792,
+            9.255041
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 7.352625,
+          "operation": "edit",
+          "p95_ms": 7.920708,
+          "samples_ms": [
+            7.323625,
+            7.352625,
+            7.4525,
+            6.799958,
+            7.920708,
+            7.353041999999999,
+            7.335249999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 7.209875,
+          "operation": "replay",
+          "p95_ms": 7.349375,
+          "samples_ms": [
+            7.349375,
+            7.062125,
+            7.134042,
+            7.238042,
+            7.209875,
+            7.144959,
+            7.242083
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 13.590166,
+          "operation": "append",
+          "p95_ms": 13.917499999999999,
+          "samples_ms": [
+            13.110458,
+            13.449833,
+            13.632625,
+            13.763167,
+            13.053624999999998,
+            13.590166,
+            13.917499999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 10.37075,
+          "operation": "edit",
+          "p95_ms": 10.502958999999999,
+          "samples_ms": [
+            10.37075,
+            10.3295,
+            10.184459,
+            10.2955,
+            10.40375,
+            10.502958999999999,
+            10.494458
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 10.408833,
+          "operation": "replay",
+          "p95_ms": 10.650791,
+          "samples_ms": [
+            10.408833,
+            10.61875,
+            10.337834,
+            10.538959,
+            10.650791,
+            10.243041,
+            10.312750000000001
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 13.913874999999999,
+          "operation": "append",
+          "p95_ms": 19.080458,
+          "samples_ms": [
+            19.080458,
+            14.906334000000001,
+            13.707958,
+            13.210459,
+            14.047167,
+            13.875791,
+            13.913874999999999
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 14.062333,
+          "operation": "edit",
+          "p95_ms": 16.108708,
+          "samples_ms": [
+            16.108708,
+            14.974708999999999,
+            14.96575,
+            13.894791,
+            14.05675,
+            12.934666,
+            14.062333
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 13.852082999999999,
+          "operation": "replay",
+          "p95_ms": 14.073458,
+          "samples_ms": [
+            13.798458,
+            14.073458,
+            12.886916999999999,
+            13.150792,
+            14.026333000000001,
+            13.93225,
+            13.852082999999999
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 20.896167000000002,
+          "operation": "append",
+          "p95_ms": 21.852792,
+          "samples_ms": [
+            20.886,
+            20.896167000000002,
+            21.852792,
+            20.649957999999998,
+            20.987083,
+            21.663583,
+            20.825583
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 17.689166999999998,
+          "operation": "edit",
+          "p95_ms": 18.227208,
+          "samples_ms": [
+            17.576332999999998,
+            17.975375,
+            17.689166999999998,
+            18.109875000000002,
+            17.606542,
+            18.227208,
+            17.610625000000002
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 17.869417,
+          "operation": "replay",
+          "p95_ms": 18.026,
+          "samples_ms": [
+            17.585875,
+            18.023584,
+            17.511167,
+            18.026,
+            17.7405,
+            17.869417,
+            17.899084
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 0,
+      "variant": "after",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 0.00675,
+          "operation": "append",
+          "p95_ms": 0.009958,
+          "samples_ms": [
+            0.007041,
+            0.00675,
+            0.006417,
+            0.006167000000000001,
+            0.005917,
+            0.007166,
+            0.009958
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.038875,
+          "operation": "edit",
+          "p95_ms": 0.146791,
+          "samples_ms": [
+            0.140375,
+            0.146791,
+            0.038875,
+            0.037292,
+            0.038708,
+            0.0395,
+            0.037875
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.006625,
+          "operation": "replay",
+          "p95_ms": 0.007917,
+          "samples_ms": [
+            0.007917,
+            0.006833,
+            0.006541,
+            0.0065,
+            0.0065,
+            0.006625,
+            0.007458
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.067833,
+          "operation": "append",
+          "p95_ms": 0.106167,
+          "samples_ms": [
+            0.082125,
+            0.085167,
+            0.067833,
+            0.056499999999999995,
+            0.056916999999999995,
+            0.058832999999999996,
+            0.106167
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.096458,
+          "operation": "edit",
+          "p95_ms": 0.1,
+          "samples_ms": [
+            0.1,
+            0.091042,
+            0.087375,
+            0.096458,
+            0.0995,
+            0.092583,
+            0.0965
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.10258300000000001,
+          "operation": "replay",
+          "p95_ms": 0.11025,
+          "samples_ms": [
+            0.0945,
+            0.11025,
+            0.105708,
+            0.10258300000000001,
+            0.103583,
+            0.095042,
+            0.094541
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.97575,
+          "operation": "append",
+          "p95_ms": 4.134625000000001,
+          "samples_ms": [
+            3.97575,
+            4.134625000000001,
+            3.781375,
+            4.048917,
+            3.969625,
+            3.9677089999999997,
+            4.103792
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.954083,
+          "operation": "edit",
+          "p95_ms": 4.1351249999999995,
+          "samples_ms": [
+            3.862333,
+            4.128083,
+            3.812,
+            4.038834,
+            3.749833,
+            4.1351249999999995,
+            3.954083
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.9399159999999998,
+          "operation": "replay",
+          "p95_ms": 4.1055,
+          "samples_ms": [
+            3.875042,
+            4.10325,
+            4.03925,
+            3.893333,
+            3.9399159999999998,
+            4.1055,
+            3.7755
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.8015419999999995,
+          "operation": "append",
+          "p95_ms": 4.956625,
+          "samples_ms": [
+            4.669416,
+            4.8015419999999995,
+            4.8174589999999995,
+            4.895167,
+            4.583291,
+            4.956625,
+            4.701917
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.851375,
+          "operation": "edit",
+          "p95_ms": 5.018458,
+          "samples_ms": [
+            4.717958,
+            4.851375,
+            5.018458,
+            4.6375,
+            4.606332999999999,
+            4.953125,
+            4.943875
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.858084000000001,
+          "operation": "replay",
+          "p95_ms": 5.279875,
+          "samples_ms": [
+            5.274584,
+            5.279875,
+            4.575791,
+            4.858084000000001,
+            4.845417,
+            4.894500000000001,
+            4.827500000000001
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 1,
+      "variant": "after",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 0.00625,
+          "operation": "append",
+          "p95_ms": 0.007042,
+          "samples_ms": [
+            0.007042,
+            0.006084,
+            0.00625,
+            0.00625,
+            0.005791999999999999,
+            0.006125,
+            0.006334
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.039916,
+          "operation": "edit",
+          "p95_ms": 0.152125,
+          "samples_ms": [
+            0.152125,
+            0.039916,
+            0.037875,
+            0.037333000000000005,
+            0.047708,
+            0.036792000000000005,
+            0.042707999999999996
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.007625,
+          "operation": "replay",
+          "p95_ms": 0.008542000000000001,
+          "samples_ms": [
+            0.008542000000000001,
+            0.007625,
+            0.006667,
+            0.006583,
+            0.008208,
+            0.00675,
+            0.008291000000000001
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.058665999999999996,
+          "operation": "append",
+          "p95_ms": 0.094,
+          "samples_ms": [
+            0.058665999999999996,
+            0.05475,
+            0.056083,
+            0.056582999999999994,
+            0.094,
+            0.088291,
+            0.08145899999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.094291,
+          "operation": "edit",
+          "p95_ms": 0.104791,
+          "samples_ms": [
+            0.104791,
+            0.098625,
+            0.09129200000000001,
+            0.092208,
+            0.099042,
+            0.094291,
+            0.092166
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.095458,
+          "operation": "replay",
+          "p95_ms": 0.199292,
+          "samples_ms": [
+            0.199292,
+            0.10129200000000001,
+            0.096125,
+            0.094458,
+            0.095458,
+            0.09475,
+            0.094875
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.9411669999999996,
+          "operation": "append",
+          "p95_ms": 4.233708,
+          "samples_ms": [
+            3.9967500000000005,
+            3.9199580000000003,
+            3.9851670000000006,
+            3.9411669999999996,
+            4.233708,
+            3.7217079999999996,
+            3.8631249999999997
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.07975,
+          "operation": "edit",
+          "p95_ms": 4.618625000000001,
+          "samples_ms": [
+            4.140667,
+            3.912833,
+            4.07975,
+            3.9504579999999994,
+            4.037958000000001,
+            4.258833,
+            4.618625000000001
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.018125,
+          "operation": "replay",
+          "p95_ms": 4.1739999999999995,
+          "samples_ms": [
+            4.043333,
+            3.9497919999999995,
+            4.018125,
+            3.8548329999999997,
+            4.1739999999999995,
+            3.8665420000000004,
+            4.071333
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.780708,
+          "operation": "append",
+          "p95_ms": 4.963792,
+          "samples_ms": [
+            4.780708,
+            4.758709,
+            4.895791,
+            4.758042,
+            4.832541999999999,
+            4.6686250000000005,
+            4.963792
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.761625,
+          "operation": "edit",
+          "p95_ms": 5.161041,
+          "samples_ms": [
+            4.550125,
+            4.721125,
+            4.761625,
+            4.819249999999999,
+            4.7732909999999995,
+            5.161041,
+            4.5222500000000005
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.831208,
+          "operation": "replay",
+          "p95_ms": 5.136375,
+          "samples_ms": [
+            5.136375,
+            4.769,
+            4.831208,
+            4.7336670000000005,
+            4.959625,
+            4.766792,
+            4.863416
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 1,
+      "variant": "before",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 7.512792,
+          "operation": "append",
+          "p95_ms": 7.737,
+          "samples_ms": [
+            7.737,
+            7.372916,
+            7.111833,
+            7.5297089999999995,
+            7.472792,
+            7.512792,
+            7.667667000000001
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 7.031167,
+          "operation": "edit",
+          "p95_ms": 7.295042,
+          "samples_ms": [
+            7.031167,
+            6.984500000000001,
+            6.955958,
+            6.771167,
+            7.295042,
+            7.1550839999999996,
+            7.146709
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 7.302666,
+          "operation": "replay",
+          "p95_ms": 7.893832999999999,
+          "samples_ms": [
+            7.641959,
+            7.398833,
+            6.761375,
+            7.893832999999999,
+            7.187083,
+            7.302666,
+            7.284542
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 13.279417,
+          "operation": "append",
+          "p95_ms": 14.235167,
+          "samples_ms": [
+            13.216417,
+            13.279541,
+            13.217084,
+            13.237916,
+            13.390292,
+            13.279417,
+            14.235167
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 10.496375,
+          "operation": "edit",
+          "p95_ms": 10.67775,
+          "samples_ms": [
+            10.324292,
+            10.559292,
+            10.496375,
+            10.441834,
+            9.948291,
+            10.651541,
+            10.67775
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 10.577166,
+          "operation": "replay",
+          "p95_ms": 10.891083,
+          "samples_ms": [
+            10.577166,
+            10.610959,
+            10.583833,
+            10.293459,
+            10.4175,
+            9.654459000000001,
+            10.891083
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 14.697583999999999,
+          "operation": "append",
+          "p95_ms": 18.983916999999998,
+          "samples_ms": [
+            18.983916999999998,
+            15.976083,
+            14.873083000000001,
+            14.208791999999999,
+            14.697583999999999,
+            14.040458000000001,
+            14.091833
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 13.937584,
+          "operation": "edit",
+          "p95_ms": 14.041375,
+          "samples_ms": [
+            13.937584,
+            13.924000000000001,
+            13.998833000000001,
+            14.002666,
+            13.93525,
+            14.041375,
+            13.878708
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 13.953292000000001,
+          "operation": "replay",
+          "p95_ms": 14.07425,
+          "samples_ms": [
+            13.790875,
+            14.022833,
+            13.922083,
+            14.010208,
+            13.953292000000001,
+            14.07425,
+            13.820625
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 20.815875000000002,
+          "operation": "append",
+          "p95_ms": 20.901208,
+          "samples_ms": [
+            20.901208,
+            20.630125,
+            20.878291,
+            20.815875000000002,
+            20.730915999999997,
+            20.790084,
+            20.887791999999997
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 17.786040999999997,
+          "operation": "edit",
+          "p95_ms": 18.039209,
+          "samples_ms": [
+            17.809375,
+            17.786040999999997,
+            17.986292000000002,
+            18.039209,
+            17.610583,
+            17.772208000000003,
+            17.666334
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 17.859209,
+          "operation": "replay",
+          "p95_ms": 18.653583,
+          "samples_ms": [
+            17.887708,
+            17.821458,
+            17.801583,
+            18.653583,
+            17.652625,
+            17.974125,
+            17.859209
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 2,
+      "variant": "before",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 7.801125,
+          "operation": "append",
+          "p95_ms": 8.432792,
+          "samples_ms": [
+            8.432792,
+            7.801125,
+            6.94475,
+            8.17125,
+            7.853166999999999,
+            6.792541,
+            7.521166
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 7.2267090000000005,
+          "operation": "edit",
+          "p95_ms": 7.32925,
+          "samples_ms": [
+            7.1195,
+            6.9879169999999995,
+            7.275,
+            7.32925,
+            7.281583,
+            7.2267090000000005,
+            7.142333
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 7.228625,
+          "operation": "replay",
+          "p95_ms": 7.373875,
+          "samples_ms": [
+            7.00925,
+            6.982417,
+            7.373875,
+            7.23475,
+            7.246042,
+            7.228625,
+            7.175167
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 13.486082999999999,
+          "operation": "append",
+          "p95_ms": 14.603875,
+          "samples_ms": [
+            13.306083,
+            13.486082999999999,
+            13.141917,
+            13.920041,
+            13.2125,
+            14.49475,
+            14.603875
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 10.548083,
+          "operation": "edit",
+          "p95_ms": 10.642791,
+          "samples_ms": [
+            10.419708,
+            10.446792,
+            10.610916,
+            10.486625,
+            10.642791,
+            10.548083,
+            10.620125
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 10.606208,
+          "operation": "replay",
+          "p95_ms": 11.568416999999998,
+          "samples_ms": [
+            9.920625000000001,
+            11.568416999999998,
+            10.964417000000001,
+            10.606208,
+            10.798375,
+            10.51075,
+            10.569500000000001
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 15.02625,
+          "operation": "append",
+          "p95_ms": 19.115834000000003,
+          "samples_ms": [
+            19.115834000000003,
+            15.857416999999998,
+            14.917416,
+            14.118834,
+            15.02625,
+            15.027875,
+            14.806334000000001
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 14.11925,
+          "operation": "edit",
+          "p95_ms": 14.795957999999999,
+          "samples_ms": [
+            13.9115,
+            13.771208,
+            14.684083000000001,
+            14.591,
+            14.795957999999999,
+            13.916082999999999,
+            14.11925
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 14.028792,
+          "operation": "replay",
+          "p95_ms": 15.184584,
+          "samples_ms": [
+            14.4235,
+            13.575916000000001,
+            14.006958,
+            14.119833999999999,
+            14.028792,
+            13.905208,
+            15.184584
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 21.037292,
+          "operation": "append",
+          "p95_ms": 21.932625,
+          "samples_ms": [
+            21.932625,
+            20.538292,
+            21.037292,
+            20.746167,
+            21.703291999999998,
+            21.700875,
+            20.796458
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 17.816665999999998,
+          "operation": "edit",
+          "p95_ms": 17.969458,
+          "samples_ms": [
+            16.600375,
+            17.832,
+            17.969458,
+            17.816665999999998,
+            16.818792,
+            17.710209000000003,
+            17.928834000000002
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 17.84675,
+          "operation": "replay",
+          "p95_ms": 17.894416,
+          "samples_ms": [
+            17.884166999999998,
+            17.894416,
+            17.740459,
+            17.680083,
+            17.84675,
+            17.753459,
+            17.873417
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 2,
+      "variant": "after",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 0.00625,
+          "operation": "append",
+          "p95_ms": 0.007125,
+          "samples_ms": [
+            0.006625,
+            0.00625,
+            0.005917,
+            0.007125,
+            0.005834000000000001,
+            0.005708,
+            0.006292
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.03675,
+          "operation": "edit",
+          "p95_ms": 0.141083,
+          "samples_ms": [
+            0.141083,
+            0.037625,
+            0.03675,
+            0.037458,
+            0.036667,
+            0.0365,
+            0.0365
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.006417,
+          "operation": "replay",
+          "p95_ms": 0.007500000000000001,
+          "samples_ms": [
+            0.007500000000000001,
+            0.006541,
+            0.006417,
+            0.006292,
+            0.006333,
+            0.006292,
+            0.007375
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.063208,
+          "operation": "append",
+          "p95_ms": 0.08449999999999999,
+          "samples_ms": [
+            0.063208,
+            0.058459,
+            0.058665999999999996,
+            0.057292,
+            0.082792,
+            0.079958,
+            0.08449999999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.09075,
+          "operation": "edit",
+          "p95_ms": 0.100458,
+          "samples_ms": [
+            0.100458,
+            0.09075,
+            0.089917,
+            0.091792,
+            0.09033300000000001,
+            0.092291,
+            0.087542
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.100167,
+          "operation": "replay",
+          "p95_ms": 0.126959,
+          "samples_ms": [
+            0.100167,
+            0.096,
+            0.10058299999999999,
+            0.098083,
+            0.104292,
+            0.093625,
+            0.126959
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.724417,
+          "operation": "append",
+          "p95_ms": 5.067041000000001,
+          "samples_ms": [
+            4.8648750000000005,
+            5.067041000000001,
+            3.9819169999999997,
+            4.089875,
+            4.766833,
+            4.233542,
+            4.724417
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.843125000000001,
+          "operation": "edit",
+          "p95_ms": 5.172709,
+          "samples_ms": [
+            4.06425,
+            5.172709,
+            4.843125000000001,
+            5.0315,
+            4.756334,
+            4.246542,
+            4.873584
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.749084,
+          "operation": "replay",
+          "p95_ms": 5.07,
+          "samples_ms": [
+            4.051041,
+            4.969,
+            4.9335,
+            3.951709,
+            4.141166,
+            5.07,
+            4.749084
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 5.055292000000001,
+          "operation": "append",
+          "p95_ms": 7.427333,
+          "samples_ms": [
+            7.427333,
+            4.999792,
+            6.951416999999999,
+            4.679917,
+            4.7754579999999995,
+            5.055292000000001,
+            5.646833
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 5.101625,
+          "operation": "edit",
+          "p95_ms": 5.759791,
+          "samples_ms": [
+            5.687792,
+            4.797167,
+            4.835500000000001,
+            5.759791,
+            4.671375,
+            5.668583,
+            5.101625
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 5.484333,
+          "operation": "replay",
+          "p95_ms": 6.6211660000000006,
+          "samples_ms": [
+            4.822417,
+            4.83675,
+            4.90225,
+            6.414458,
+            6.6211660000000006,
+            6.4795,
+            5.484333
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 0,
+      "variant": "before",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 41.984959,
+          "operation": "append",
+          "p95_ms": 57.236875,
+          "samples_ms": [
+            57.236875,
+            43.37325,
+            41.764291,
+            41.984959,
+            41.679,
+            42.144584,
+            41.474416
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 39.253166,
+          "operation": "edit",
+          "p95_ms": 40.530457999999996,
+          "samples_ms": [
+            39.253166,
+            38.30875,
+            40.530457999999996,
+            39.028583,
+            39.827792,
+            38.430958000000004,
+            39.675083
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 38.898042000000004,
+          "operation": "replay",
+          "p95_ms": 39.364250000000006,
+          "samples_ms": [
+            39.364250000000006,
+            39.3465,
+            39.033375,
+            38.898042000000004,
+            38.189916,
+            38.513125,
+            38.696917
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 92.953417,
+          "operation": "append",
+          "p95_ms": 97.058583,
+          "samples_ms": [
+            92.953417,
+            91.24841599999999,
+            93.829625,
+            92.755916,
+            97.058583,
+            91.74779199999999,
+            93.56075
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 57.617374999999996,
+          "operation": "edit",
+          "p95_ms": 66.005916,
+          "samples_ms": [
+            57.286459,
+            57.922917,
+            55.034875,
+            66.005916,
+            55.822458,
+            57.617374999999996,
+            60.205666
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 60.602999999999994,
+          "operation": "replay",
+          "p95_ms": 62.683249999999994,
+          "samples_ms": [
+            59.522,
+            60.925374999999995,
+            58.935375,
+            59.772667,
+            62.683249999999994,
+            60.602999999999994,
+            61.594792000000005
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 59.030917,
+          "operation": "append",
+          "p95_ms": 83.250417,
+          "samples_ms": [
+            83.250417,
+            66.276,
+            59.738708,
+            56.781042,
+            58.0965,
+            58.914333,
+            59.030917
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 56.787708,
+          "operation": "edit",
+          "p95_ms": 58.148540999999994,
+          "samples_ms": [
+            56.211625,
+            55.779833,
+            56.767375,
+            57.13675,
+            56.787708,
+            58.148540999999994,
+            56.864875000000005
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 54.211791000000005,
+          "operation": "replay",
+          "p95_ms": 57.947875,
+          "samples_ms": [
+            54.211791000000005,
+            57.947875,
+            53.098042,
+            53.563792,
+            54.077875,
+            55.183041,
+            54.944792
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 110.576042,
+          "operation": "append",
+          "p95_ms": 113.0065,
+          "samples_ms": [
+            110.194833,
+            109.488208,
+            110.576042,
+            113.0065,
+            109.07679200000001,
+            111.708375,
+            110.70316600000001
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 75.39500000000001,
+          "operation": "edit",
+          "p95_ms": 77.941,
+          "samples_ms": [
+            75.164084,
+            75.39500000000001,
+            74.027542,
+            75.551417,
+            77.941,
+            74.779625,
+            76.879
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 72.64966700000001,
+          "operation": "replay",
+          "p95_ms": 77.923792,
+          "samples_ms": [
+            77.923792,
+            72.64966700000001,
+            72.155709,
+            75.264959,
+            73.92658300000001,
+            71.900834,
+            72.380084
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 0,
+      "variant": "after",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 0.006542,
+          "operation": "append",
+          "p95_ms": 0.006959,
+          "samples_ms": [
+            0.006667,
+            0.006666,
+            0.006208,
+            0.006458,
+            0.006209,
+            0.006542,
+            0.006959
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.039292,
+          "operation": "edit",
+          "p95_ms": 0.145,
+          "samples_ms": [
+            0.145,
+            0.039292,
+            0.038542,
+            0.041,
+            0.045542,
+            0.038167,
+            0.038
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.0065,
+          "operation": "replay",
+          "p95_ms": 0.007833,
+          "samples_ms": [
+            0.007833,
+            0.006625,
+            0.0065,
+            0.006333,
+            0.006459,
+            0.0065,
+            0.007625
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.06945799999999999,
+          "operation": "append",
+          "p95_ms": 0.11220899999999999,
+          "samples_ms": [
+            0.064584,
+            0.06945799999999999,
+            0.064583,
+            0.058832999999999996,
+            0.092167,
+            0.11220899999999999,
+            0.085791
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.098,
+          "operation": "edit",
+          "p95_ms": 0.104875,
+          "samples_ms": [
+            0.104875,
+            0.092958,
+            0.098,
+            0.092667,
+            0.098875,
+            0.096166,
+            0.1005
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.09787499999999999,
+          "operation": "replay",
+          "p95_ms": 0.110041,
+          "samples_ms": [
+            0.110041,
+            0.097333,
+            0.103959,
+            0.09787499999999999,
+            0.101458,
+            0.0925,
+            0.092167
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.000541,
+          "operation": "append",
+          "p95_ms": 4.848083000000001,
+          "samples_ms": [
+            4.848083000000001,
+            4.038542,
+            4.000541,
+            3.971125,
+            3.8870419999999997,
+            4.574958,
+            3.425125
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.9775,
+          "operation": "edit",
+          "p95_ms": 4.241207999999999,
+          "samples_ms": [
+            4.0309159999999995,
+            3.9775,
+            3.85575,
+            4.134792,
+            3.8132499999999996,
+            4.241207999999999,
+            3.731917
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.928458,
+          "operation": "replay",
+          "p95_ms": 4.257333,
+          "samples_ms": [
+            3.872125,
+            4.257333,
+            3.755875,
+            4.051540999999999,
+            3.9097919999999995,
+            4.137625,
+            3.928458
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.770417,
+          "operation": "append",
+          "p95_ms": 5.162292,
+          "samples_ms": [
+            4.713833,
+            4.770417,
+            4.701667,
+            5.162292,
+            4.771708,
+            4.673666,
+            4.845167
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 5.052834,
+          "operation": "edit",
+          "p95_ms": 5.375042,
+          "samples_ms": [
+            4.596416,
+            5.052834,
+            4.773791999999999,
+            5.227375,
+            5.071417,
+            5.375042,
+            4.477125
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.910083,
+          "operation": "replay",
+          "p95_ms": 5.04475,
+          "samples_ms": [
+            4.910083,
+            4.549625,
+            5.04475,
+            4.706834,
+            4.956875,
+            4.917625,
+            4.600875
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 1,
+      "variant": "after",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 0.006875,
+          "operation": "append",
+          "p95_ms": 0.007958000000000002,
+          "samples_ms": [
+            0.006917,
+            0.006833,
+            0.006875,
+            0.007958000000000002,
+            0.0067079999999999996,
+            0.007416,
+            0.006667
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.039625,
+          "operation": "edit",
+          "p95_ms": 0.2985,
+          "samples_ms": [
+            0.2985,
+            0.041458999999999996,
+            0.03925,
+            0.039666,
+            0.038583,
+            0.039625,
+            0.03925
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.006959,
+          "operation": "replay",
+          "p95_ms": 0.008208,
+          "samples_ms": [
+            0.008208,
+            0.008,
+            0.006959,
+            0.006792,
+            0.006667,
+            0.0067079999999999996,
+            0.007916
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.08466699999999999,
+          "operation": "append",
+          "p95_ms": 0.09833299999999999,
+          "samples_ms": [
+            0.066834,
+            0.066709,
+            0.063459,
+            0.08466699999999999,
+            0.086875,
+            0.095584,
+            0.09833299999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.096459,
+          "operation": "edit",
+          "p95_ms": 0.10041599999999999,
+          "samples_ms": [
+            0.10041599999999999,
+            0.096833,
+            0.09375,
+            0.09720799999999999,
+            0.093875,
+            0.096459,
+            0.094625
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.099583,
+          "operation": "replay",
+          "p95_ms": 0.104167,
+          "samples_ms": [
+            0.099583,
+            0.09929199999999999,
+            0.09995899999999999,
+            0.099542,
+            0.098458,
+            0.103583,
+            0.104167
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.059667,
+          "operation": "append",
+          "p95_ms": 5.061125,
+          "samples_ms": [
+            4.903916000000001,
+            4.059667,
+            4.053833,
+            5.061125,
+            3.650541,
+            4.233334,
+            3.856375
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.98175,
+          "operation": "edit",
+          "p95_ms": 4.224084,
+          "samples_ms": [
+            3.9807089999999996,
+            4.1569579999999995,
+            3.775458,
+            4.095,
+            3.91925,
+            4.224084,
+            3.98175
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.93575,
+          "operation": "replay",
+          "p95_ms": 4.097416000000001,
+          "samples_ms": [
+            3.794042,
+            4.0487079999999995,
+            3.8455,
+            4.097416000000001,
+            3.93575,
+            4.064708,
+            3.858
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.74425,
+          "operation": "append",
+          "p95_ms": 4.996917,
+          "samples_ms": [
+            4.545583,
+            4.9835,
+            4.853,
+            4.74425,
+            4.5485,
+            4.996917,
+            4.693583
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.691166,
+          "operation": "edit",
+          "p95_ms": 5.079333999999999,
+          "samples_ms": [
+            4.495042000000001,
+            5.079333999999999,
+            4.9051670000000005,
+            4.614916999999999,
+            4.6225,
+            5.03375,
+            4.691166
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.742749999999999,
+          "operation": "replay",
+          "p95_ms": 4.973542,
+          "samples_ms": [
+            4.823542,
+            4.673083,
+            4.742749999999999,
+            4.973542,
+            4.624874999999999,
+            4.908334,
+            4.596708
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 1,
+      "variant": "before",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 42.746167,
+          "operation": "append",
+          "p95_ms": 58.284292,
+          "samples_ms": [
+            58.284292,
+            43.346958,
+            41.028166999999996,
+            41.364208,
+            42.253834,
+            42.746167,
+            42.808125000000004
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 39.447958,
+          "operation": "edit",
+          "p95_ms": 40.042792,
+          "samples_ms": [
+            38.45875,
+            39.131916000000004,
+            40.007416,
+            40.042792,
+            39.748125,
+            39.447958,
+            39.290917
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 40.086916,
+          "operation": "replay",
+          "p95_ms": 41.66375,
+          "samples_ms": [
+            40.086916,
+            39.213791,
+            40.320125,
+            40.001833,
+            41.66375,
+            40.228083,
+            39.046917
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 91.21799999999999,
+          "operation": "append",
+          "p95_ms": 93.926958,
+          "samples_ms": [
+            91.185542,
+            89.77508300000001,
+            90.924875,
+            91.883416,
+            91.42375,
+            93.926958,
+            91.21799999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 58.862334000000004,
+          "operation": "edit",
+          "p95_ms": 64.64437500000001,
+          "samples_ms": [
+            61.186334,
+            58.862334000000004,
+            57.036875,
+            62.79412500000001,
+            64.64437500000001,
+            57.57825,
+            58.591291
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 60.908041000000004,
+          "operation": "replay",
+          "p95_ms": 61.946458,
+          "samples_ms": [
+            61.654374999999995,
+            61.542874999999995,
+            58.7815,
+            60.908041000000004,
+            58.337417,
+            61.946458,
+            56.202625
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 60.2265,
+          "operation": "append",
+          "p95_ms": 87.12641599999999,
+          "samples_ms": [
+            87.12641599999999,
+            66.04216699999999,
+            59.991833,
+            60.2265,
+            57.802417,
+            58.915917,
+            61.132084000000006
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 56.185083,
+          "operation": "edit",
+          "p95_ms": 57.199833999999996,
+          "samples_ms": [
+            57.199833999999996,
+            56.911167,
+            56.185083,
+            56.091750000000005,
+            56.878125000000004,
+            55.987041,
+            56.087083
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 55.88916699999999,
+          "operation": "replay",
+          "p95_ms": 56.670832999999995,
+          "samples_ms": [
+            55.622625,
+            54.791417,
+            56.172083,
+            55.88916699999999,
+            55.997709,
+            55.157375,
+            56.670832999999995
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 110.807917,
+          "operation": "append",
+          "p95_ms": 112.34958400000001,
+          "samples_ms": [
+            107.60820799999999,
+            111.403375,
+            111.01374999999999,
+            112.34958400000001,
+            110.807917,
+            109.766542,
+            107.569167
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 76.004792,
+          "operation": "edit",
+          "p95_ms": 81.026,
+          "samples_ms": [
+            72.601833,
+            75.430166,
+            80.33520800000001,
+            76.98954099999999,
+            76.004792,
+            75.654416,
+            81.026
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 77.579459,
+          "operation": "replay",
+          "p95_ms": 80.06554200000001,
+          "samples_ms": [
+            76.1535,
+            79.931875,
+            76.04879100000001,
+            76.82591599999999,
+            77.579459,
+            79.54424999999999,
+            80.06554200000001
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 2,
+      "variant": "before",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 41.033625,
+          "operation": "append",
+          "p95_ms": 53.840083,
+          "samples_ms": [
+            53.840083,
+            42.646667,
+            40.832874999999994,
+            41.033625,
+            41.05825,
+            39.680958000000004,
+            40.134209
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 38.650959,
+          "operation": "edit",
+          "p95_ms": 49.7245,
+          "samples_ms": [
+            49.7245,
+            39.483625,
+            37.660582999999995,
+            38.346333,
+            38.282334,
+            38.650959,
+            39.457542
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 39.602167,
+          "operation": "replay",
+          "p95_ms": 41.042291,
+          "samples_ms": [
+            41.042291,
+            39.934916,
+            39.602167,
+            39.40325,
+            39.479583,
+            38.661,
+            40.394875
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 92.394458,
+          "operation": "append",
+          "p95_ms": 94.958708,
+          "samples_ms": [
+            90.660791,
+            90.740166,
+            92.394458,
+            91.89979199999999,
+            92.807917,
+            94.958708,
+            93.28937499999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 59.198708,
+          "operation": "edit",
+          "p95_ms": 61.283584000000005,
+          "samples_ms": [
+            61.283584000000005,
+            58.060667,
+            55.638625,
+            59.198708,
+            58.625707999999996,
+            59.406542,
+            59.274333
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 60.039834,
+          "operation": "replay",
+          "p95_ms": 61.378583,
+          "samples_ms": [
+            60.657333,
+            60.039834,
+            61.199583000000004,
+            58.826333,
+            56.87025,
+            58.283708,
+            61.378583
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 58.787583,
+          "operation": "append",
+          "p95_ms": 83.203959,
+          "samples_ms": [
+            83.203959,
+            61.765916999999995,
+            56.99525,
+            59.269542,
+            58.787583,
+            57.978791,
+            57.951792000000005
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 54.906458,
+          "operation": "edit",
+          "p95_ms": 57.183125000000004,
+          "samples_ms": [
+            57.183125000000004,
+            54.601917,
+            55.252083999999996,
+            54.906458,
+            53.879334,
+            54.140291,
+            55.805291
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 55.617708,
+          "operation": "replay",
+          "p95_ms": 56.150083,
+          "samples_ms": [
+            54.157417,
+            54.884333,
+            55.807375,
+            55.559333,
+            55.617708,
+            55.737417,
+            56.150083
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 108.202292,
+          "operation": "append",
+          "p95_ms": 111.852875,
+          "samples_ms": [
+            108.868167,
+            108.202292,
+            104.586833,
+            109.24033299999999,
+            106.563084,
+            108.117959,
+            111.852875
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 76.952625,
+          "operation": "edit",
+          "p95_ms": 78.980291,
+          "samples_ms": [
+            74.592584,
+            76.952625,
+            78.691542,
+            77.966291,
+            75.666208,
+            76.55725,
+            78.980291
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 76.988708,
+          "operation": "replay",
+          "p95_ms": 78.05408299999999,
+          "samples_ms": [
+            76.988708,
+            77.459958,
+            78.05408299999999,
+            72.7265,
+            76.506417,
+            76.59833400000001,
+            77.342167
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    },
+    {
+      "pair": 2,
+      "variant": "after",
+      "correctness": "exact scoped ranking and scores match full scan; WAL recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "batch": 8,
+          "median_ms": 0.006875,
+          "operation": "append",
+          "p95_ms": 0.007542,
+          "samples_ms": [
+            0.007542,
+            0.006833,
+            0.0065,
+            0.006166,
+            0.007542,
+            0.006875,
+            0.007375
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.039292,
+          "operation": "edit",
+          "p95_ms": 0.13549999999999998,
+          "samples_ms": [
+            0.13549999999999998,
+            0.045375,
+            0.037208,
+            0.037917000000000006,
+            0.036667,
+            0.046333,
+            0.039292
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 0.007,
+          "operation": "replay",
+          "p95_ms": 0.008541,
+          "samples_ms": [
+            0.008,
+            0.007,
+            0.00675,
+            0.00675,
+            0.007917,
+            0.006958,
+            0.008541
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.06820899999999999,
+          "operation": "append",
+          "p95_ms": 0.10404200000000001,
+          "samples_ms": [
+            0.068458,
+            0.063709,
+            0.06820899999999999,
+            0.060917,
+            0.060333,
+            0.10404200000000001,
+            0.09025
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.09258400000000001,
+          "operation": "edit",
+          "p95_ms": 0.094625,
+          "samples_ms": [
+            0.094125,
+            0.094084,
+            0.09258400000000001,
+            0.094625,
+            0.08970900000000001,
+            0.092375,
+            0.089916
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 128,
+          "median_ms": 0.106417,
+          "operation": "replay",
+          "p95_ms": 0.109875,
+          "samples_ms": [
+            0.108958,
+            0.100208,
+            0.106417,
+            0.09916699999999999,
+            0.10225000000000001,
+            0.109875,
+            0.10675000000000001
+          ],
+          "storage": "memory"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.008625,
+          "operation": "append",
+          "p95_ms": 4.937208,
+          "samples_ms": [
+            4.480208,
+            4.008625,
+            4.046082999999999,
+            4.937208,
+            3.972833,
+            3.9389580000000004,
+            3.850333
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 3.980666,
+          "operation": "edit",
+          "p95_ms": 4.094792,
+          "samples_ms": [
+            3.85675,
+            3.953875,
+            4.07725,
+            3.722,
+            4.094792,
+            3.980666,
+            4.0563329999999995
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 8,
+          "median_ms": 4.021958,
+          "operation": "replay",
+          "p95_ms": 4.185792,
+          "samples_ms": [
+            3.9994160000000005,
+            4.021958,
+            4.03975,
+            3.8657909999999998,
+            4.185792,
+            4.153417,
+            3.754417
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.772,
+          "operation": "append",
+          "p95_ms": 4.916458,
+          "samples_ms": [
+            4.916458,
+            4.665500000000001,
+            4.897625,
+            4.7481670000000005,
+            4.908209,
+            4.772,
+            4.73175
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.97775,
+          "operation": "edit",
+          "p95_ms": 5.642,
+          "samples_ms": [
+            5.642,
+            4.953333,
+            4.679167,
+            4.790792000000001,
+            4.97775,
+            5.093541,
+            5.1441669999999995
+          ],
+          "storage": "durable"
+        },
+        {
+          "batch": 128,
+          "median_ms": 4.81125,
+          "operation": "replay",
+          "p95_ms": 4.878208,
+          "samples_ms": [
+            4.7935,
+            4.81125,
+            4.878208,
+            4.683625,
+            4.650542,
+            4.852042,
+            4.817041000000001
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "warmups": 1
+    }
+  ],
+  "verification": {
+    "rust_tests_passed": 393,
+    "rust_tests_ignored": 2,
+    "clippy": "all targets and features passed with warnings denied",
+    "saywit_adapter": {
+      "status": "passed",
+      "version": "0.10.0",
+      "transport": "Saywit semantic/transport.py",
+      "dimensions": 1024,
+      "checks": [
+        "real HTTP transport",
+        "schema",
+        "normalized bulk insert",
+        "scope before ranking",
+        "profile and turn exclusion",
+        "duplicate IDs",
+        "bound quoted IDs",
+        "500-chat scope",
+        "exact cosine scores",
+        "idempotent retry",
+        "atomic rejected batch",
+        "edit and chat move",
+        "durable restart",
+        "deletion"
+      ],
+      "provider_calls": 0,
+      "user_messages_read": 0,
+      "transport_sha256": "2e0b9a487b26c899dec6b9c3fe01ff7758a8e1695861e3d562d5fdc92f0e876e"
+    },
+    "server_smoke": "PASS vectors-server 0.10.0: embedded PDF/chat UI, capacity and chat APIs, authenticated SQL/vector/GraphRAG APIs, seed document caps, typed filters, relationships, join chains, restart, local provider key files and environment precedence"
+  }
+}
