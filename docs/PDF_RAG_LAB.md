@@ -1,6 +1,6 @@
 # Test RAG with PDF collections
 
-Vectors 0.10 opens in **Playground**, with **Chat**, **Documents**, and **Graph**
+Vectors opens in **Playground**, with **Chat**, **Documents**, and **Graph**
 tabs. Start with
 a small representative batch, measure retrieval, then grow the corpus while
 watching capacity. The importer processes text-selectable PDFs in your browser;
@@ -11,7 +11,7 @@ browser's secure cryptography API. Folder selection depends on browser support.
 
 ## Set up a collection
 
-Start the local 0.10.0 build from the repository, then open
+Start the local 0.11.0 build from the repository, then open
 <http://127.0.0.1:8081>:
 
 ```sh

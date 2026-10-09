@@ -12,6 +12,14 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## 0.11.0 - 2026-10-09
+
+### Added
+
 - A research-backed chat-scale design note and a repeatable turn-cleanup
   benchmark, including deletion, replacement and recovery checks.
 - A repeatable chat-indexing benchmark covering append, edit and retry batches
@@ -33,8 +41,6 @@ uses that section as the curated introduction to the GitHub release notes.
 - SQL `IN` filters use existing scalar indexes before exact vector ranking.
   Indexed conjuncts are no longer reevaluated for every candidate when other
   filters remain, speeding up Saywit chat scopes without changing results.
-
-### Fixed
 
 ## 0.10.0 - 2026-10-04
 

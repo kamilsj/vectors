@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 r"""Smoke-test an extracted release binary using Python 3.10+ and synthetic provider keys.
 
-Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.10.0
-Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.10.0
+Linux/macOS: python3 scripts/release_smoke.py --server ./vectors-server --expected-version v0.11.0
+Windows:     python scripts/release_smoke.py --server .\vectors-server.exe --expected-version v0.11.0
 
 Only loopback HTTP and a temporary durable database are used; no provider calls
 are made. This checks embedded UI assets, not browser rendering. A nonzero exit
@@ -401,7 +401,7 @@ def run(binary, expected_version, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", required=True, type=Path, help="extracted vectors-server binary")
-    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.10.0")
+    parser.add_argument("--expected-version", required=True, help="release version or tag, e.g. v0.11.0")
     parser.add_argument("--timeout", type=float, default=60, help="startup/version timeout in seconds (default: 60)")
     args = parser.parse_args()
     version = args.expected_version.removeprefix("v")

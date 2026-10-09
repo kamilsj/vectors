@@ -52,8 +52,9 @@ New to the project? The [guided tutorial](docs/TUTORIAL.md) covers installation,
 every shell command, the web console, SQL and typed API examples, persistence,
 GPU selection, production batching, and troubleshooting.
 
-Version **0.10.0** adds a [PDF upload and RAG chat lab](docs/PDF_RAG_LAB.md)
-for folder imports, cited answers, retrieval diagnostics and repeatable corpus tests.
+Version **0.11.0** improves scoped chat search and turn indexing for Saywit.
+The [PDF upload and RAG chat lab](docs/PDF_RAG_LAB.md) supports folder imports,
+cited answers, retrieval diagnostics and repeatable corpus tests.
 The [chatbot and voicebot guide](docs/CHATBOTS.md) covers conversational search,
 strict source evidence, speech-ready responses and repeatable answer checks.
 
@@ -70,12 +71,13 @@ install both binaries for the current user, start a durable server, and open
 the web console when a desktop is available. Releases support Linux x86-64 and
 ARM64, macOS Intel and Apple silicon, and Windows x86-64.
 
-[v0.10.0](https://github.com/kamilsj/vectors/releases/tag/v0.10.0) adds PDF folder
-imports, conversational RAG, source-evidence checks, voice-ready text and a
-Playground for comparing retrieval and inspecting answers. It also reduces
-copying and lookup costs during document ingestion and filtered retrieval.
-If you still see the older interface, run the installer below to upgrade the
-server with `--restart` (PowerShell: `-Restart`), then reload the console.
+[v0.11.0](https://github.com/kamilsj/vectors/releases/tag/v0.11.0) speeds up chat
+scope filtering, stable-ID indexing and turn cleanup while preserving exact
+retrieval results. At 100,000 synthetic units, durable eight-unit replacement
+improved from 48.98 to 8.98 ms; see the [benchmarks](docs/BENCHMARKS.md) for
+methodology and limits. The release also verifies Saywit's real transport.
+Run the installer below with `--restart` (PowerShell: `-Restart`) to upgrade a
+running server, then reload the console.
 
 Linux or macOS:
 
@@ -292,7 +294,7 @@ cargo run --release --bin vectors
 ```
 
 ```text
-vectors 0.10.0 | in-memory SQL vector database
+vectors 0.11.0 | in-memory SQL vector database
 Type .tutorial to begin, .help for commands. End SQL with ';'.
 vectors>
 ```
