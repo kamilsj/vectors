@@ -19,6 +19,7 @@ use crate::compute::{ComputeConfig, ComputeRuntime};
 use crate::durable::{PersistentStorage, WalOperation};
 use crate::{storage, Error, Result, Vector, MAX_VECTOR_DIMENSIONS};
 
+mod deletion;
 mod graph;
 mod join;
 mod table_map;
@@ -451,20 +452,24 @@ impl DenseVectorColumn {
                 ));
             }
         }
-        let chunk_index = self.chunks.len();
-        let last_row = first_row + rows.len() - 1;
-        let last_block = last_row / VECTOR_CHUNK_LOOKUP_ROWS;
-        while self.chunk_lookup.len() <= last_block {
-            self.chunk_lookup.push(chunk_index);
-        }
-        self.chunks.push(DenseVectorChunk {
+        self.push_chunk(DenseVectorChunk {
             first_row,
             row_count: rows.len(),
             values,
             norms,
             present: Arc::new(present),
         });
-        self.row_count += rows.len();
+    }
+
+    fn push_chunk(&mut self, chunk: DenseVectorChunk) {
+        debug_assert_eq!(chunk.first_row, self.row_count);
+        debug_assert!(chunk.row_count > 0);
+        let last_block = (chunk.first_row + chunk.row_count - 1) / VECTOR_CHUNK_LOOKUP_ROWS;
+        while self.chunk_lookup.len() <= last_block {
+            self.chunk_lookup.push(self.chunks.len());
+        }
+        self.row_count += chunk.row_count;
+        self.chunks.push(chunk);
         self.storage_id = next_vector_storage_id();
     }
 
@@ -745,9 +750,10 @@ impl Database {
 
     /// Parse and execute one or more semicolon-separated SQL statements.
     ///
-    /// A request containing a write is applied to a private catalog snapshot
-    /// first and committed under one write lock. If any statement or durable
-    /// WAL append fails, none of the writes in that request become visible.
+    /// Writes are validated before publication and committed under one write
+    /// lock. Multi-statement writes use a private catalog snapshot. If any
+    /// statement or durable WAL append fails, none of that request's writes
+    /// become visible.
     pub fn execute(&self, sql: &str) -> Result<Vec<ExecutionResult>> {
         self.execute_inner(sql, None, None)
     }
@@ -820,6 +826,14 @@ impl Database {
         {
             let statement = statements.pop().expect("one statement checked above");
             return Ok(vec![self.execute_persistent_insert(sql, statement)?]);
+        }
+        if expected_revision.is_none()
+            && self.persistent.is_some()
+            && statements.len() == 1
+            && matches!(statements.first(), Some(Statement::Delete { .. }))
+        {
+            let statement = statements.pop().expect("one statement checked above");
+            return Ok(vec![self.execute_persistent_delete(sql, statement)?]);
         }
         if expected_revision.is_none()
             && ((self.persistent.is_none() && statements.len() <= 1)
@@ -1314,25 +1328,8 @@ impl Database {
                 }
                 self.update(table, assignments, selection)
             }
-            Statement::Delete {
-                tables,
-                from,
-                using,
-                selection,
-                returning,
-                order_by,
-                limit,
-            } => {
-                if !tables.is_empty()
-                    || using.is_some()
-                    || returning.is_some()
-                    || !order_by.is_empty()
-                    || limit.is_some()
-                {
-                    return Err(Error::Unsupported(
-                        "multi-table DELETE, USING, RETURNING, ORDER BY, and LIMIT".into(),
-                    ));
-                }
+            statement @ Statement::Delete { .. } => {
+                let (from, selection) = deletion::parse(statement)?;
                 self.delete(from, selection)
             }
             Statement::Drop {
@@ -1486,39 +1483,57 @@ impl Database {
         from: Vec<TableWithJoins>,
         selection: Option<Expr>,
     ) -> Result<ExecutionResult> {
-        if from.len() != 1 || !from[0].joins.is_empty() {
-            return Err(Error::Unsupported(
-                "DELETE with joins or multiple tables".into(),
-            ));
-        }
-        let table_name = table_factor_name(&from[0].relation)?;
+        let table_name = deletion::target(&from)?;
         let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
         let table = catalog
             .tables
-            .get_mut(&table_name)
+            .get(&table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
-
-        // Evaluate the entire predicate before mutating storage so a row-level
-        // error cannot leave a partially applied DELETE.
-        let mut should_delete = Vec::with_capacity(table.rows.len());
-        for row in &table.rows {
-            let context = EvalContext::new(&table.columns, row);
-            let delete = match &selection {
-                Some(expression) => evaluate(expression, &context)?.as_bool()?.unwrap_or(false),
-                None => true,
-            };
-            should_delete.push(delete);
-        }
-        let rows_affected = should_delete.iter().filter(|delete| **delete).count();
-        let mut index = 0;
-        table.rows.retain(|_| {
-            let retain = !should_delete[index];
-            index += 1;
-            retain
-        });
-        rebuild_indexes(table);
+        let mutation = deletion::prepare(table, selection.as_ref())?;
+        let rows_affected = mutation.rows_affected();
         if rows_affected > 0 {
+            mutation.apply(catalog.tables.get_mut(&table_name).expect("table exists"));
             catalog.mark_changed();
+        }
+        Ok(ExecutionResult::Command {
+            tag: "DELETE",
+            rows_affected,
+        })
+    }
+
+    fn execute_persistent_delete(
+        &self,
+        sql: &str,
+        statement: Statement,
+    ) -> Result<ExecutionResult> {
+        let (from, selection) = deletion::parse(statement)?;
+        let table_name = deletion::target(&from)?;
+        let mut catalog = self.catalog.write().map_err(|_| Error::LockPoisoned)?;
+        let table = catalog
+            .tables
+            .get(&table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.clone()))?;
+        let mutation = deletion::prepare(table, selection.as_ref())?;
+        let rows_affected = mutation.rows_affected();
+        let checkpoint_needed = if rows_affected > 0 {
+            let sequence = next_durable_sequence(catalog.durable_sequence)?;
+            let operation = PersistentStorage::prepare_sql(sql)?;
+            let checkpoint_needed = self
+                .persistent
+                .as_ref()
+                .expect("persistent DELETE")
+                .append(sequence, operation)?;
+            mutation.apply(catalog.tables.get_mut(&table_name).expect("table exists"));
+            catalog.durable_sequence = sequence;
+            catalog.revision = sequence;
+            checkpoint_needed
+        } else {
+            false
+        };
+        drop(catalog);
+        if checkpoint_needed {
+            // An acknowledged WAL commit remains successful if maintenance fails.
+            let _ = self.checkpoint();
         }
         Ok(ExecutionResult::Command {
             tag: "DELETE",

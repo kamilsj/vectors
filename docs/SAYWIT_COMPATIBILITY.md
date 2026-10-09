@@ -16,6 +16,16 @@ No Saywit query, schema migration, reindex, or embedding change is required.
 
 ## Incremental indexing
 
+Saywit's turn indexer first deletes previous units by `turn_id`. Fully indexed
+deletion now finds matches without evaluating every row; if no units exist, it
+leaves storage and revision unchanged. Real deletions reuse unaffected vector
+slabs and remain immediately visible after acknowledgement, including across
+WAL recovery.
+The application still issues deletion and insertion as separate requests, so
+the complete turn replacement is not atomic. See the
+[research and next-stage criteria](CHAT_SCALE_RESEARCH.md) and
+[turn-cleanup benchmark](BENCHMARKS.md#chat-turn-cleanup).
+
 Saywit's `insert_units` uses typed `do_update` batches keyed by stable unit IDs.
 Those batches now use the maintained unique-key map to resolve conflicts,
 validate a batch of changed rows, and update only affected scalar-index entries

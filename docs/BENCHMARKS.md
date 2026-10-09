@@ -7,6 +7,60 @@ with another database.
 
 ## Run the benchmark
 
+### Chat-turn cleanup
+
+```sh
+RAYON_NUM_THREADS=4 cargo run --release --locked --example benchmark_chat_cleanup -- 100000 1024 7
+```
+
+Measured on 2026-10-09, Apple M4 Max, 48 GiB RAM, macOS 27.0 arm64,
+Rust 1.99.0, release CPU build with default features. The baseline is `a71b4e7`.
+Both versions use the same harness, built in separate target directories.
+Fixtures contain 20,000 or 100,000 SQL units with 1,024-dimensional synthetic
+embeddings, eight units per turn, 1,000 chats, stable IDs, a profile, and indexed
+chat/turn fields. Initial rows load in 512-row batches.
+
+Three independent process pairs alternate before/after execution order. Each
+operation has one warm-up and seven measured iterations. Missing-turn cleanup
+deletes a nonexistent turn, as Saywit does before indexing new content. Real
+deletion removes eight existing units. Replacement deletes a turn and upserts
+its eight units through the typed API, matching Saywit's separate requests.
+Timers include bound SQL parsing, validation and index maintenance; durable
+operations also include WAL encoding/fsync. Input generation, HTTP, provider
+calls, fixture loading and checkpoints are excluded. The durable fixture is
+checkpointed before measurement; timed writes stay below the automatic
+checkpoint threshold.
+
+Durable results with **100,000 existing units** (median of the three process
+medians/p95 values; each process's seven-sample p95 is its maximum):
+
+| Operation | Before median / p95 (ms) | After median / p95 (ms) | Median speedup |
+| --- | ---: | ---: | ---: |
+| Missing-turn cleanup | 41.093 / 62.719 | 0.005 / 0.007 | 8,219× |
+| Delete 8 units | 44.981 / 45.843 | 5.043 / 5.933 | 8.92× |
+| Replace 8 units | 48.980 / 51.112 | 8.976 / 9.076 | 5.46× |
+
+At 100,000 units, memory-only replacement falls from 27.860 to 0.650 ms
+(42.90×). At 20,000 units, durable replacement falls from 15.982 to 8.005 ms.
+The large no-match ratio reflects removal of whole-table work; it is not an
+end-to-end indexing-throughput claim. Replacements still require two durable
+writes and do not publish atomically as one turn.
+
+[Raw samples and hashes](benchmarks/chat-cleanup-2026-10-09.json) include both
+scales, all memory/durable timings and validation results. Every retained ID
+is checked, and scoped exact ranking/scores match a full-scan/full-sort
+reference. Verification repeats after WAL recovery. Result digests match
+between every before/after process at each scale. The full suite passes 401
+tests (two ignored), including forced-termination deletion recovery; Clippy,
+the release smoke suite and Saywit's real transport check also pass.
+
+These local synthetic measurements do not establish semantic recall,
+production tail latency or ten-million-document capacity. Real deletions still
+compact row metadata and visit scalar-index entries. Writes remain serialized,
+active snapshots may copy metadata, and checkpoints write the catalog. See the
+[research and next-stage acceptance criteria](CHAT_SCALE_RESEARCH.md) for the
+remaining scale and answer-quality work.
+
 ### Chat indexing upserts
 
 ```sh

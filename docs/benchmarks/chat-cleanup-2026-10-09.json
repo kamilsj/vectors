@@ -1,0 +1,1449 @@
+{
+  "date": "2026-10-09",
+  "environment": {
+    "cpu": "Apple M4 Max",
+    "ram_gib": 48,
+    "os": "macOS 27.0 arm64",
+    "rust": "1.99.0 (b940084d7 2026-09-28)",
+    "profile": "release, default features, CPU",
+    "rayon_threads": 4
+  },
+  "baseline_commit": "a71b4e7c3dcd32434ab715ecd21d35192bf9946b",
+  "binaries": {
+    "before": "453dbe64cc98d8e395ef1215b868929bb2f686c411c16b0c3436764b0ec3f1c8",
+    "after": "5374a85fa6485e953082cf2ed393a60f5289312e1301de267d675c830d464c55"
+  },
+  "server_binary_sha256": "16842d394c80d0c1dfc15346b25e8d6738ed9a8f1fecc358cde44ba3d607a62c",
+  "source_hashes": {
+    "src/engine.rs": "6e07b845beb1f5d24f1d3e76f692a51a83806a6de809a0cdf08f1eaae5a2f1a1",
+    "src/engine/deletion.rs": "433f1ac0d9d6d97d44b6848a2ae94f92d8fe879bc6ec1e2465de429a26b6651d",
+    "examples/benchmark_chat_cleanup.rs": "19bf9e106758b77e5fd1d4aa56f02122a3820956fa027c9a7637659281cc2af1"
+  },
+  "methodology": {
+    "process_pairs": 3,
+    "order": "before/after, after/before, before/after at each row count",
+    "measured_iterations": 7,
+    "warmups": 1,
+    "dimensions": 1024,
+    "units_per_turn": 8,
+    "chats": 1000,
+    "seed_batch_rows": 512,
+    "timing": "Bound DELETE parsing/binding, selection and index maintenance; replacement also includes typed upsert of 8 units. Durable timings include WAL encoding/fsync. Excludes input generation, fixture loading, HTTP, providers and checkpoints. Durable fixture checkpointed before measurement; timed writes below automatic checkpoint threshold.",
+    "percentiles": "Median of three process medians and three process p95 values; with seven samples the within-process p95 is the maximum.",
+    "correctness": "Every retained ID checked; exact scoped ranking/scores checked against full-scan/full-sort reference. Durable reopen repeats verification. Output digests match across all variants and processes at each scale.",
+    "build_isolation": "Distinct source trees and target directories; identical benchmark harness SHA-256; distinct baseline/updated binary SHA-256. Final runs were conducted after full tests/build/adapter checks completed.",
+    "command": "RAYON_NUM_THREADS=4 cargo run --release --locked --example benchmark_chat_cleanup -- 100000 1024 7"
+  },
+  "validation": {
+    "tests_passed": 401,
+    "tests_failed": 0,
+    "tests_ignored": 2,
+    "test_command": "cargo test --all-targets --all-features --locked --offline",
+    "clippy": "cargo clippy --all-targets --all-features --locked --offline -- -D warnings: passed",
+    "saywit_adapter": {
+      "status": "passed",
+      "version": "0.10.0",
+      "transport": "Saywit semantic/transport.py",
+      "dimensions": 1024,
+      "checks": [
+        "real HTTP transport",
+        "schema",
+        "normalized bulk insert",
+        "scope before ranking",
+        "profile and turn exclusion",
+        "duplicate IDs",
+        "bound quoted IDs",
+        "500-chat scope",
+        "exact cosine scores",
+        "idempotent retry",
+        "atomic rejected batch",
+        "edit and chat move",
+        "durable restart",
+        "deletion"
+      ],
+      "provider_calls": 0,
+      "user_messages_read": 0,
+      "transport_sha256": "2e0b9a487b26c899dec6b9c3fe01ff7758a8e1695861e3d562d5fdc92f0e876e"
+    },
+    "release_smoke": "PASS vectors-server 0.10.0: embedded PDF/chat UI, capacity and chat APIs, authenticated SQL/vector/GraphRAG APIs, seed document caps, typed filters, relationships, join chains, restart, local provider key files and environment precedence"
+  },
+  "limitations": [
+    "Synthetic vectors do not measure semantic recall, provider latency or production concurrency.",
+    "Validated at 100000 SQL units, not ten million documents. GraphRAG limit remains 10000 chunks per collection.",
+    "Delete plus insert are separate requests, so turn replacement is not atomic.",
+    "Real deletes still compact row metadata and visit scalar-index entries; writes remain serialized. Active snapshots can copy table metadata; checkpoints write the whole catalog.",
+    "Seven samples per process do not estimate a production tail-latency distribution."
+  ],
+  "summary": [
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "operation": "missing_turn",
+      "before_median_ms": 5.6423749999999995,
+      "before_p95_ms": 7.793917,
+      "after_median_ms": 0.00725,
+      "after_p95_ms": 0.008124999999999999,
+      "median_speedup": 778.258620689655
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "operation": "delete_turn",
+      "before_median_ms": 5.393833,
+      "before_p95_ms": 5.732125,
+      "after_median_ms": 0.16325,
+      "after_p95_ms": 0.278458,
+      "median_speedup": 33.04032465543644
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "memory",
+      "operation": "replace_turn",
+      "before_median_ms": 5.354208,
+      "before_p95_ms": 5.538917,
+      "after_median_ms": 0.175791,
+      "after_p95_ms": 0.183875,
+      "median_speedup": 30.45780500708227
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "operation": "missing_turn",
+      "before_median_ms": 8.006667,
+      "before_p95_ms": 11.492166999999998,
+      "after_median_ms": 0.004875,
+      "after_p95_ms": 0.00725,
+      "median_speedup": 1642.3932307692307
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "operation": "delete_turn",
+      "before_median_ms": 12.047541,
+      "before_p95_ms": 12.146625,
+      "after_median_ms": 4.043958,
+      "after_p95_ms": 4.6472500000000005,
+      "median_speedup": 2.9791459258478947
+    },
+    {
+      "existing_rows": 20000,
+      "storage": "durable",
+      "operation": "replace_turn",
+      "before_median_ms": 15.982375,
+      "before_p95_ms": 16.637708,
+      "after_median_ms": 8.004666,
+      "after_p95_ms": 8.221917000000001,
+      "median_speedup": 1.9966323391881684
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "operation": "missing_turn",
+      "before_median_ms": 29.060042000000003,
+      "before_p95_ms": 41.228125,
+      "after_median_ms": 0.006958,
+      "after_p95_ms": 0.008584,
+      "median_speedup": 4176.493532624318
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "operation": "delete_turn",
+      "before_median_ms": 28.904374999999998,
+      "before_p95_ms": 29.713292,
+      "after_median_ms": 0.5890420000000001,
+      "after_p95_ms": 0.728583,
+      "median_speedup": 49.07014270629258
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "memory",
+      "operation": "replace_turn",
+      "before_median_ms": 27.860375,
+      "before_p95_ms": 28.87125,
+      "after_median_ms": 0.6495,
+      "after_p95_ms": 0.7087089999999999,
+      "median_speedup": 42.89511162432641
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "operation": "missing_turn",
+      "before_median_ms": 41.09325,
+      "before_p95_ms": 62.71879199999999,
+      "after_median_ms": 0.005,
+      "after_p95_ms": 0.007375,
+      "median_speedup": 8218.65
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "operation": "delete_turn",
+      "before_median_ms": 44.981042,
+      "before_p95_ms": 45.84275,
+      "after_median_ms": 5.0426660000000005,
+      "after_p95_ms": 5.933292,
+      "median_speedup": 8.920091475421929
+    },
+    {
+      "existing_rows": 100000,
+      "storage": "durable",
+      "operation": "replace_turn",
+      "before_median_ms": 48.979625,
+      "before_p95_ms": 51.1115,
+      "after_median_ms": 8.976458999999998,
+      "after_p95_ms": 9.076167,
+      "median_speedup": 5.456452817308028
+    }
+  ],
+  "runs": [
+    {
+      "variant": "before",
+      "pair": 1,
+      "position_in_pair": 1,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 6.674875,
+          "operation": "missing_turn",
+          "p95_ms": 7.793917,
+          "samples_ms": [
+            7.572833,
+            7.196083,
+            6.674875,
+            5.918833,
+            5.727333000000001,
+            5.482625,
+            7.793917
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 5.393833,
+          "operation": "delete_turn",
+          "p95_ms": 5.776125,
+          "samples_ms": [
+            5.068334,
+            5.776125,
+            5.393833,
+            5.3049159999999995,
+            5.2902499999999995,
+            5.412542,
+            5.512166
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 5.354208,
+          "operation": "replace_turn",
+          "p95_ms": 6.207291000000001,
+          "samples_ms": [
+            4.870959,
+            6.207291000000001,
+            5.572833,
+            5.26875,
+            5.3638330000000005,
+            5.354208,
+            5.263375
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 7.72775,
+          "operation": "missing_turn",
+          "p95_ms": 10.957334000000001,
+          "samples_ms": [
+            10.957334000000001,
+            7.6773750000000005,
+            7.537917,
+            7.72775,
+            7.591792,
+            7.784834,
+            7.840167
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 12.088375000000001,
+          "operation": "delete_turn",
+          "p95_ms": 12.130791,
+          "samples_ms": [
+            12.088375000000001,
+            11.820792,
+            12.091583,
+            11.966292,
+            12.097125,
+            11.925,
+            12.130791
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 15.982375,
+          "operation": "replace_turn",
+          "p95_ms": 16.637708,
+          "samples_ms": [
+            15.82925,
+            16.540292,
+            16.637708,
+            16.113042,
+            15.815625,
+            15.982375,
+            15.774625
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "be2a546c4f101300",
+      "warmups": 1
+    },
+    {
+      "variant": "after",
+      "pair": 1,
+      "position_in_pair": 2,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 0.007125,
+          "operation": "missing_turn",
+          "p95_ms": 0.008708,
+          "samples_ms": [
+            0.007708,
+            0.008375,
+            0.005875,
+            0.006459,
+            0.007125,
+            0.004791,
+            0.008708
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.176917,
+          "operation": "delete_turn",
+          "p95_ms": 0.19804100000000002,
+          "samples_ms": [
+            0.19804100000000002,
+            0.185875,
+            0.181667,
+            0.176375,
+            0.176917,
+            0.164,
+            0.175959
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.16883299999999998,
+          "operation": "replace_turn",
+          "p95_ms": 0.295541,
+          "samples_ms": [
+            0.295541,
+            0.17862499999999998,
+            0.170709,
+            0.15729200000000002,
+            0.155333,
+            0.165125,
+            0.16883299999999998
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.004875,
+          "operation": "missing_turn",
+          "p95_ms": 0.00675,
+          "samples_ms": [
+            0.00675,
+            0.005083000000000001,
+            0.004958,
+            0.00475,
+            0.004667,
+            0.004875,
+            0.004791
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 3.977833,
+          "operation": "delete_turn",
+          "p95_ms": 4.804666,
+          "samples_ms": [
+            4.804666,
+            3.9600420000000005,
+            4.155958,
+            3.887209,
+            3.9644169999999996,
+            3.977833,
+            4.006459
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 7.976541999999999,
+          "operation": "replace_turn",
+          "p95_ms": 8.221917000000001,
+          "samples_ms": [
+            8.053542,
+            7.909958,
+            8.204708,
+            7.727959,
+            7.976541999999999,
+            8.221917000000001,
+            7.833915999999999
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "be2a546c4f101300",
+      "warmups": 1
+    },
+    {
+      "variant": "after",
+      "pair": 2,
+      "position_in_pair": 1,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 0.00725,
+          "operation": "missing_turn",
+          "p95_ms": 0.008124999999999999,
+          "samples_ms": [
+            0.007375,
+            0.007459,
+            0.0055,
+            0.008124999999999999,
+            0.00725,
+            0.005208,
+            0.006167000000000001
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.16325,
+          "operation": "delete_turn",
+          "p95_ms": 0.28695800000000005,
+          "samples_ms": [
+            0.28695800000000005,
+            0.17408300000000002,
+            0.16745900000000002,
+            0.15341700000000003,
+            0.16325,
+            0.157542,
+            0.15437499999999998
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.18000000000000002,
+          "operation": "replace_turn",
+          "p95_ms": 0.183875,
+          "samples_ms": [
+            0.182375,
+            0.182916,
+            0.183875,
+            0.18000000000000002,
+            0.179208,
+            0.17875000000000002,
+            0.17825
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.0049169999999999995,
+          "operation": "missing_turn",
+          "p95_ms": 0.007458,
+          "samples_ms": [
+            0.007458,
+            0.005875,
+            0.0052499999999999995,
+            0.004875,
+            0.0049169999999999995,
+            0.004667,
+            0.0048330000000000005
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 4.043958,
+          "operation": "delete_turn",
+          "p95_ms": 4.4905,
+          "samples_ms": [
+            4.380375,
+            4.4905,
+            4.030457999999999,
+            4.128958,
+            4.008333,
+            4.016249999999999,
+            4.043958
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 8.846708,
+          "operation": "replace_turn",
+          "p95_ms": 9.155208,
+          "samples_ms": [
+            8.840667,
+            8.072709000000001,
+            8.907833,
+            7.966666000000001,
+            8.89275,
+            9.155208,
+            8.846708
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "be2a546c4f101300",
+      "warmups": 1
+    },
+    {
+      "variant": "before",
+      "pair": 2,
+      "position_in_pair": 2,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 5.6423749999999995,
+          "operation": "missing_turn",
+          "p95_ms": 8.237167,
+          "samples_ms": [
+            8.237167,
+            6.895957999999999,
+            6.0693340000000005,
+            5.631333,
+            5.6423749999999995,
+            5.6133750000000004,
+            5.639
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 5.512292,
+          "operation": "delete_turn",
+          "p95_ms": 5.732125,
+          "samples_ms": [
+            5.673875,
+            5.732125,
+            5.682458,
+            5.377708,
+            5.512292,
+            5.4510000000000005,
+            5.487749999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 5.415625,
+          "operation": "replace_turn",
+          "p95_ms": 5.538917,
+          "samples_ms": [
+            5.415625,
+            5.298708,
+            5.385041,
+            5.458958,
+            5.440167,
+            5.538917,
+            5.41125
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 8.022625,
+          "operation": "missing_turn",
+          "p95_ms": 11.708167,
+          "samples_ms": [
+            11.708167,
+            9.309958,
+            7.946458,
+            8.229541999999999,
+            7.983041999999999,
+            8.022625,
+            8.01725
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 12.010666,
+          "operation": "delete_turn",
+          "p95_ms": 12.146625,
+          "samples_ms": [
+            12.025333,
+            11.966125,
+            12.000166,
+            11.948416,
+            12.010666,
+            12.014792,
+            12.146625
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 15.942042,
+          "operation": "replace_turn",
+          "p95_ms": 16.203958,
+          "samples_ms": [
+            15.772499999999999,
+            16.203958,
+            15.992333,
+            15.942042,
+            15.903334000000001,
+            15.923083000000002,
+            16.073833
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "be2a546c4f101300",
+      "warmups": 1
+    },
+    {
+      "variant": "before",
+      "pair": 3,
+      "position_in_pair": 1,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 5.536333,
+          "operation": "missing_turn",
+          "p95_ms": 7.11925,
+          "samples_ms": [
+            7.11925,
+            6.099042,
+            5.630666000000001,
+            5.3825829999999995,
+            5.340707999999999,
+            5.536333,
+            5.491875
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 5.094625000000001,
+          "operation": "delete_turn",
+          "p95_ms": 5.164333,
+          "samples_ms": [
+            5.164333,
+            5.059,
+            5.103167,
+            5.151417,
+            5.068833,
+            5.094625000000001,
+            5.064082999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 5.117084,
+          "operation": "replace_turn",
+          "p95_ms": 5.311625,
+          "samples_ms": [
+            5.042709,
+            5.046125,
+            5.117084,
+            5.113958,
+            5.130625,
+            5.188375000000001,
+            5.311625
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 8.006667,
+          "operation": "missing_turn",
+          "p95_ms": 11.492166999999998,
+          "samples_ms": [
+            11.492166999999998,
+            9.214292,
+            7.900792,
+            8.006667,
+            7.937792000000001,
+            8.062167,
+            8.00575
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 12.047541,
+          "operation": "delete_turn",
+          "p95_ms": 12.210792,
+          "samples_ms": [
+            12.047541,
+            12.022375,
+            12.088583,
+            12.066125000000001,
+            11.953458,
+            12.210792,
+            11.712292
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 16.014791,
+          "operation": "replace_turn",
+          "p95_ms": 17.056542,
+          "samples_ms": [
+            15.923625,
+            16.014791,
+            15.993542,
+            16.037792,
+            16.864292,
+            17.056542,
+            15.938583
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "be2a546c4f101300",
+      "warmups": 1
+    },
+    {
+      "variant": "after",
+      "pair": 3,
+      "position_in_pair": 2,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 20000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 0.00725,
+          "operation": "missing_turn",
+          "p95_ms": 0.007917,
+          "samples_ms": [
+            0.007459,
+            0.006958,
+            0.005541,
+            0.007625,
+            0.00725,
+            0.0048330000000000005,
+            0.007917
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.160167,
+          "operation": "delete_turn",
+          "p95_ms": 0.278458,
+          "samples_ms": [
+            0.278458,
+            0.178875,
+            0.177833,
+            0.156416,
+            0.160167,
+            0.15775,
+            0.154167
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.175791,
+          "operation": "replace_turn",
+          "p95_ms": 0.18212499999999998,
+          "samples_ms": [
+            0.17925,
+            0.18212499999999998,
+            0.180166,
+            0.169875,
+            0.167458,
+            0.172042,
+            0.175791
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.004834,
+          "operation": "missing_turn",
+          "p95_ms": 0.00725,
+          "samples_ms": [
+            0.00725,
+            0.005666,
+            0.0049169999999999995,
+            0.004834,
+            0.004625,
+            0.004625,
+            0.0047079999999999995
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 4.09675,
+          "operation": "delete_turn",
+          "p95_ms": 4.6472500000000005,
+          "samples_ms": [
+            3.9686670000000004,
+            4.1053749999999996,
+            4.274125,
+            4.6472500000000005,
+            3.9764170000000005,
+            3.7409589999999997,
+            4.09675
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 8.004666,
+          "operation": "replace_turn",
+          "p95_ms": 8.149417000000001,
+          "samples_ms": [
+            8.012083,
+            8.014958,
+            7.94625,
+            8.004666,
+            7.994541000000001,
+            7.917375000000001,
+            8.149417000000001
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "be2a546c4f101300",
+      "warmups": 1
+    },
+    {
+      "variant": "before",
+      "pair": 1,
+      "position_in_pair": 1,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 28.016333,
+          "operation": "missing_turn",
+          "p95_ms": 41.228125,
+          "samples_ms": [
+            41.228125,
+            29.304792,
+            28.83525,
+            27.465416,
+            28.016333,
+            27.525792,
+            27.181083
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 28.015458,
+          "operation": "delete_turn",
+          "p95_ms": 29.90375,
+          "samples_ms": [
+            28.281083,
+            28.241875,
+            27.848666,
+            27.175834,
+            28.015458,
+            29.90375,
+            27.489791
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 27.772374999999997,
+          "operation": "replace_turn",
+          "p95_ms": 28.104167,
+          "samples_ms": [
+            27.248084,
+            28.104167,
+            27.411250000000003,
+            27.741584,
+            27.772374999999997,
+            28.01,
+            28.035083
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 41.09325,
+          "operation": "missing_turn",
+          "p95_ms": 62.71879199999999,
+          "samples_ms": [
+            62.71879199999999,
+            49.446667,
+            44.505916,
+            40.54125,
+            39.463334,
+            41.09325,
+            40.386708
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 44.981042,
+          "operation": "delete_turn",
+          "p95_ms": 45.837333,
+          "samples_ms": [
+            45.837333,
+            44.151041,
+            44.981042,
+            45.454042,
+            44.719541,
+            45.266334,
+            44.618249999999996
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 48.979625,
+          "operation": "replace_turn",
+          "p95_ms": 52.840167,
+          "samples_ms": [
+            49.114375,
+            49.079792,
+            48.979625,
+            48.787334,
+            48.688584,
+            52.840167,
+            47.083459
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "a2cb10f398f732e4",
+      "warmups": 1
+    },
+    {
+      "variant": "after",
+      "pair": 1,
+      "position_in_pair": 2,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 0.006958,
+          "operation": "missing_turn",
+          "p95_ms": 0.008,
+          "samples_ms": [
+            0.008,
+            0.007500000000000001,
+            0.005833,
+            0.006584,
+            0.007333,
+            0.006958,
+            0.005542
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.60925,
+          "operation": "delete_turn",
+          "p95_ms": 0.728583,
+          "samples_ms": [
+            0.728583,
+            0.6120420000000001,
+            0.606792,
+            0.613417,
+            0.607708,
+            0.60925,
+            0.5984999999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.605542,
+          "operation": "replace_turn",
+          "p95_ms": 0.6162500000000001,
+          "samples_ms": [
+            0.609167,
+            0.5984999999999999,
+            0.599125,
+            0.6162500000000001,
+            0.605542,
+            0.607541,
+            0.5994579999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.005083000000000001,
+          "operation": "missing_turn",
+          "p95_ms": 0.007375,
+          "samples_ms": [
+            0.007375,
+            0.005416000000000001,
+            0.005083000000000001,
+            0.00475,
+            0.0045839999999999995,
+            0.0047090000000000005,
+            0.005125
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 5.0426660000000005,
+          "operation": "delete_turn",
+          "p95_ms": 5.432,
+          "samples_ms": [
+            5.432,
+            4.556458,
+            4.8902090000000005,
+            5.067708,
+            4.8412500000000005,
+            5.0426660000000005,
+            5.223625
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 9.054292,
+          "operation": "replace_turn",
+          "p95_ms": 10.686041,
+          "samples_ms": [
+            10.686041,
+            9.094875,
+            8.771958,
+            9.054292,
+            8.9055,
+            9.228792,
+            8.838042000000002
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "a2cb10f398f732e4",
+      "warmups": 1
+    },
+    {
+      "variant": "after",
+      "pair": 2,
+      "position_in_pair": 1,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 0.007875,
+          "operation": "missing_turn",
+          "p95_ms": 0.00925,
+          "samples_ms": [
+            0.00925,
+            0.008959,
+            0.005541,
+            0.008,
+            0.007875,
+            0.00575,
+            0.007833
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.5890420000000001,
+          "operation": "delete_turn",
+          "p95_ms": 0.620833,
+          "samples_ms": [
+            0.620833,
+            0.597917,
+            0.5890420000000001,
+            0.593417,
+            0.585542,
+            0.5782079999999999,
+            0.588167
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.685625,
+          "operation": "replace_turn",
+          "p95_ms": 0.724167,
+          "samples_ms": [
+            0.663833,
+            0.7214160000000001,
+            0.724167,
+            0.685625,
+            0.708291,
+            0.674917,
+            0.666667
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.004958,
+          "operation": "missing_turn",
+          "p95_ms": 0.007500000000000001,
+          "samples_ms": [
+            0.007500000000000001,
+            0.005541,
+            0.0050420000000000005,
+            0.004958,
+            0.004791,
+            0.004792,
+            0.004834
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 4.9341669999999995,
+          "operation": "delete_turn",
+          "p95_ms": 5.933292,
+          "samples_ms": [
+            5.933292,
+            4.9341669999999995,
+            4.7911660000000005,
+            5.280042000000001,
+            4.678708,
+            5.351084,
+            4.8155
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 8.976458999999998,
+          "operation": "replace_turn",
+          "p95_ms": 9.076167,
+          "samples_ms": [
+            9.076167,
+            8.976458999999998,
+            8.948208,
+            9.013042,
+            8.860583,
+            8.926959,
+            8.985875
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "a2cb10f398f732e4",
+      "warmups": 1
+    },
+    {
+      "variant": "before",
+      "pair": 2,
+      "position_in_pair": 2,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 29.060042000000003,
+          "operation": "missing_turn",
+          "p95_ms": 40.639584,
+          "samples_ms": [
+            40.639584,
+            29.930374999999998,
+            27.940917,
+            29.163041,
+            28.499416999999998,
+            27.758833,
+            29.060042000000003
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 28.904374999999998,
+          "operation": "delete_turn",
+          "p95_ms": 29.713292,
+          "samples_ms": [
+            29.713292,
+            29.143208,
+            27.678125,
+            28.375208,
+            28.398834,
+            28.904374999999998,
+            29.322916
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 27.860375,
+          "operation": "replace_turn",
+          "p95_ms": 28.87125,
+          "samples_ms": [
+            27.7495,
+            27.773791,
+            27.7315,
+            28.561291999999998,
+            28.87125,
+            27.860375,
+            28.601208
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 42.830459000000005,
+          "operation": "missing_turn",
+          "p95_ms": 67.255334,
+          "samples_ms": [
+            67.255334,
+            50.674875,
+            41.703584,
+            47.834500000000006,
+            42.830459000000005,
+            40.405708,
+            40.983167
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 47.242042,
+          "operation": "delete_turn",
+          "p95_ms": 54.966165999999994,
+          "samples_ms": [
+            54.966165999999994,
+            44.917375,
+            48.002583,
+            46.09175,
+            46.770875000000004,
+            51.296875,
+            47.242042
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 50.111084,
+          "operation": "replace_turn",
+          "p95_ms": 51.1115,
+          "samples_ms": [
+            50.656084,
+            50.111084,
+            50.038708,
+            50.067625,
+            51.1115,
+            50.912958,
+            49.666125
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "a2cb10f398f732e4",
+      "warmups": 1
+    },
+    {
+      "variant": "before",
+      "pair": 3,
+      "position_in_pair": 1,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 29.439125,
+          "operation": "missing_turn",
+          "p95_ms": 54.255958,
+          "samples_ms": [
+            54.255958,
+            30.060541999999998,
+            29.439125,
+            28.896541000000003,
+            29.284041000000002,
+            29.767374999999998,
+            28.984416999999997
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 29.419875,
+          "operation": "delete_turn",
+          "p95_ms": 29.674458,
+          "samples_ms": [
+            28.813833,
+            28.885666,
+            29.674458,
+            29.419875,
+            29.502375,
+            29.493833000000002,
+            29.115708
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 29.102125,
+          "operation": "replace_turn",
+          "p95_ms": 29.594458,
+          "samples_ms": [
+            29.594458,
+            29.102125,
+            28.657999999999998,
+            29.259375000000002,
+            28.476959,
+            29.432750000000002,
+            28.827083
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 40.95575,
+          "operation": "missing_turn",
+          "p95_ms": 60.205667,
+          "samples_ms": [
+            60.205667,
+            47.441667,
+            40.387541999999996,
+            48.843458,
+            40.316542,
+            40.44975,
+            40.95575
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 44.902249999999995,
+          "operation": "delete_turn",
+          "p95_ms": 45.84275,
+          "samples_ms": [
+            45.84275,
+            44.902249999999995,
+            44.687458,
+            44.24525,
+            44.945167,
+            44.964833000000006,
+            44.048292000000004
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 48.90125,
+          "operation": "replace_turn",
+          "p95_ms": 49.022208,
+          "samples_ms": [
+            49.019167,
+            48.963291,
+            48.071458,
+            48.90125,
+            47.972292,
+            48.131292,
+            49.022208
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "a2cb10f398f732e4",
+      "warmups": 1
+    },
+    {
+      "variant": "after",
+      "pair": 3,
+      "position_in_pair": 2,
+      "correctness": "every retained ID and exact scoped rank/score checked; durable recovery matches",
+      "dimensions": 1024,
+      "existing_rows": 100000,
+      "iterations": 7,
+      "measurements": [
+        {
+          "median_ms": 0.00625,
+          "operation": "missing_turn",
+          "p95_ms": 0.008584,
+          "samples_ms": [
+            0.007458,
+            0.008584,
+            0.00625,
+            0.005083000000000001,
+            0.008542000000000001,
+            0.004958,
+            0.005584
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.588792,
+          "operation": "delete_turn",
+          "p95_ms": 0.791708,
+          "samples_ms": [
+            0.7780419999999999,
+            0.675791,
+            0.5768340000000001,
+            0.577583,
+            0.588792,
+            0.586458,
+            0.791708
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.6495,
+          "operation": "replace_turn",
+          "p95_ms": 0.7087089999999999,
+          "samples_ms": [
+            0.6495,
+            0.605375,
+            0.608375,
+            0.617834,
+            0.683458,
+            0.675458,
+            0.7087089999999999
+          ],
+          "storage": "memory"
+        },
+        {
+          "median_ms": 0.005,
+          "operation": "missing_turn",
+          "p95_ms": 0.007292,
+          "samples_ms": [
+            0.007292,
+            0.0054589999999999994,
+            0.0051660000000000005,
+            0.005,
+            0.004667,
+            0.0049169999999999995,
+            0.0049169999999999995
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 5.105834,
+          "operation": "delete_turn",
+          "p95_ms": 5.967875,
+          "samples_ms": [
+            5.967875,
+            4.772,
+            5.113,
+            4.986417,
+            5.121625,
+            4.846125,
+            5.105834
+          ],
+          "storage": "durable"
+        },
+        {
+          "median_ms": 8.969167,
+          "operation": "replace_turn",
+          "p95_ms": 9.008125,
+          "samples_ms": [
+            9.008125,
+            8.972667,
+            8.959167,
+            8.927791,
+            8.969167,
+            8.9875,
+            8.9685
+          ],
+          "storage": "durable"
+        }
+      ],
+      "provider_calls": 0,
+      "result_digest": "a2cb10f398f732e4",
+      "warmups": 1
+    }
+  ]
+}

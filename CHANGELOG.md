@@ -12,6 +12,8 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Added
 
+- A research-backed chat-scale design note and a repeatable turn-cleanup
+  benchmark, including deletion, replacement and recovery checks.
 - A repeatable chat-indexing benchmark covering append, edit and retry batches
   with durable recovery and exact retrieval checks.
 - A Saywit adapter compatibility check against a temporary durable server and
@@ -19,6 +21,11 @@ uses that section as the curated introduction to the GitHub release notes.
 
 ### Changed
 
+- Indexed DELETE predicates locate complete matches before mutable table access.
+  No-match cleanup avoids copies, rebuilds and WAL writes. Real deletes retain
+  unaffected vector slabs and remap scalar indexes without reallocating their
+  keys. Single durable deletes avoid a staged table copy while preserving
+  atomic publication after WAL synchronization.
 - Typed upserts that retain their conflict key resolve conflicts through unique
   indexes and apply validated row changes incrementally. Fresh chat units avoid
   copying the existing table; edits rebuild only affected vector slabs. Scalar

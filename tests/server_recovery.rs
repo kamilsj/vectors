@@ -169,6 +169,44 @@ fn acknowledged_http_write_survives_forced_server_termination() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[test]
+fn acknowledged_indexed_delete_survives_forced_server_termination() {
+    let directory = temporary_directory();
+    let port = available_port();
+    let mut server = Server::start(&directory, port);
+    server.wait_until_ready();
+    let response = request(
+        port,
+        "POST",
+        "/v1/sql",
+        r#"{"sql":"CREATE TABLE units(id INTEGER PRIMARY KEY,turn_id TEXT,embedding VECTOR(2)); CREATE INDEX turns ON units(turn_id); INSERT INTO units VALUES(1,'deleted',[1,0]),(2,'kept',[0,1])"}"#,
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let response = request(
+        port,
+        "POST",
+        "/v1/sql",
+        r#"{"sql":"DELETE FROM units WHERE turn_id=$1","parameters":["deleted"]}"#,
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("\"rows_affected\":1"), "{response}");
+    server.kill();
+    let mut recovered = Server::start(&directory, port);
+    recovered.wait_until_ready();
+    let response = request(
+        port,
+        "POST",
+        "/v1/sql",
+        r#"{"sql":"SELECT id FROM units ORDER BY cosine_distance(embedding,[1,0]) LIMIT 10"}"#,
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let result: serde_json::Value =
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(result["results"][0]["rows"], serde_json::json!([[2]]));
+    recovered.kill();
+    fs::remove_dir_all(directory).unwrap();
+}
+
 struct Server {
     child: Option<Child>,
     port: u16,

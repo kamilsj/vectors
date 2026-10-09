@@ -60,6 +60,8 @@ strict source evidence, speech-ready responses and repeatable answer checks.
 For large deployments, read the [ten-million-document scaling plan](docs/SCALING.md).
 It separates current tested limits from the storage, indexing and distributed
 validation required for that target.
+The [chat-scale research note](docs/CHAT_SCALE_RESEARCH.md) connects primary
+research to measured Saywit improvements and the remaining scaling work.
 
 ## Install and launch
 
